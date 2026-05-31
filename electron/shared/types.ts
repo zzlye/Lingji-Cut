@@ -11,11 +11,14 @@ export interface ElectronAPI {
   backend: {
     getUrl: () => Promise<string>
   }
+  dialog: {
+    selectDirectory: (defaultPath?: string) => Promise<string | null>
+  }
 }
 
 /** 全局 window 对象扩展 */
 declare global {
   interface Window {
-    electron: ElectronAPI
+    electron?: ElectronAPI
   }
 }

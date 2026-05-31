@@ -128,6 +128,13 @@ export const subtitleApi = {
       body: JSON.stringify(preset),
     }),
 
+  /** 更新字幕预设 */
+  updatePreset: (id: number, preset: Partial<import('@/types').SubtitlePreset>) =>
+    request<import('@/types').SubtitlePreset>(`/subtitles/presets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(preset),
+    }),
+
   /** 删除字幕预设 */
   deletePreset: (id: number) =>
     request<{ message: string }>(`/subtitles/presets/${id}`, { method: 'DELETE' }),
@@ -191,5 +198,16 @@ export const exportApi = {
 export const settingsApi = {
   /** 获取项目文件夹 */
   paths: () =>
-    request<Record<string, { path: string; exists: boolean }>>('/settings/paths'),
+    request<import('@/types').ProjectPaths>('/settings/paths'),
+
+  /** 更新项目文件夹 */
+  updatePaths: (projectRoot: string) =>
+    request<import('@/types').ProjectPaths>('/settings/paths', {
+      method: 'PUT',
+      body: JSON.stringify({ project_root: projectRoot }),
+    }),
+
+  /** 恢复默认项目文件夹 */
+  resetPaths: () =>
+    request<import('@/types').ProjectPaths>('/settings/paths/reset', { method: 'POST' }),
 }

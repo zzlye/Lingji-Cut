@@ -7,6 +7,7 @@ import json
 import subprocess
 from typing import Optional, Callable
 from ..utils import get_logger
+from .paths import ensure_project_dirs
 
 # 日志记录器
 logger = get_logger("downloader")
@@ -15,11 +16,6 @@ logger = get_logger("downloader")
 TOOLS_DIR = r"D:\tools"
 YT_DLP_PATH = os.path.join(TOOLS_DIR, "yt-dlp", "yt-dlp.exe")
 FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
-
-# 下载输出目录
-DOWNLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "downloads")
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
 
 class Downloader:
     """yt-dlp 下载封装类"""
@@ -166,7 +162,7 @@ class Downloader:
         返回：下载后的文件路径
         """
         if output_dir is None:
-            output_dir = DOWNLOAD_DIR
+            output_dir = ensure_project_dirs()["downloads_dir"]
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -262,7 +258,7 @@ class Downloader:
     ) -> str:
         """下载字幕文件"""
         if output_dir is None:
-            output_dir = DOWNLOAD_DIR
+            output_dir = ensure_project_dirs()["downloads_dir"]
 
         os.makedirs(output_dir, exist_ok=True)
 

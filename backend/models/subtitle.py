@@ -20,16 +20,22 @@ class SubtitlePreset(Base):
     is_default = Column(Boolean, default=False)
     # 单行/双行模式（single、double）
     line_mode = Column(String(20), default="double")
+    # 字幕语言代码或自定义语言名称
+    language = Column(String(50), default="auto")
     # 字体名称
     font_name = Column(String(100), default="Microsoft YaHei")
     # 字体大小
     font_size = Column(Integer, default=48)
     # 字体颜色（十六进制）
     font_color = Column(String(20), default="#FFFFFF")
+    # 双行字幕第二行或强调字幕颜色
+    secondary_color = Column(String(20), default="#FDE68A")
     # 描边颜色
     outline_color = Column(String(20), default="#000000")
     # 描边宽度
     outline_width = Column(Integer, default=2)
+    # 是否启用阴影
+    shadow_enabled = Column(Boolean, default=True)
     # 阴影颜色
     shadow_color = Column(String(20), default="#80000000")
     # 阴影偏移 X

@@ -67,13 +67,36 @@ export interface SubtitlePreset {
   name: string
   is_default: boolean
   line_mode: 'single' | 'double'
+  language: string
   font_name: string
   font_size: number
   font_color: string
+  secondary_color: string
   outline_color: string
   outline_width: number
+  shadow_enabled: boolean
+  shadow_color: string
+  shadow_x: number
+  shadow_y: number
+  background_alpha: number
   position: 'bottom' | 'top' | 'center'
   margin_v: number
+}
+
+/** 路径信息 */
+export interface PathInfo {
+  path: string
+  exists: boolean
+}
+
+/** 项目文件夹设置 */
+export interface ProjectPaths {
+  project_root: PathInfo
+  default_project_root: PathInfo
+  data_dir: PathInfo
+  downloads_dir: PathInfo
+  output_dir: PathInfo
+  exports_dir: PathInfo
 }
 
 /** API 配置 */

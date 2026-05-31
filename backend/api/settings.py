@@ -1,30 +1,40 @@
 # backend/api/settings.py
-# 设置 API 路由 - 提供项目文件夹信息
+# 设置 API 路由 - 提供项目文件夹保存和子目录创建
 
-import os
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from fastapi import APIRouter
+from ..core.paths import get_project_paths, reset_project_root, save_project_root
 
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
-# 项目根目录
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+class ProjectPathUpdate(BaseModel):
+    """项目目录更新请求"""
+    project_root: str
 
 @router.get("/paths")
 async def get_paths():
     """获取项目目录，并确保常用子文件夹自动创建"""
-    for dirname in ("data", "downloads", "output", "exports"):
-        os.makedirs(os.path.join(PROJECT_ROOT, dirname), exist_ok=True)
+    return get_project_paths(create=True)
 
-    paths = {
-        "project_root": PROJECT_ROOT,
-    }
 
-    return {
-        key: {
-            "path": value,
-            "exists": os.path.exists(value),
-        }
-        for key, value in paths.items()
-    }
+@router.put("/paths")
+async def update_paths(request: ProjectPathUpdate):
+    """保存项目目录，并自动创建业务子文件夹"""
+    try:
+        save_project_root(request.project_root)
+        return get_project_paths(create=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"项目目录不可用: {exc}") from exc
+
+
+@router.post("/paths/reset")
+async def reset_paths():
+    """恢复默认项目目录"""
+    try:
+        reset_project_root()
+        return get_project_paths(create=True)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"恢复默认目录失败: {exc}") from exc

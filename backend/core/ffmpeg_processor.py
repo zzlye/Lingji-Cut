@@ -6,6 +6,7 @@ import random
 import subprocess
 from typing import Any, Optional
 from ..utils import get_logger
+from .paths import ensure_project_dirs
 
 # 日志记录器
 logger = get_logger("ffmpeg")
@@ -13,11 +14,6 @@ logger = get_logger("ffmpeg")
 # 工具路径配置
 TOOLS_DIR = r"D:\tools"
 FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
-
-# 输出目录
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 
 class FFmpegProcessor:
     """FFmpeg 视频处理封装类"""
@@ -49,7 +45,7 @@ class FFmpegProcessor:
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             suffix = "preview" if preview else "enhanced"
-            output_path = os.path.join(OUTPUT_DIR, f"{base_name}_{suffix}.mp4")
+            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_{suffix}.mp4")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -196,7 +192,7 @@ class FFmpegProcessor:
         # 生成输出路径
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
-            output_path = os.path.join(OUTPUT_DIR, f"{base_name}_subtitled.mp4")
+            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_subtitled.mp4")
 
         # 构建字幕滤镜
         subtitle_filter = self._build_subtitle_filter(subtitle_path, preset)
@@ -255,14 +251,28 @@ class FFmpegProcessor:
             color = preset["font_color"].lstrip("#")
             bgr = color[4:6] + color[2:4] + color[0:2]
             style_parts.append(f"PrimaryColour=&H00{bgr}")
+        if "secondary_color" in preset:
+            color = preset["secondary_color"].lstrip("#")
+            bgr = color[4:6] + color[2:4] + color[0:2]
+            style_parts.append(f"SecondaryColour=&H00{bgr}")
         if "outline_color" in preset:
             color = preset["outline_color"].lstrip("#")
             bgr = color[4:6] + color[2:4] + color[0:2]
             style_parts.append(f"OutlineColour=&H00{bgr}")
         if "outline_width" in preset:
             style_parts.append(f"Outline={preset['outline_width']}")
-        if "shadow_color" in preset:
-            style_parts.append(f"Shadow=1")
+        if preset.get("shadow_enabled", True):
+            style_parts.append(f"Shadow={max(abs(int(preset.get('shadow_x', 2))), abs(int(preset.get('shadow_y', 2))))}")
+        else:
+            style_parts.append("Shadow=0")
+        if "background_alpha" in preset:
+            alpha = max(0, min(int(preset["background_alpha"]), 255))
+            style_parts.append(f"BackColour=&H{alpha:02X}000000")
+        if "margin_v" in preset:
+            style_parts.append(f"MarginV={preset['margin_v']}")
+        if "position" in preset:
+            alignment_map = {"bottom": 2, "center": 5, "top": 8}
+            style_parts.append(f"Alignment={alignment_map.get(preset['position'], 2)}")
 
         style_str = ",".join(style_parts) if style_parts else ""
         return f"subtitles='{escaped_path}':force_style='{style_str}'"
@@ -288,7 +298,7 @@ class FFmpegProcessor:
         # 生成输出路径
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
-            output_path = os.path.join(OUTPUT_DIR, f"{base_name}_voiced.mp4")
+            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_voiced.mp4")
 
         if mode == "replace":
             # 替换原声
@@ -352,7 +362,7 @@ class FFmpegProcessor:
 
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(input_path))[0]
-            output_path = os.path.join(OUTPUT_DIR, f"{base_name}.{output_format}")
+            output_path = os.path.join(ensure_project_dirs()["exports_dir"], f"{base_name}.{output_format}")
 
         cmd = [
             self.ffmpeg_cmd,

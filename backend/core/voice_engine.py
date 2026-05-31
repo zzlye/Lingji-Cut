@@ -4,14 +4,10 @@
 import os
 from typing import Optional, List
 from ..utils import get_logger
+from .paths import ensure_project_dirs
 
 # 日志记录器
 logger = get_logger("voice")
-
-# 输出目录
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 
 class VoiceEngine:
     """配音引擎"""
@@ -37,7 +33,7 @@ class VoiceEngine:
             raise ValueError("文本不能为空")
 
         if output_path is None:
-            output_path = os.path.join(OUTPUT_DIR, "voice_output.mp3")
+            output_path = os.path.join(ensure_project_dirs()["output_dir"], "voice_output.mp3")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 

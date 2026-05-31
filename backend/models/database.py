@@ -2,6 +2,7 @@
 # 数据库连接配置 - SQLAlchemy + SQLite
 
 from sqlalchemy import create_engine
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 import os
 
@@ -39,3 +40,26 @@ def get_db():
 def init_db():
     """初始化数据库 - 创建所有表"""
     Base.metadata.create_all(bind=engine)
+    _migrate_subtitle_presets()
+
+
+def _migrate_subtitle_presets():
+    """补齐旧版本字幕预设表缺失的列"""
+    inspector = inspect(engine)
+    if "subtitle_presets" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("subtitle_presets")}
+    required_columns = {
+        "language": "VARCHAR(50) DEFAULT 'auto'",
+        "secondary_color": "VARCHAR(20) DEFAULT '#FDE68A'",
+        "shadow_enabled": "BOOLEAN DEFAULT 1",
+        "shadow_x": "INTEGER DEFAULT 2",
+        "shadow_y": "INTEGER DEFAULT 2",
+        "background_alpha": "INTEGER DEFAULT 0",
+    }
+
+    with engine.begin() as connection:
+        for column_name, column_sql in required_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE subtitle_presets ADD COLUMN {column_name} {column_sql}"))

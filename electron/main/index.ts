@@ -1,6 +1,6 @@
 // electron/main/index.ts
 // Electron 主进程入口 - 创建窗口、管理应用生命周期、启动 Python 后端
-import { app, BrowserWindow, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
@@ -158,6 +158,20 @@ app.whenReady().then(async () => {
 
   // 获取后端地址
   ipcMain.handle('get-backend-url', () => BACKEND_URL)
+
+  // 选择项目目录，供文件位置设置使用
+  ipcMain.handle('dialog:select-directory', async (_event, defaultPath?: string) => {
+    const result = await dialog.showOpenDialog({
+      title: '选择项目目录',
+      defaultPath,
+      properties: ['openDirectory', 'createDirectory'],
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
+  })
 
   // 启动 Python 后端
   startPythonBackend()
