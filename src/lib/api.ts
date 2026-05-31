@@ -147,10 +147,24 @@ export const profileApi = {
     request<import('@/types').ApiProfile[]>('/profiles/text'),
 
   /** 创建文本 API 配置 */
-  createText: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string }) =>
+  createText: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>
     request<import('@/types').ApiProfile>('/profiles/text', {
       method: 'POST',
       body: JSON.stringify(profile),
+    }),
+
+  /** 更新文本 API 配置 */
+  updateText: (id: number, profile: { name: string; provider_type: string; base_url: string; api_key?: string; model?: string; extra_params?: string }) =>
+    request<import('@/types').ApiProfile>(`/profiles/text/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(profile),
+    }),
+
+  /** 获取文本模型列表 */
+  listTextModels: (params: { provider_type: string; base_url: string; api_key?: string; profile_id?: number | null }) =>
+    request<{ models: import('@/types').TextModelOption[]; source: string; message: string }>('/profiles/text/models', {
+      method: 'POST',
+      body: JSON.stringify(params),
     }),
 
   /** 获取配音 API 配置 */

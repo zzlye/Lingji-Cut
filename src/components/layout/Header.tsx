@@ -71,7 +71,15 @@ export function Header() {
   // 设置弹窗拖动过程中的起始数据
   const settingsDragRef = useRef<SettingsDragState | null>(null)
   // 全局状态
-  const { setCurrentVideo, setParsing, addLog, addTask } = useTaskStore()
+  const {
+    setCurrentVideo,
+    setParsing,
+    addLog,
+    addTask,
+    startAutomationJob,
+    updateAutomationJob,
+    updateAutomationStep,
+  } = useTaskStore()
 
   useEffect(() => {
     return () => {
@@ -111,15 +119,44 @@ export function Header() {
   const handleAutoRun = async () => {
     if (!url.trim() || isRunningAuto) return
 
+    const automationJobId = startAutomationJob(url)
+    let activeStep: 'parse' | 'download' | 'effects' | 'subtitle' | 'voice' | 'export' = 'parse'
+
+    /** 标记自动流程当前正在执行的步骤 */
+    const runStep = (step: typeof activeStep) => {
+      activeStep = step
+      updateAutomationJob(automationJobId, {
+        status: 'running',
+        current_step: step,
+      })
+      updateAutomationStep(automationJobId, step, {
+        status: 'running',
+        progress: 25,
+        error_message: null,
+      })
+    }
+
     setIsRunningAuto(true)
     setParsing(true)
     addLog('info', '开始一键完成流程')
+    updateAutomationJob(automationJobId, { status: 'running', current_step: '解析视频' })
 
     try {
+      runStep('parse')
       const video = await videoApi.parse(url)
       setCurrentVideo(video)
       addLog('info', `解析成功: ${video.title}`)
+      updateAutomationJob(automationJobId, {
+        title: video.title || '一键自动流程',
+        video_id: video.id,
+        current_step: '下载入库',
+      })
+      updateAutomationStep(automationJobId, 'parse', {
+        status: 'completed',
+        progress: 100,
+      })
 
+      runStep('download')
       const download = await videoApi.download(video.id)
       addTask({
         id: download.task_id,
@@ -135,9 +172,25 @@ export function Header() {
 
       if (!download.output_path) {
         addLog('warn', '下载任务已创建，但未返回输出路径')
+        updateAutomationStep(automationJobId, 'download', {
+          status: 'failed',
+          progress: 60,
+          error_message: '下载任务未返回输出路径，无法继续自动流程',
+        })
+        updateAutomationJob(automationJobId, {
+          status: 'failed',
+          current_step: '下载入库失败',
+          completed_at: new Date().toISOString(),
+        })
         return
       }
+      updateAutomationStep(automationJobId, 'download', {
+        status: 'completed',
+        progress: 100,
+        output_path: download.output_path,
+      })
 
+      runStep('effects')
       const effects = await effectsApi.apply({
         video_path: download.output_path,
         preset: loadAutomationConfig(),
@@ -156,10 +209,47 @@ export function Header() {
           completed_at: new Date().toISOString(),
         })
       }
+      updateAutomationStep(automationJobId, 'effects', {
+        status: 'completed',
+        progress: 100,
+        output_path: effects.output_path,
+      })
+
+      updateAutomationStep(automationJobId, 'subtitle', {
+        status: 'skipped',
+        progress: 100,
+        error_message: '当前自动流程未启用字幕渲染任务',
+      })
+      updateAutomationStep(automationJobId, 'voice', {
+        status: 'skipped',
+        progress: 100,
+        error_message: '配音为可选步骤，当前自动流程未启用配音',
+      })
+      updateAutomationStep(automationJobId, 'export', {
+        status: 'completed',
+        progress: 100,
+        output_path: effects.output_path,
+      })
+      updateAutomationJob(automationJobId, {
+        status: 'completed',
+        progress: 100,
+        current_step: '流程完成',
+        completed_at: new Date().toISOString(),
+      })
 
       addLog('info', `一键完成流程已结束: ${effects.output_path}`)
     } catch (error) {
-      addLog('error', `一键完成失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = error instanceof Error ? error.message : '未知错误'
+      updateAutomationStep(automationJobId, activeStep, {
+        status: 'failed',
+        error_message: message,
+      })
+      updateAutomationJob(automationJobId, {
+        status: 'failed',
+        current_step: '流程失败',
+        completed_at: new Date().toISOString(),
+      })
+      addLog('error', `一键完成失败: ${message}`)
     } finally {
       setIsRunningAuto(false)
       setParsing(false)

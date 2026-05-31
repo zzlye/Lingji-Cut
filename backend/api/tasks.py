@@ -3,6 +3,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
 
@@ -21,6 +22,8 @@ class TaskResponse(BaseModel):
     progress: float
     output_path: Optional[str] = None
     error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

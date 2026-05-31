@@ -109,6 +109,54 @@ export interface ApiProfile {
   extra_params?: string | null
 }
 
+/** 文本 API 生成和自动化参数 */
+export interface TextApiSettings {
+  temperature: number
+  top_p: number
+  top_k: number
+  max_tokens: number
+  concurrency: number
+  timeout_seconds: number
+  retry_count: number
+  retry_interval_ms: number
+  rate_limit_rpm: number
+  system_prompt: string
+  response_format: 'text' | 'json'
+  stream: boolean
+}
+
+/** 文本模型选项 */
+export interface TextModelOption {
+  id: string
+  label: string
+  owned_by?: string | null
+}
+
+/** 自动处理流程阶段 */
+export interface AutomationStep {
+  key: 'parse' | 'download' | 'effects' | 'subtitle' | 'voice' | 'export'
+  label: string
+  description: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  progress: number
+  output_path?: string | null
+  error_message?: string | null
+}
+
+/** 自动处理流程任务 */
+export interface AutomationJob {
+  id: string
+  title: string
+  source_url: string
+  video_id: number | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  current_step: string
+  created_at: string
+  completed_at: string | null
+  steps: AutomationStep[]
+}
+
 /** 配音音色 */
 export interface VoiceOption {
   id: string
