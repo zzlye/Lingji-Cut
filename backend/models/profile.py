@@ -35,7 +35,7 @@ class TextProviderProfile(Base):
 class VoiceProviderProfile(Base):
     """
     配音 API 配置模型
-    存储 OpenAI TTS、Gemini TTS 等配音 API 的配置
+    存储 OpenAI TTS、Gemini TTS、MiniMax、小米 MiMo 等配音 API 的配置
     """
     __tablename__ = "voice_provider_profiles"
 
@@ -43,7 +43,7 @@ class VoiceProviderProfile(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 配置名称
     name = Column(String(100), nullable=False)
-    # 渠道类型（openai_tts、gemini_tts、custom）
+    # 渠道类型（openai_tts、gemini_tts、minimax_tts、xiaomi_mimo_tts、custom_tts）
     provider_type = Column(String(50), nullable=False)
     # API 基础地址
     base_url = Column(String(500), nullable=False)

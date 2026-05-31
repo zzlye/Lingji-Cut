@@ -41,6 +41,7 @@ def init_db():
     """初始化数据库 - 创建所有表"""
     Base.metadata.create_all(bind=engine)
     _migrate_subtitle_presets()
+    _migrate_voice_profiles()
 
 
 def _migrate_subtitle_presets():
@@ -63,3 +64,20 @@ def _migrate_subtitle_presets():
         for column_name, column_sql in required_columns.items():
             if column_name not in existing_columns:
                 connection.execute(text(f"ALTER TABLE subtitle_presets ADD COLUMN {column_name} {column_sql}"))
+
+
+def _migrate_voice_profiles():
+    """补齐旧版本配音配置表缺失的列"""
+    inspector = inspect(engine)
+    if "voice_provider_profiles" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("voice_provider_profiles")}
+    required_columns = {
+        "extra_params": "TEXT",
+    }
+
+    with engine.begin() as connection:
+        for column_name, column_sql in required_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE voice_provider_profiles ADD COLUMN {column_name} {column_sql}"))

@@ -1,5 +1,5 @@
 // src/features/settings/ApiConfigPanel.tsx
-// API 配置面板 - 管理文本 API 和配音 API 配置
+// API 配置面板 - 管理文本 API 配置
 
 import { useState, useEffect } from 'react'
 import { profileApi } from '@/lib/api'
@@ -8,10 +8,9 @@ import { useTaskStore } from '@/stores/taskStore'
 
 /**
  * API 配置面板
- * 支持添加、查看、测试文本 API 和配音 API 配置
+ * 支持添加、查看、测试文本 API 配置
  */
 export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
-  const [activeTab, setActiveTab] = useState<'text' | 'voice'>('text')
   const [profiles, setProfiles] = useState<ApiProfile[]>([])
   const [isAdding, setIsAdding] = useState(false)
   const { addLog } = useTaskStore()
@@ -28,9 +27,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 加载配置列表 */
   const loadProfiles = async () => {
     try {
-      const data = activeTab === 'text'
-        ? await profileApi.listText()
-        : await profileApi.listVoice()
+      const data = await profileApi.listText()
       setProfiles(data)
     } catch (error) {
       addLog('error', `加载配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -39,7 +36,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => {
     loadProfiles()
-  }, [activeTab])
+  }, [])
 
   /** 提交表单 */
   const handleSubmit = async () => {
@@ -49,11 +46,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     }
 
     try {
-      if (activeTab === 'text') {
-        await profileApi.createText(form)
-      } else {
-        await profileApi.createVoice(form)
-      }
+      await profileApi.createText(form)
       addLog('info', `配置 "${form.name}" 已保存`)
       setIsAdding(false)
       setForm({ name: '', provider_type: 'openai', base_url: '', api_key: '', model: '' })
@@ -66,7 +59,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 测试连接 */
   const handleTest = async (id: number) => {
     try {
-      const result = await profileApi.test(activeTab, id)
+      const result = await profileApi.test('text', id)
       addLog('info', result.message)
     } catch (error) {
       addLog('error', `测试失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -80,30 +73,6 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
           <h3 className="text-sm font-medium">API 配置</h3>
         </div>
       )}
-
-      {/* 标签切换 */}
-      <div className="flex border-b border-border">
-        <button
-          onClick={() => setActiveTab('text')}
-          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-            activeTab === 'text'
-              ? 'text-primary border-b-2 border-primary'
-              : 'text-foreground-muted hover:text-foreground'
-          }`}
-        >
-          文本 API
-        </button>
-        <button
-          onClick={() => setActiveTab('voice')}
-          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-            activeTab === 'voice'
-              ? 'text-primary border-b-2 border-primary'
-              : 'text-foreground-muted hover:text-foreground'
-          }`}
-        >
-          配音 API
-        </button>
-      </div>
 
       {/* 内容区域 */}
       <div className="flex-1 overflow-auto p-4">
@@ -130,22 +99,12 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
               onChange={(e) => setForm({ ...form, provider_type: e.target.value })}
               className="w-full h-9 px-3 bg-background border border-border rounded-md text-sm"
             >
-              {activeTab === 'text' ? (
-                <>
-                  <option value="openai">OpenAI</option>
-                  <option value="openai_compatible">OpenAI Compatible</option>
-                  <option value="gemini">Gemini</option>
-                  <option value="gemini_compatible">Gemini Compatible</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="custom">自定义</option>
-                </>
-              ) : (
-                <>
-                  <option value="openai_tts">OpenAI TTS</option>
-                  <option value="gemini_tts">Gemini TTS</option>
-                  <option value="custom">自定义</option>
-                </>
-              )}
+              <option value="openai">OpenAI</option>
+              <option value="openai_compatible">OpenAI Compatible</option>
+              <option value="gemini">Gemini</option>
+              <option value="gemini_compatible">Gemini Compatible</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="custom">自定义</option>
             </select>
             <input
               type="text"

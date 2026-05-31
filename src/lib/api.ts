@@ -158,9 +158,16 @@ export const profileApi = {
     request<import('@/types').ApiProfile[]>('/profiles/voice'),
 
   /** 创建配音 API 配置 */
-  createVoice: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string }) =>
+  createVoice: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>
     request<import('@/types').ApiProfile>('/profiles/voice', {
       method: 'POST',
+      body: JSON.stringify(profile),
+    }),
+
+  /** 更新配音 API 配置 */
+  updateVoice: (id: number, profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>
+    request<import('@/types').ApiProfile>(`/profiles/voice/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(profile),
     }),
 
@@ -171,11 +178,25 @@ export const profileApi = {
 
 /** 配音 API */
 export const voiceApi = {
-  /** 生成配音 */
-  generate: (text: string, profileId: number, voice?: string) =>
-    request<{ message: string; output_path: string }>('/voice/generate', {
+  /** 获取音色目录 */
+  voices: (providerType: string) =>
+    request<{ voices: import('@/types').VoiceOption[] }>('/voice/voices', {
       method: 'POST',
-      body: JSON.stringify({ text, profile_id: profileId, voice }),
+      body: JSON.stringify({ provider_type: providerType }),
+    }),
+
+  /** 生成配音 */
+  generate: (params: {
+    text: string
+    profile_id: number
+    voice?: string
+    model?: string
+    settings?: Partial<import('@/types').VoiceGenerateSettings>
+    output_path?: string
+  }) =>
+    request<{ message: string; output_path: string; audio_url: string }>('/voice/generate', {
+      method: 'POST',
+      body: JSON.stringify(params),
     }),
 }
 

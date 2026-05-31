@@ -38,7 +38,18 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - `/effects/filter-graph` 可把处理参数转换为 `ffmpeg` filter graph。
 - `/effects/preview` 可生成短片段预览。
 - `/effects/apply` 可执行完整画面处理任务。
-- 字幕预设、API 配置、配音配置保留现有接口和界面。
+- 字幕预设支持语言、单/双行、字体、字号、颜色、描边、阴影、背景透明度和实时预览。
+- 配音配置内置配音 API 管理、音色目录、试听、语速、音量、音调、输出格式、采样率、码率和风格提示。
+
+## 配音渠道支持
+
+配音参数按各家文档映射到对应 API：
+
+- **OpenAI TTS / OpenAI-compatible**：`voice`、`response_format`、`speed`、`instructions`。
+- **Gemini TTS**：`speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`，风格和语速主要通过提示词控制。
+- **MiniMax T2A**：`voice_setting.voice_id/speed/vol/pitch/emotion`、`audio_setting.format/sample_rate/bitrate/channel`、`voice_modify.intensity/timbre/sound_effects`。
+- **小米 MiMo TTS**：OpenAI 风格 `chat/completions`，使用 `modalities: ["text", "audio"]` 和 `audio.voice/audio.format`。
+- **自定义 TTS**：按 OpenAI `/audio/speech` 兼容接口处理，保留自定义 Base URL、模型和 voice id。
 
 ## 快速开始
 

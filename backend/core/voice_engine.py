@@ -1,13 +1,16 @@
 # backend/core/voice_engine.py
-# 配音引擎 - 调用 TTS API 生成配音音频
+# 配音引擎 - 调用多家 TTS API 生成配音音频
 
+import base64
 import os
-from typing import Optional, List
+from typing import Any, List, Optional
+
 from ..utils import get_logger
 from .paths import ensure_project_dirs
 
 # 日志记录器
 logger = get_logger("voice")
+
 
 class VoiceEngine:
     """配音引擎"""
@@ -24,6 +27,8 @@ class VoiceEngine:
         voice: str = "alloy",
         api_key: str = "",
         base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
     ) -> str:
         """
         生成配音音频
@@ -32,19 +37,27 @@ class VoiceEngine:
         if not text.strip():
             raise ValueError("文本不能为空")
 
+        options = settings or {}
+        audio_format = self._provider_audio_format(provider_type, options)
         if output_path is None:
-            output_path = os.path.join(ensure_project_dirs()["output_dir"], "voice_output.mp3")
+            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"voice_output.{audio_format}")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         logger.info(f"生成配音: {provider_type}, 语音: {voice}")
 
         if provider_type == "openai_tts":
-            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url)
-        elif provider_type == "gemini_tts":
-            return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url)
-        else:
-            raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
+        if provider_type == "gemini_tts":
+            return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url, model, options)
+        if provider_type == "minimax_tts":
+            return await self._generate_minimax_tts(text, output_path, voice, api_key, base_url, model, options)
+        if provider_type == "xiaomi_mimo_tts":
+            return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, options)
+        if provider_type == "custom_tts":
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
+
+        raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
 
     async def _generate_openai_tts(
         self,
@@ -52,9 +65,11 @@ class VoiceEngine:
         output_path: str,
         voice: str,
         api_key: str,
-        base_url: str
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
     ) -> str:
-        """使用 OpenAI TTS API 生成配音"""
+        """使用 OpenAI 兼容 TTS API 生成配音"""
         import httpx
 
         if not base_url:
@@ -62,29 +77,32 @@ class VoiceEngine:
 
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
-        payload = {
-            "model": "tts-1",
+        payload: dict[str, Any] = {
+            "model": model or "gpt-4o-mini-tts",
             "input": text,
             "voice": voice,
-            "response_format": "mp3"
+            "response_format": self._audio_format(settings),
+            "speed": self._float(settings.get("speed"), 1.0),
         }
+        instructions = settings.get("style_prompt")
+        if instructions:
+            payload["instructions"] = instructions
 
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                f"{base_url}/audio/speech",
+                f"{base_url.rstrip('/')}/audio/speech",
                 headers=headers,
-                json=payload
+                json=payload,
             )
 
             if response.status_code != 200:
                 raise RuntimeError(f"OpenAI TTS 调用失败: {response.text}")
 
-            # 保存音频文件
-            with open(output_path, "wb") as f:
-                f.write(response.content)
+            with open(output_path, "wb") as file:
+                file.write(response.content)
 
         logger.info(f"OpenAI TTS 生成完成: {output_path}")
         return output_path
@@ -95,7 +113,9 @@ class VoiceEngine:
         output_path: str,
         voice: str,
         api_key: str,
-        base_url: str
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
     ) -> str:
         """使用 Gemini TTS API 生成配音"""
         import httpx
@@ -103,13 +123,11 @@ class VoiceEngine:
         if not base_url:
             base_url = "https://generativelanguage.googleapis.com/v1beta"
 
-        headers = {
-            "Content-Type": "application/json"
-        }
-
+        style_prompt = settings.get("style_prompt")
+        prompt_text = f"{style_prompt}\n\n{text}" if style_prompt else text
         payload = {
             "contents": [{
-                "parts": [{"text": text}]
+                "parts": [{"text": prompt_text}]
             }],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
@@ -119,31 +137,159 @@ class VoiceEngine:
                             "voiceName": voice
                         }
                     }
-                }
-            }
+                },
+            },
         }
 
+        gemini_model = model or "gemini-2.5-flash-preview-tts"
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
-                f"{base_url}/models/gemini-2.5-flash-preview-tts:generateContent?key={api_key}",
-                headers=headers,
-                json=payload
+                f"{base_url.rstrip('/')}/models/{gemini_model}:generateContent?key={api_key}",
+                headers={"Content-Type": "application/json"},
+                json=payload,
             )
 
             if response.status_code != 200:
                 raise RuntimeError(f"Gemini TTS 调用失败: {response.text}")
 
             data = response.json()
-            # 解析音频数据
-            audio_data = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            inline_data = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+            audio_bytes = base64.b64decode(inline_data["data"])
 
-            import base64
-            audio_bytes = base64.b64decode(audio_data)
-
-            with open(output_path, "wb") as f:
-                f.write(audio_bytes)
+            with open(output_path, "wb") as file:
+                file.write(audio_bytes)
 
         logger.info(f"Gemini TTS 生成完成: {output_path}")
+        return output_path
+
+    async def _generate_minimax_tts(
+        self,
+        text: str,
+        output_path: str,
+        voice: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """使用 MiniMax T2A API 生成配音"""
+        import httpx
+
+        if not base_url:
+            base_url = "https://api.minimax.io/v1"
+
+        payload = {
+            "model": model or "speech-2.8-hd",
+            "text": text,
+            "stream": False,
+            "language_boost": settings.get("language_boost") or "auto",
+            "output_format": "hex",
+            "voice_setting": {
+                "voice_id": voice,
+                "speed": self._float(settings.get("speed"), 1.0),
+                "vol": self._float(settings.get("volume"), 1.0),
+                "pitch": self._int(settings.get("pitch"), 0),
+                "emotion": settings.get("emotion") or None,
+            },
+            "audio_setting": {
+                "sample_rate": self._int(settings.get("sample_rate"), 32000),
+                "bitrate": self._int(settings.get("bitrate"), 128000),
+                "format": self._audio_format(settings),
+                "channel": self._int(settings.get("channel"), 1),
+            },
+            "voice_modify": {
+                "pitch": self._int(settings.get("voice_pitch", settings.get("pitch")), 0),
+                "intensity": self._int(settings.get("intensity"), 0),
+                "timbre": self._int(settings.get("timbre"), 0),
+            },
+        }
+
+        sound_effects = settings.get("sound_effects")
+        if sound_effects:
+            payload["voice_modify"]["sound_effects"] = sound_effects
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url.rstrip('/')}/t2a_v2",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"MiniMax TTS 调用失败: {response.text}")
+
+            data = response.json()
+            base_resp = data.get("base_resp") or {}
+            if base_resp.get("status_code") not in (None, 0):
+                raise RuntimeError(f"MiniMax TTS 调用失败: {base_resp.get('status_msg', '未知错误')}")
+
+            audio_hex = (data.get("data") or {}).get("audio")
+            if not audio_hex:
+                raise RuntimeError("MiniMax TTS 未返回音频数据")
+
+            with open(output_path, "wb") as file:
+                file.write(bytes.fromhex(audio_hex))
+
+        logger.info(f"MiniMax TTS 生成完成: {output_path}")
+        return output_path
+
+    async def _generate_xiaomi_mimo_tts(
+        self,
+        text: str,
+        output_path: str,
+        voice: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """使用小米 MiMo 语音合成 API 生成配音"""
+        import httpx
+
+        if not base_url:
+            base_url = "https://api.xiaomimimo.com/v1"
+
+        style_prompt = settings.get("style_prompt") or "请将文本自然地转换为配音音频。"
+        payload = {
+            "model": model or "mimo-v2-tts",
+            "modalities": ["text", "audio"],
+            "audio": {
+                "voice": voice,
+                "format": self._provider_audio_format("xiaomi_mimo_tts", settings),
+            },
+            "messages": [
+                {"role": "user", "content": style_prompt},
+                {"role": "assistant", "content": text},
+            ],
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"小米 MiMo TTS 调用失败: {response.text}")
+
+            data = response.json()
+            message = data["choices"][0]["message"]
+            audio_data = message.get("audio") or {}
+            encoded = audio_data.get("data")
+            if not encoded:
+                raise RuntimeError("小米 MiMo TTS 未返回音频数据")
+
+            with open(output_path, "wb") as file:
+                file.write(base64.b64decode(encoded))
+
+        logger.info(f"小米 MiMo TTS 生成完成: {output_path}")
         return output_path
 
     def merge_segments(self, audio_paths: List[str], output_path: str) -> str:
@@ -155,9 +301,9 @@ class VoiceEngine:
 
         # 创建文件列表
         list_file = output_path + ".list.txt"
-        with open(list_file, "w", encoding="utf-8") as f:
+        with open(list_file, "w", encoding="utf-8") as file:
             for path in audio_paths:
-                f.write(f"file '{path}'\n")
+                file.write(f"file '{path}'\n")
 
         # 使用 ffmpeg 合并
         cmd = [
@@ -167,7 +313,7 @@ class VoiceEngine:
             "-i", list_file,
             "-c", "copy",
             "-y",
-            output_path
+            output_path,
         ]
 
         try:
@@ -175,7 +321,7 @@ class VoiceEngine:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120
+                timeout=120,
             )
 
             if result.returncode != 0:
@@ -188,3 +334,29 @@ class VoiceEngine:
             # 清理临时文件
             if os.path.exists(list_file):
                 os.remove(list_file)
+
+    def _audio_format(self, settings: dict[str, Any]) -> str:
+        """读取音频格式，默认 mp3"""
+        value = str(settings.get("format") or "mp3").lower()
+        return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
+
+    def _provider_audio_format(self, provider_type: str, settings: dict[str, Any]) -> str:
+        """按渠道读取音频格式"""
+        if provider_type == "xiaomi_mimo_tts":
+            value = str(settings.get("format") or "wav").lower()
+            return value if value in {"wav", "pcm16"} else "wav"
+        return self._audio_format(settings)
+
+    def _float(self, value: Any, default: float) -> float:
+        """安全读取浮点数"""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _int(self, value: Any, default: int) -> int:
+        """安全读取整数"""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default

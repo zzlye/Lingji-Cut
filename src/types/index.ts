@@ -106,6 +106,33 @@ export interface ApiProfile {
   provider_type: string
   base_url: string
   model: string | null
+  extra_params?: string | null
+}
+
+/** 配音音色 */
+export interface VoiceOption {
+  id: string
+  name: string
+  language: string
+  style: string
+}
+
+/** 配音生成设置 */
+export interface VoiceGenerateSettings {
+  speed: number
+  volume: number
+  pitch: number
+  format: 'mp3' | 'wav' | 'flac' | 'pcm' | 'opus'
+  sample_rate: number
+  bitrate: number
+  channel: number
+  emotion: string
+  style_prompt: string
+  language_boost: string
+  intensity: number
+  timbre: number
+  voice_pitch: number
+  sound_effects: string
 }
 
 /** 固定值或随机范围 */
