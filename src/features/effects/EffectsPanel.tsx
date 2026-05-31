@@ -15,8 +15,11 @@ const range = (min: number, max: number, value: number | null = null, random = t
   max,
 })
 
+/** 自动化参数本地缓存键 */
+export const AUTOMATION_CONFIG_STORAGE_KEY = 'youtube-video-processor:auto-config'
+
 /** 默认画面处理配置 */
-const createDefaultConfig = (): ProcessingConfig => ({
+export const createDefaultProcessingConfig = (): ProcessingConfig => ({
   adjustments: {
     enabled: true,
     brightness: range(0, 0.1),
@@ -65,13 +68,55 @@ const createDefaultConfig = (): ProcessingConfig => ({
   },
 })
 
+/** 判断是否已经保存过自动化参数 */
+export function hasStoredAutomationConfig() {
+  return typeof localStorage !== 'undefined' && Boolean(localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY))
+}
+
+/** 读取自动化参数，供一键流程复用 */
+export function loadAutomationConfig(): ProcessingConfig {
+  if (typeof localStorage === 'undefined') {
+    return createDefaultProcessingConfig()
+  }
+
+  try {
+    const saved = localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY)
+    return saved ? JSON.parse(saved) : createDefaultProcessingConfig()
+  } catch {
+    return createDefaultProcessingConfig()
+  }
+}
+
+/** 保存自动化参数，确保齿轮设置和一键流程一致 */
+export function saveAutomationConfig(config: ProcessingConfig) {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(AUTOMATION_CONFIG_STORAGE_KEY, JSON.stringify(config))
+  }
+}
+
 /**
  * 画面处理面板
  * 提供类似传统视频处理工具的密集参数配置。
  */
 export function EffectsPanel() {
+  return <EffectsSettingsPanel variant="page" />
+}
+
+/** 自动化设置面板属性 */
+interface EffectsSettingsPanelProps {
+  /** page 用于主页面，compact 用于顶部齿轮弹层 */
+  variant?: 'page' | 'compact'
+  /** 外部触发完成时调用 */
+  onClose?: () => void
+}
+
+/**
+ * 自动化画面处理设置面板
+ * 设置好参数后可保存模板、生成参数、预览，并由顶部一键流程复用。
+ */
+export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSettingsPanelProps) {
   const [presets, setPresets] = useState<ProcessingPreset[]>([])
-  const [config, setConfig] = useState<ProcessingConfig>(createDefaultConfig)
+  const [config, setConfig] = useState<ProcessingConfig>(() => loadAutomationConfig())
   const [presetName, setPresetName] = useState('标准处理')
   const [videoPath, setVideoPath] = useState('')
   const [filterGraph, setFilterGraph] = useState('')
@@ -89,7 +134,7 @@ export function EffectsPanel() {
       const data = await effectsApi.listPresets()
       setPresets(data)
       const defaultPreset = data.find((item) => item.is_default) || data[0]
-      if (defaultPreset) {
+      if (defaultPreset && !hasStoredAutomationConfig()) {
         setConfig(defaultPreset.config)
         setPresetName(defaultPreset.name)
       }
@@ -101,6 +146,10 @@ export function EffectsPanel() {
   useEffect(() => {
     loadPresets()
   }, [])
+
+  useEffect(() => {
+    saveAutomationConfig(config)
+  }, [config])
 
   useEffect(() => {
     if (!videoPath && latestVideoPath) {
@@ -222,12 +271,14 @@ export function EffectsPanel() {
     }
   }
 
+  const isCompact = variant === 'compact'
+
   return (
-    <div className="h-full flex flex-col">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+    <div className={isCompact ? 'max-h-[78vh] flex flex-col' : 'h-full flex flex-col'}>
+      <div className={`${isCompact ? 'px-4 py-3' : 'px-4 py-3 border-b border-border'} flex items-center justify-between gap-3`}>
         <div>
-          <h3 className="text-sm font-medium">画面处理</h3>
-          <p className="text-xs text-foreground-muted">滤镜、分辨率、翻转、帧率、码率处理模板</p>
+          <h3 className="text-sm font-medium">{isCompact ? '自动化参数设置' : '画面处理'}</h3>
+          <p className="text-xs text-foreground-muted">设置参数、查看预览，然后由一键完成流程自动执行</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={handleBuildFilter} className="h-9 px-3 border border-border rounded-md text-sm hover:bg-white/5">
@@ -239,6 +290,13 @@ export function EffectsPanel() {
           <button onClick={handleApply} disabled={isBusy} className="h-9 px-4 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 disabled:opacity-50">
             {isBusy ? '处理中...' : '开始处理'}
           </button>
+          {onClose && (
+            <button onClick={onClose} className="h-9 w-9 border border-border rounded-md text-sm hover:bg-white/5" title="关闭设置" aria-label="关闭设置">
+              <svg className="w-4 h-4 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
@@ -261,7 +319,7 @@ export function EffectsPanel() {
               ))}
             </select>
           </label>
-          <button onClick={() => setConfig(createDefaultConfig())} className="self-end h-10 border border-border rounded-md text-sm hover:bg-white/5">
+          <button onClick={() => setConfig(createDefaultProcessingConfig())} className="self-end h-10 border border-border rounded-md text-sm hover:bg-white/5">
             重置
           </button>
         </section>
@@ -279,7 +337,7 @@ export function EffectsPanel() {
         </section>
 
         <Panel title="画面调整（不同视频画面随机微调）" enabled={config.adjustments.enabled} onToggle={(value) => updateValue(['adjustments', 'enabled'], value)}>
-          <div className="grid grid-cols-2 gap-3">
+          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
             <RangeField label="亮度" value={config.adjustments.brightness} onChange={(updates) => updateRange(['adjustments', 'brightness'], updates)} />
             <RangeField label="对比度" value={config.adjustments.contrast} onChange={(updates) => updateRange(['adjustments', 'contrast'], updates)} />
             <RangeField label="饱和度" value={config.adjustments.saturation} onChange={(updates) => updateRange(['adjustments', 'saturation'], updates)} />
@@ -289,7 +347,7 @@ export function EffectsPanel() {
         </Panel>
 
         <Panel title="分辨率与画布" enabled={config.canvas.enabled} onToggle={(value) => updateValue(['canvas', 'enabled'], value)}>
-          <div className="grid grid-cols-4 gap-3">
+          <div className={`grid ${isCompact ? 'grid-cols-2' : 'grid-cols-4'} gap-3`}>
             <SelectField label="分辨率" value={config.canvas.resolution} options={[['720p', '720p'], ['1080p', '1080p'], ['original', '原分辨率'], ['custom', '自定义']]} onChange={(value) => updateValue(['canvas', 'resolution'], value)} />
             <SelectField label="模式" value={config.canvas.mode} options={[['keep', '原比例'], ['stretch', '拉伸'], ['crop', '裁切'], ['blur_background', '背景模糊']]} onChange={(value) => updateValue(['canvas', 'mode'], value)} />
             <NumberField label="宽度" value={config.canvas.width} onChange={(value) => updateValue(['canvas', 'width'], value)} />
@@ -303,7 +361,7 @@ export function EffectsPanel() {
         </Panel>
 
         <Panel title="旋转与翻转" enabled={config.transform.enabled} onToggle={(value) => updateValue(['transform', 'enabled'], value)}>
-          <div className="grid grid-cols-2 gap-3">
+          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
             <SelectField label="旋转" value={config.transform.rotate_mode} options={[['none', '不旋转'], ['left90', '左转90度'], ['right90', '右转90度']]} onChange={(value) => updateValue(['transform', 'rotate_mode'], value)} />
             <RangeField label="随机轻微旋转" value={config.transform.random_rotate} onChange={(updates) => updateRange(['transform', 'random_rotate'], updates)} />
           </div>
@@ -316,7 +374,7 @@ export function EffectsPanel() {
         </Panel>
 
         <Panel title="帧率与时长变化" enabled={config.timing.enabled} onToggle={(value) => updateValue(['timing', 'enabled'], value)}>
-          <div className="grid grid-cols-2 gap-3">
+          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
             <RangeField label="帧率" value={config.timing.fps} onChange={(updates) => updateRange(['timing', 'fps'], updates)} />
             <RangeField label="动态缩放" value={config.timing.dynamic_zoom} onChange={(updates) => updateRange(['timing', 'dynamic_zoom'], updates)} />
           </div>
@@ -329,7 +387,7 @@ export function EffectsPanel() {
         </Panel>
 
         <Panel title="码率与清晰度" enabled={config.bitrate.enabled} onToggle={(value) => updateValue(['bitrate', 'enabled'], value)}>
-          <div className="grid grid-cols-3 gap-3">
+          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-3'} gap-3`}>
             <SelectField label="模式" value={config.bitrate.mode} options={[['fixed', '定值'], ['multiplier', '倍率']]} onChange={(value) => updateValue(['bitrate', 'mode'], value)} />
             <SelectField label="方案" value={config.bitrate.quality_mode} options={[['balanced', '均衡'], ['quality', '保持清晰优先'], ['size', '控制体积优先']]} onChange={(value) => updateValue(['bitrate', 'quality_mode'], value)} />
             <RangeField label="固定码率 kb/s" value={config.bitrate.fixed_kbps} onChange={(updates) => updateRange(['bitrate', 'fixed_kbps'], updates)} />

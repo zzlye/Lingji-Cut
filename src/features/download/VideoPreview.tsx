@@ -7,14 +7,24 @@ import { useTaskStore } from '@/stores/taskStore'
  * 视频预览面板
  * 显示当前处理的视频预览、字幕预览、样式配置
  */
-export function VideoPreview() {
+export function VideoPreview({ onCollapse }: { onCollapse?: () => void }) {
   const { currentVideo } = useTaskStore()
 
   return (
     <div className="h-full flex flex-col">
       {/* 面板标题 */}
-      <div className="px-4 py-3 border-b border-border">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between">
         <h3 className="text-sm font-medium">预览</h3>
+        <button
+          onClick={onCollapse}
+          className="w-8 h-8 flex items-center justify-center rounded text-foreground-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          title="收起预览"
+          aria-label="收起预览"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
       </div>
 
       {/* 预览内容 */}

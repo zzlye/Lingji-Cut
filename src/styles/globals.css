@@ -84,6 +84,12 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* 标题栏内部可交互区域 */
+.no-drag,
+.no-drag * {
+  -webkit-app-region: no-drag;
+}
+
 /* 滚动条样式 - 暗色主题 */
 ::-webkit-scrollbar {
   width: 8px;
