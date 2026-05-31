@@ -1,5 +1,5 @@
 # backend/api/settings.py
-# 设置 API 路由 - 提供项目文件夹和工具路径信息
+# 设置 API 路由 - 提供项目文件夹信息
 
 import os
 
@@ -10,22 +10,15 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# 工具目录
-TOOLS_DIR = r"D:\tools"
-
 
 @router.get("/paths")
 async def get_paths():
-    """获取项目文件夹和常用输出目录"""
+    """获取项目目录，并确保常用子文件夹自动创建"""
+    for dirname in ("data", "downloads", "output", "exports"):
+        os.makedirs(os.path.join(PROJECT_ROOT, dirname), exist_ok=True)
+
     paths = {
         "project_root": PROJECT_ROOT,
-        "data_dir": os.path.join(PROJECT_ROOT, "data"),
-        "downloads_dir": os.path.join(PROJECT_ROOT, "downloads"),
-        "output_dir": os.path.join(PROJECT_ROOT, "output"),
-        "exports_dir": os.path.join(PROJECT_ROOT, "exports"),
-        "tools_dir": TOOLS_DIR,
-        "yt_dlp_path": os.path.join(TOOLS_DIR, "yt-dlp", "yt-dlp.exe"),
-        "ffmpeg_path": os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe"),
     }
 
     return {

@@ -1,5 +1,5 @@
 // src/components/layout/Sidebar.tsx
-// 左侧导航侧边栏组件 - 素材库、任务队列、历史记录
+// 左侧导航侧边栏组件 - 素材库、画面处理、任务队列、历史记录
 
 import type { SidebarItem } from './AppShell'
 
@@ -23,6 +23,16 @@ const NAV_ITEMS: Array<{
     icon: (
       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+      </svg>
+    )
+  },
+  {
+    id: 'effects',
+    label: '画面处理',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364-6.364l-2.122 2.122M7.758 16.242l-2.122 2.122m12.728 0l-2.122-2.122M7.758 7.758L5.636 5.636" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12a4 4 0 108 0 4 4 0 00-8 0z" />
       </svg>
     )
   },

@@ -189,7 +189,7 @@ export const exportApi = {
 
 /** 设置 API */
 export const settingsApi = {
-  /** 获取项目文件夹和工具路径 */
+  /** 获取项目文件夹 */
   paths: () =>
     request<Record<string, { path: string; exists: boolean }>>('/settings/paths'),
 }

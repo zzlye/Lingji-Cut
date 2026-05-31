@@ -15,18 +15,23 @@ type SettingsTab = 'api' | 'subtitle' | 'voice' | 'paths'
 interface SettingsCenterProps {
   /** 关闭设置中心 */
   onClose: () => void
+  /** 开始拖动设置窗口 */
+  onDragStart: (event: React.MouseEvent<HTMLDivElement>) => void
 }
 
 /**
  * 设置中心
  * 放在顶部齿轮弹层内，避免多个配置入口分散在侧边栏。
  */
-export function SettingsCenter({ onClose }: SettingsCenterProps) {
+export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('api')
 
   return (
     <div className="h-[460px] max-h-[62vh] flex flex-col">
-      <div className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3">
+      <div
+        onMouseDown={onDragStart}
+        className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3 cursor-move select-none"
+      >
         <div>
           <h3 className="text-sm font-medium">设置</h3>
         </div>
@@ -79,14 +84,14 @@ function SettingsTabButton({ id, active, onClick, label }: { id: SettingsTab; ac
 
 /** 文件位置面板 */
 function FileLocationPanel() {
-  const [paths, setPaths] = useState<Record<string, { path: string; exists: boolean }>>({})
+  const [projectRoot, setProjectRoot] = useState('')
   const { addLog } = useTaskStore()
 
   /** 加载项目文件夹位置 */
   const loadPaths = async () => {
     try {
       const data = await settingsApi.paths()
-      setPaths(data)
+      setProjectRoot(data.project_root?.path || '')
     } catch (error) {
       addLog('error', `加载文件位置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
@@ -96,17 +101,6 @@ function FileLocationPanel() {
     loadPaths()
   }, [])
 
-  const labels: Record<string, string> = {
-    project_root: '项目目录',
-    data_dir: '数据库目录',
-    downloads_dir: '下载目录',
-    output_dir: '输出目录',
-    exports_dir: '导出目录',
-    tools_dir: '工具目录',
-    yt_dlp_path: 'yt-dlp',
-    ffmpeg_path: 'ffmpeg',
-  }
-
   return (
     <div className="h-full flex flex-col">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
@@ -115,18 +109,16 @@ function FileLocationPanel() {
           刷新
         </button>
       </div>
-      <div className="flex-1 overflow-auto p-4 space-y-2">
-        {Object.entries(paths).map(([key, value]) => (
-          <div key={key} className="p-3 bg-background rounded-lg border border-border">
-            <div className="flex items-center justify-between gap-3 mb-1">
-              <span className="text-sm font-medium">{labels[key] || key}</span>
-              <span className={`text-xs ${value.exists ? 'text-success' : 'text-warning'}`}>
-                {value.exists ? '存在' : '未找到'}
-              </span>
-            </div>
-            <p className="text-xs text-foreground-muted break-all select-text">{value.path}</p>
-          </div>
-        ))}
+      <div className="flex-1 overflow-auto p-4">
+        <div className="p-3 bg-background rounded-lg border border-border">
+          <div className="mb-1 text-sm font-medium">项目目录</div>
+          <p className="text-xs text-foreground-muted break-all select-text">
+            {projectRoot || '正在读取项目目录...'}
+          </p>
+          <p className="mt-2 text-xs text-foreground-muted">
+            下载、输出、导出和数据库子文件夹会自动创建。
+          </p>
+        </div>
       </div>
     </div>
   )

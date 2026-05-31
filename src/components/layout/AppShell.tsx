@@ -10,11 +10,13 @@ import { TaskPanel } from '@/features/tasks/TaskPanel'
 import { VideoPreview } from '@/features/download/VideoPreview'
 import { LibraryPanel } from '@/features/library/LibraryPanel'
 import { HistoryPanel } from '@/features/history/HistoryPanel'
+import { EffectsPanel } from '@/features/effects/EffectsPanel'
 
 /** 侧边栏导航项类型 */
 export type SidebarItem =
   | 'library'     // 素材库
   | 'tasks'       // 任务队列
+  | 'effects'     // 画面处理
   | 'history'     // 历史记录
 
 /**
@@ -85,6 +87,8 @@ function ContentPanel({ item }: { item: SidebarItem }) {
       return <LibraryPanel />
     case 'tasks':
       return <TaskPanel />
+    case 'effects':
+      return <EffectsPanel />
     case 'history':
       return <HistoryPanel />
     default:

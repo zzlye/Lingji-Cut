@@ -1,11 +1,57 @@
 // src/components/layout/Header.tsx
 // 顶部栏组件 - URL 输入、解析按钮、全局任务状态、窗口控制
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { videoApi, effectsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { SettingsCenter } from '@/features/settings/SettingsCenter'
+
+/** 设置弹窗默认尺寸和窗口边距 */
+const SETTINGS_MODAL_WIDTH = 760
+const SETTINGS_MODAL_HEIGHT = 460
+const SETTINGS_MODAL_MARGIN = 16
+
+/** 设置弹窗坐标 */
+type SettingsPosition = {
+  x: number
+  y: number
+}
+
+/** 设置弹窗拖动状态 */
+type SettingsDragState = {
+  startX: number
+  startY: number
+  originX: number
+  originY: number
+}
+
+/** 限制弹窗位置，避免拖出窗口外 */
+function clampSettingsPosition(x: number, y: number): SettingsPosition {
+  if (typeof window === 'undefined') {
+    return { x, y }
+  }
+
+  const modalWidth = Math.min(SETTINGS_MODAL_WIDTH, window.innerWidth - SETTINGS_MODAL_MARGIN * 2)
+  const modalHeight = Math.min(SETTINGS_MODAL_HEIGHT, window.innerHeight - SETTINGS_MODAL_MARGIN * 2)
+  const maxX = Math.max(SETTINGS_MODAL_MARGIN, window.innerWidth - modalWidth - SETTINGS_MODAL_MARGIN)
+  const maxY = Math.max(SETTINGS_MODAL_MARGIN, window.innerHeight - modalHeight - SETTINGS_MODAL_MARGIN)
+
+  return {
+    x: Math.min(Math.max(SETTINGS_MODAL_MARGIN, x), maxX),
+    y: Math.min(Math.max(SETTINGS_MODAL_MARGIN, y), maxY),
+  }
+}
+
+/** 计算设置弹窗默认位置，靠右显示在顶部栏下方 */
+function getDefaultSettingsPosition(): SettingsPosition {
+  if (typeof window === 'undefined') {
+    return { x: SETTINGS_MODAL_MARGIN, y: 64 }
+  }
+
+  const modalWidth = Math.min(SETTINGS_MODAL_WIDTH, window.innerWidth - SETTINGS_MODAL_MARGIN * 2)
+  return clampSettingsPosition(window.innerWidth - modalWidth - SETTINGS_MODAL_MARGIN, 64)
+}
 
 /**
  * 顶部栏组件
@@ -20,8 +66,19 @@ export function Header() {
   const [isRunningAuto, setIsRunningAuto] = useState(false)
   // 设置中心弹层是否打开
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  // 设置中心弹层位置
+  const [settingsPosition, setSettingsPosition] = useState<SettingsPosition | null>(null)
+  // 设置弹窗拖动过程中的起始数据
+  const settingsDragRef = useRef<SettingsDragState | null>(null)
   // 全局状态
   const { setCurrentVideo, setParsing, addLog, addTask } = useTaskStore()
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('mousemove', handleSettingsMouseMove)
+      window.removeEventListener('mouseup', handleSettingsMouseUp)
+    }
+  }, [])
 
   /**
    * 处理解析按钮点击
@@ -118,6 +175,51 @@ export function Header() {
     }
   }
 
+  /** 打开设置弹窗，并在第一次打开时放到右上角 */
+  const handleOpenSettings = () => {
+    setSettingsPosition((current) => current ? clampSettingsPosition(current.x, current.y) : getDefaultSettingsPosition())
+    setIsSettingsOpen(true)
+  }
+
+  /** 开始拖动设置弹窗 */
+  const handleSettingsDragStart = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+
+    const target = event.target as HTMLElement
+    if (target.closest('button,input,select,textarea,a')) return
+
+    event.preventDefault()
+    const position = settingsPosition || getDefaultSettingsPosition()
+    settingsDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: position.x,
+      originY: position.y,
+    }
+    setSettingsPosition(position)
+    window.addEventListener('mousemove', handleSettingsMouseMove)
+    window.addEventListener('mouseup', handleSettingsMouseUp)
+  }
+
+  /** 拖动设置弹窗 */
+  function handleSettingsMouseMove(event: MouseEvent) {
+    const dragState = settingsDragRef.current
+    if (!dragState) return
+
+    event.preventDefault()
+    setSettingsPosition(clampSettingsPosition(
+      dragState.originX + event.clientX - dragState.startX,
+      dragState.originY + event.clientY - dragState.startY,
+    ))
+  }
+
+  /** 结束拖动设置弹窗 */
+  function handleSettingsMouseUp() {
+    settingsDragRef.current = null
+    window.removeEventListener('mousemove', handleSettingsMouseMove)
+    window.removeEventListener('mouseup', handleSettingsMouseUp)
+  }
+
   return (
     <header className="titlebar-drag relative flex items-center h-14 px-4 bg-background-elevated border-b border-border gap-3">
       {/* URL 输入区域 */}
@@ -149,7 +251,7 @@ export function Header() {
       {/* 设置入口 - 放在原状态位置 */}
       <div className="flex items-center gap-2 shrink-0 no-drag">
         <button
-          onClick={() => setIsSettingsOpen(true)}
+          onClick={handleOpenSettings}
           className="w-10 h-9 flex items-center justify-center border border-border rounded-md text-foreground-muted hover:text-foreground hover:bg-white/5 transition-colors"
           title="设置"
           aria-label="设置"
@@ -193,8 +295,17 @@ export function Header() {
       </div>
 
       {isSettingsOpen && (
-        <div className="no-drag absolute right-4 top-[calc(100%+8px)] z-50 w-[760px] max-w-[calc(100vw-32px)] rounded-lg border border-border-bright bg-background-elevated shadow-2xl">
-          <SettingsCenter onClose={() => setIsSettingsOpen(false)} />
+        <div
+          className="no-drag fixed z-50 w-[760px] max-w-[calc(100vw-32px)] rounded-lg border border-border-bright bg-background-elevated shadow-2xl"
+          style={{
+            left: `${(settingsPosition || getDefaultSettingsPosition()).x}px`,
+            top: `${(settingsPosition || getDefaultSettingsPosition()).y}px`,
+          }}
+        >
+          <SettingsCenter
+            onClose={() => setIsSettingsOpen(false)}
+            onDragStart={handleSettingsDragStart}
+          />
         </div>
       )}
     </header>
