@@ -1,0 +1,188 @@
+// src/lib/api.ts
+// API 客户端 - 封装与后端的 HTTP 通信
+
+/** 后端基础地址 */
+const BASE_URL = 'http://127.0.0.1:8765'
+
+/**
+ * 通用请求方法
+ * @param path API 路径
+ * @param options 请求选项
+ * @returns 响应数据
+ */
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const url = `${BASE_URL}${path}`
+
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options?.headers,
+    },
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: '请求失败' }))
+    throw new Error(error.detail || `HTTP ${response.status}`)
+  }
+
+  return response.json()
+}
+
+/** 视频 API */
+export const videoApi = {
+  /** 解析 YouTube 视频 */
+  parse: (url: string) =>
+    request<import('@/types').VideoParseResult>('/videos/parse', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
+
+  /** 创建下载任务 */
+  download: (videoId: number, formatId?: string) =>
+    request<{ message: string; task_id: number; output_path?: string }>('/videos/download', {
+      method: 'POST',
+      body: JSON.stringify({ video_id: videoId, format_id: formatId }),
+    }),
+}
+
+/** 画面处理 API */
+export const effectsApi = {
+  /** 获取画面处理预设 */
+  listPresets: () =>
+    request<import('@/types').ProcessingPreset[]>('/effects/presets'),
+
+  /** 保存画面处理预设 */
+  createPreset: (preset: {
+    name: string
+    intensity: 'light' | 'standard' | 'strong' | 'custom'
+    is_default?: boolean
+    config: import('@/types').ProcessingConfig
+  }) =>
+    request<import('@/types').ProcessingPreset>('/effects/presets', {
+      method: 'POST',
+      body: JSON.stringify(preset),
+    }),
+
+  /** 删除画面处理预设 */
+  deletePreset: (id: number) =>
+    request<{ message: string }>(`/effects/presets/${id}`, { method: 'DELETE' }),
+
+  /** 生成 ffmpeg 滤镜字符串 */
+  buildFilterGraph: (preset: import('@/types').ProcessingConfig) =>
+    request<{ filter_graph: string }>('/effects/filter-graph', {
+      method: 'POST',
+      body: JSON.stringify({ preset }),
+    }),
+
+  /** 生成预览片段 */
+  preview: (params: {
+    video_path: string
+    preset: import('@/types').ProcessingConfig
+    start_time?: number
+    duration?: number
+    output_path?: string
+  }) =>
+    request<{ message: string; output_path: string; filter_graph: string }>('/effects/preview', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 执行完整画面处理 */
+  apply: (params: {
+    video_path: string
+    preset: import('@/types').ProcessingConfig
+    output_path?: string
+  }) =>
+    request<{ message: string; output_path: string; filter_graph: string; task_id?: number }>('/effects/apply', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+}
+
+/** 任务 API */
+export const taskApi = {
+  /** 获取任务列表 */
+  list: (status?: string) =>
+    request<import('@/types').DownloadTask[]>(`/tasks${status ? `?status=${status}` : ''}`),
+
+  /** 获取单个任务 */
+  get: (id: number) =>
+    request<import('@/types').DownloadTask>(`/tasks/${id}`),
+
+  /** 重试任务 */
+  retry: (id: number) =>
+    request<{ message: string }>(`/tasks/${id}/retry`, { method: 'POST' }),
+}
+
+/** 字幕 API */
+export const subtitleApi = {
+  /** 获取字幕预设列表 */
+  listPresets: () =>
+    request<import('@/types').SubtitlePreset[]>('/subtitles/presets'),
+
+  /** 创建字幕预设 */
+  createPreset: (preset: Partial<import('@/types').SubtitlePreset>) =>
+    request<import('@/types').SubtitlePreset>('/subtitles/presets', {
+      method: 'POST',
+      body: JSON.stringify(preset),
+    }),
+
+  /** 删除字幕预设 */
+  deletePreset: (id: number) =>
+    request<{ message: string }>(`/subtitles/presets/${id}`, { method: 'DELETE' }),
+}
+
+/** API 配置 */
+export const profileApi = {
+  /** 获取文本 API 配置 */
+  listText: () =>
+    request<import('@/types').ApiProfile[]>('/profiles/text'),
+
+  /** 创建文本 API 配置 */
+  createText: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string }) =>
+    request<import('@/types').ApiProfile>('/profiles/text', {
+      method: 'POST',
+      body: JSON.stringify(profile),
+    }),
+
+  /** 获取配音 API 配置 */
+  listVoice: () =>
+    request<import('@/types').ApiProfile[]>('/profiles/voice'),
+
+  /** 创建配音 API 配置 */
+  createVoice: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string }) =>
+    request<import('@/types').ApiProfile>('/profiles/voice', {
+      method: 'POST',
+      body: JSON.stringify(profile),
+    }),
+
+  /** 测试配置连接 */
+  test: (type: string, id: number) =>
+    request<{ message: string; status: string }>(`/profiles/test/${type}/${id}`, { method: 'POST' }),
+}
+
+/** 配音 API */
+export const voiceApi = {
+  /** 生成配音 */
+  generate: (text: string, profileId: number, voice?: string) =>
+    request<{ message: string; output_path: string }>('/voice/generate', {
+      method: 'POST',
+      body: JSON.stringify({ text, profile_id: profileId, voice }),
+    }),
+}
+
+/** 导出 API */
+export const exportApi = {
+  /** 创建导出任务 */
+  create: (params: {
+    video_path: string
+    subtitle_path?: string
+    audio_path?: string
+    output_format?: string
+  }) =>
+    request<{ message: string; task_id: number }>('/exports/create', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+}
