@@ -110,6 +110,9 @@ interface EffectsSettingsPanelProps {
   onClose?: () => void
 }
 
+/** 画面处理内部分类 */
+type EffectsSection = 'basic' | 'adjustments' | 'canvas' | 'motion' | 'output'
+
 /**
  * 自动化画面处理设置面板
  * 设置好参数后可保存模板、生成参数、预览，并由顶部一键流程复用。
@@ -121,6 +124,7 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
   const [videoPath, setVideoPath] = useState('')
   const [filterGraph, setFilterGraph] = useState('')
   const [isBusy, setIsBusy] = useState(false)
+  const [activeSection, setActiveSection] = useState<EffectsSection>('basic')
   const { tasks, addTask, addLog } = useTaskStore()
 
   const latestVideoPath = useMemo(() => {
@@ -273,71 +277,113 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
 
   const isCompact = variant === 'compact'
 
+  const contentGridClass = isCompact ? 'grid grid-cols-4 gap-3' : 'grid grid-cols-4 gap-3'
+  const twoColumnClass = isCompact ? 'grid grid-cols-2 gap-3' : 'grid grid-cols-2 gap-3'
+  const threeColumnClass = isCompact ? 'grid grid-cols-3 gap-3' : 'grid grid-cols-3 gap-3'
+  const sections: Array<{ id: EffectsSection; label: string }> = [
+    { id: 'basic', label: '基础' },
+    { id: 'adjustments', label: '画面' },
+    { id: 'canvas', label: '画布' },
+    { id: 'motion', label: '运动' },
+    { id: 'output', label: '输出' },
+  ]
+
   return (
-    <div className={isCompact ? 'max-h-[78vh] flex flex-col' : 'h-full flex flex-col'}>
-      <div className={`${isCompact ? 'px-4 py-3' : 'px-4 py-3 border-b border-border'} flex items-center justify-between gap-3`}>
-        <div>
-          <h3 className="text-sm font-medium">{isCompact ? '自动化参数设置' : '画面处理'}</h3>
-          <p className="text-xs text-foreground-muted">设置参数、查看预览，然后由一键完成流程自动执行</p>
+    <div className={isCompact ? 'h-full flex flex-col' : 'h-full flex flex-col'}>
+      <div className={`${isCompact ? 'px-4 py-3 border-b border-border' : 'px-4 py-3 border-b border-border'} flex items-center justify-between gap-3`}>
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium">{isCompact ? '画面处理' : '画面处理'}</h3>
+          <p className="text-xs text-foreground-muted truncate">这里的参数会被一键完成流程自动复用</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={handleBuildFilter} className="h-9 px-3 border border-border rounded-md text-sm hover:bg-white/5">
-            生成参数
+        {onClose && (
+          <button onClick={onClose} className="h-9 w-9 border border-border rounded-md text-sm hover:bg-white/5" title="关闭设置" aria-label="关闭设置">
+            <svg className="w-4 h-4 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
-          <button onClick={handlePreview} disabled={isBusy} className="h-9 px-3 border border-border rounded-md text-sm hover:bg-white/5 disabled:opacity-50">
-            预览
-          </button>
-          <button onClick={handleApply} disabled={isBusy} className="h-9 px-4 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 disabled:opacity-50">
-            {isBusy ? '处理中...' : '开始处理'}
-          </button>
-          {onClose && (
-            <button onClick={onClose} className="h-9 w-9 border border-border rounded-md text-sm hover:bg-white/5" title="关闭设置" aria-label="关闭设置">
-              <svg className="w-4 h-4 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+        )}
+      </div>
+
+      <div className="border-b border-border px-4 py-2">
+        <div className="inline-flex rounded-md border border-border bg-background p-1">
+          {sections.map((section) => (
+            <button
+              key={section.id}
+              onClick={() => setActiveSection(section.id)}
+              className={`h-8 px-4 rounded text-xs transition-colors ${
+                activeSection === section.id
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-foreground-muted hover:text-foreground hover:bg-white/5'
+              }`}
+            >
+              {section.label}
             </button>
-          )}
+          ))}
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4 space-y-4">
-        <section className="grid grid-cols-[1fr_220px_120px] gap-3">
-          <label className="block">
-            <span className="text-xs text-foreground-muted mb-1 block">视频路径</span>
-            <input
-              value={videoPath}
-              onChange={(event) => setVideoPath(event.target.value)}
-              placeholder="下载完成后会自动填入，也可以手动粘贴本地视频路径"
-              className="w-full h-10 px-3 bg-background border border-border rounded-md text-sm"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-foreground-muted mb-1 block">已有预设</span>
-            <select onChange={(event) => handleSelectPreset(event.target.value)} className="w-full h-10 px-3 bg-background border border-border rounded-md text-sm">
-              {presets.map((preset) => (
-                <option key={preset.id} value={preset.id}>{preset.name}</option>
-              ))}
-            </select>
-          </label>
-          <button onClick={() => setConfig(createDefaultProcessingConfig())} className="self-end h-10 border border-border rounded-md text-sm hover:bg-white/5">
-            重置
-          </button>
-        </section>
+      <div className="flex-1 overflow-auto p-4">
+        {activeSection === 'basic' && (
+        <section className="bg-background-elevated border border-border rounded-lg p-4 space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h4 className="text-sm font-medium">自动化处理模板</h4>
+              <p className="mt-1 text-xs text-foreground-muted">先选预设和视频路径，再预览或交给一键完成使用</p>
+            </div>
+          </div>
 
-        <section className="grid grid-cols-[1fr_160px] gap-3">
-          <input
-            value={presetName}
-            onChange={(event) => setPresetName(event.target.value)}
-            placeholder="预设名称"
-            className="h-10 px-3 bg-background border border-border rounded-md text-sm"
-          />
-          <button onClick={handleSavePreset} className="h-10 bg-accent text-accent-foreground rounded-md text-sm font-medium hover:bg-accent/90">
+          <div className="grid grid-cols-[1fr_190px_88px] gap-3">
+            <label className="block min-w-0">
+              <span className="text-xs text-foreground-muted mb-1 block">视频路径</span>
+              <input
+                value={videoPath}
+                onChange={(event) => setVideoPath(event.target.value)}
+                placeholder="下载完成后自动填入，也可以粘贴本地视频路径"
+                className="w-full h-9 px-3 bg-background border border-border rounded-md text-sm"
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-foreground-muted mb-1 block">已有预设</span>
+              <select onChange={(event) => handleSelectPreset(event.target.value)} className="w-full h-9 px-3 bg-background border border-border rounded-md text-sm">
+                {presets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>{preset.name}</option>
+                ))}
+              </select>
+            </label>
+            <button onClick={() => setConfig(createDefaultProcessingConfig())} className="self-end h-9 border border-border rounded-md text-sm hover:bg-white/5">
+              重置
+            </button>
+          </div>
+
+          <div className="grid grid-cols-[1fr_110px] gap-3">
+            <input
+              value={presetName}
+              onChange={(event) => setPresetName(event.target.value)}
+              placeholder="预设名称"
+              className="h-9 px-3 bg-background border border-border rounded-md text-sm"
+            />
+            <button onClick={handleSavePreset} className="h-9 bg-accent text-accent-foreground rounded-md text-sm font-medium hover:bg-accent/90">
             保存模板
           </button>
-        </section>
+          </div>
 
+          <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-3">
+            <button onClick={handleBuildFilter} className="h-8 px-3 border border-border rounded-md text-xs hover:bg-white/5">
+              生成参数
+            </button>
+            <button onClick={handlePreview} disabled={isBusy} className="h-8 px-3 border border-border rounded-md text-xs hover:bg-white/5 disabled:opacity-50">
+              预览
+            </button>
+            <button onClick={handleApply} disabled={isBusy} className="h-8 px-4 bg-primary text-primary-foreground rounded-md text-xs font-medium hover:bg-primary/90 disabled:opacity-50">
+              {isBusy ? '处理中...' : '开始处理'}
+            </button>
+          </div>
+        </section>
+        )}
+
+        {activeSection === 'adjustments' && (
         <Panel title="画面调整（不同视频画面随机微调）" enabled={config.adjustments.enabled} onToggle={(value) => updateValue(['adjustments', 'enabled'], value)}>
-          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
+          <div className="grid grid-cols-3 gap-3">
             <RangeField label="亮度" value={config.adjustments.brightness} onChange={(updates) => updateRange(['adjustments', 'brightness'], updates)} />
             <RangeField label="对比度" value={config.adjustments.contrast} onChange={(updates) => updateRange(['adjustments', 'contrast'], updates)} />
             <RangeField label="饱和度" value={config.adjustments.saturation} onChange={(updates) => updateRange(['adjustments', 'saturation'], updates)} />
@@ -345,9 +391,11 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
             <RangeField label="降噪" value={config.adjustments.denoise} onChange={(updates) => updateRange(['adjustments', 'denoise'], updates)} />
           </div>
         </Panel>
+        )}
 
+        {activeSection === 'canvas' && (
         <Panel title="分辨率与画布" enabled={config.canvas.enabled} onToggle={(value) => updateValue(['canvas', 'enabled'], value)}>
-          <div className={`grid ${isCompact ? 'grid-cols-2' : 'grid-cols-4'} gap-3`}>
+          <div className={contentGridClass}>
             <SelectField label="分辨率" value={config.canvas.resolution} options={[['720p', '720p'], ['1080p', '1080p'], ['original', '原分辨率'], ['custom', '自定义']]} onChange={(value) => updateValue(['canvas', 'resolution'], value)} />
             <SelectField label="模式" value={config.canvas.mode} options={[['keep', '原比例'], ['stretch', '拉伸'], ['crop', '裁切'], ['blur_background', '背景模糊']]} onChange={(value) => updateValue(['canvas', 'mode'], value)} />
             <NumberField label="宽度" value={config.canvas.width} onChange={(value) => updateValue(['canvas', 'width'], value)} />
@@ -359,9 +407,12 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
             <Checkbox label="宫格分屏（后续扩展）" checked={config.canvas.grid_enabled} onChange={(value) => updateValue(['canvas', 'grid_enabled'], value)} />
           </div>
         </Panel>
+        )}
 
+        {activeSection === 'motion' && (
+        <div className="space-y-4">
         <Panel title="旋转与翻转" enabled={config.transform.enabled} onToggle={(value) => updateValue(['transform', 'enabled'], value)}>
-          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
+          <div className={twoColumnClass}>
             <SelectField label="旋转" value={config.transform.rotate_mode} options={[['none', '不旋转'], ['left90', '左转90度'], ['right90', '右转90度']]} onChange={(value) => updateValue(['transform', 'rotate_mode'], value)} />
             <RangeField label="随机轻微旋转" value={config.transform.random_rotate} onChange={(updates) => updateRange(['transform', 'random_rotate'], updates)} />
           </div>
@@ -374,7 +425,7 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
         </Panel>
 
         <Panel title="帧率与时长变化" enabled={config.timing.enabled} onToggle={(value) => updateValue(['timing', 'enabled'], value)}>
-          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
+          <div className={twoColumnClass}>
             <RangeField label="帧率" value={config.timing.fps} onChange={(updates) => updateRange(['timing', 'fps'], updates)} />
             <RangeField label="动态缩放" value={config.timing.dynamic_zoom} onChange={(updates) => updateRange(['timing', 'dynamic_zoom'], updates)} />
           </div>
@@ -385,9 +436,13 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
             </div>
           </div>
         </Panel>
+        </div>
+        )}
 
+        {activeSection === 'output' && (
+        <div className="space-y-4">
         <Panel title="码率与清晰度" enabled={config.bitrate.enabled} onToggle={(value) => updateValue(['bitrate', 'enabled'], value)}>
-          <div className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-3'} gap-3`}>
+          <div className={threeColumnClass}>
             <SelectField label="模式" value={config.bitrate.mode} options={[['fixed', '定值'], ['multiplier', '倍率']]} onChange={(value) => updateValue(['bitrate', 'mode'], value)} />
             <SelectField label="方案" value={config.bitrate.quality_mode} options={[['balanced', '均衡'], ['quality', '保持清晰优先'], ['size', '控制体积优先']]} onChange={(value) => updateValue(['bitrate', 'quality_mode'], value)} />
             <RangeField label="固定码率 kb/s" value={config.bitrate.fixed_kbps} onChange={(updates) => updateRange(['bitrate', 'fixed_kbps'], updates)} />
@@ -405,6 +460,8 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
             </pre>
           </section>
         )}
+        </div>
+        )}
       </div>
     </div>
   )
@@ -414,7 +471,7 @@ export function EffectsSettingsPanel({ variant = 'page', onClose }: EffectsSetti
 function Panel({ title, enabled, onToggle, children }: { title: string; enabled: boolean; onToggle: (value: boolean) => void; children: React.ReactNode }) {
   return (
     <section className="bg-background-elevated border border-border rounded-lg p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between border-b border-border pb-3 mb-3">
         <label className="flex items-center gap-2 text-sm font-medium">
           <input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} />
           {title}
@@ -428,11 +485,19 @@ function Panel({ title, enabled, onToggle, children }: { title: string; enabled:
 /** 随机范围输入组件 */
 function RangeField({ label, value, onChange }: { label: string; value: RandomRange; onChange: (updates: Partial<RandomRange>) => void }) {
   return (
-    <div className="grid grid-cols-[88px_1fr_1fr_72px] items-end gap-2">
-      <label className="text-xs text-foreground-muted pb-2">{label}</label>
-      <NumberInput label="最小" value={value.min} onChange={(next) => onChange({ min: next })} />
-      <NumberInput label="最大" value={value.max} onChange={(next) => onChange({ max: next })} />
-      <label className="flex items-center gap-1 text-xs text-foreground-muted pb-2">
+    <div className="min-w-0 rounded-md border border-border bg-background p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="truncate text-xs font-medium" title={label}>{label}</span>
+        <label className="flex items-center gap-1 text-[10px] text-foreground-muted">
+          <input type="checkbox" checked={value.random} onChange={(event) => onChange({ random: event.target.checked })} />
+          随机
+        </label>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <NumberInput label="最小" value={value.min} onChange={(next) => onChange({ min: next })} />
+        <NumberInput label="最大" value={value.max} onChange={(next) => onChange({ max: next })} />
+      </div>
+      <label className="mt-2 hidden items-center gap-1 text-xs text-foreground-muted">
         <input type="checkbox" checked={value.random} onChange={(event) => onChange({ random: event.target.checked })} />
         随机
       </label>
@@ -450,7 +515,7 @@ function NumberInput({ label, value, onChange }: { label: string; value: number;
         step="0.01"
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
-        className="w-full h-9 px-2 bg-background border border-border rounded-md text-sm"
+        className="w-full h-8 px-2 bg-background border border-border rounded-md text-sm"
       />
     </label>
   )
@@ -461,7 +526,7 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   return (
     <label className="block">
       <span className="text-xs text-foreground-muted mb-1 block">{label}</span>
-      <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} className="w-full h-9 px-3 bg-background border border-border rounded-md text-sm" />
+      <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} className="w-full h-8 px-3 bg-background border border-border rounded-md text-sm" />
     </label>
   )
 }
@@ -471,7 +536,7 @@ function SelectField({ label, value, options, onChange }: { label: string; value
   return (
     <label className="block">
       <span className="text-xs text-foreground-muted mb-1 block">{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)} className="w-full h-9 px-3 bg-background border border-border rounded-md text-sm">
+      <select value={value} onChange={(event) => onChange(event.target.value)} className="w-full h-8 px-3 bg-background border border-border rounded-md text-sm">
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue}>{optionLabel}</option>
         ))}

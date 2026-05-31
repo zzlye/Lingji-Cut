@@ -5,11 +5,12 @@ import { useEffect, useState } from 'react'
 import { ApiConfigPanel } from './ApiConfigPanel'
 import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
+import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { settingsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 
 /** 设置页签类型 */
-type SettingsTab = 'api' | 'subtitle' | 'voice' | 'paths'
+type SettingsTab = 'effects' | 'api' | 'subtitle' | 'voice' | 'paths'
 
 /** 设置中心属性 */
 interface SettingsCenterProps {
@@ -24,13 +25,13 @@ interface SettingsCenterProps {
  * 放在顶部齿轮弹层内，避免多个配置入口分散在侧边栏。
  */
 export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('api')
+  const [activeTab, setActiveTab] = useState<SettingsTab>('effects')
 
   return (
-    <div className="h-[460px] max-h-[62vh] flex flex-col">
+    <div className="h-[600px] max-h-[78vh] flex flex-col">
       <div
         onMouseDown={onDragStart}
-        className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3 cursor-move select-none"
+        className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 cursor-move select-none"
       >
         <div>
           <h3 className="text-sm font-medium">设置</h3>
@@ -48,7 +49,8 @@ export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
       </div>
 
       <div className="flex flex-1 min-h-0">
-        <nav className="w-36 border-r border-border p-2.5 space-y-1">
+        <nav className="w-40 border-r border-border p-2.5 space-y-1">
+          <SettingsTabButton id="effects" active={activeTab} onClick={setActiveTab} label="画面处理" />
           <SettingsTabButton id="api" active={activeTab} onClick={setActiveTab} label="API 设置" />
           <SettingsTabButton id="subtitle" active={activeTab} onClick={setActiveTab} label="字幕设置" />
           <SettingsTabButton id="voice" active={activeTab} onClick={setActiveTab} label="配音配置" />
@@ -56,6 +58,7 @@ export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
         </nav>
 
         <div className="flex-1 min-w-0 overflow-hidden">
+          {activeTab === 'effects' && <EffectsSettingsPanel variant="compact" />}
           {activeTab === 'api' && <ApiConfigPanel compact />}
           {activeTab === 'subtitle' && <SubtitleEditor compact />}
           {activeTab === 'voice' && <VoiceConfigPanel compact />}
@@ -71,7 +74,7 @@ function SettingsTabButton({ id, active, onClick, label }: { id: SettingsTab; ac
   return (
     <button
       onClick={() => onClick(id)}
-      className={`w-full h-10 px-3 rounded-md text-left text-sm transition-colors ${
+      className={`w-full min-h-10 px-3 py-2 rounded-md text-left text-sm transition-colors ${
         active === id
           ? 'bg-primary/20 text-primary'
           : 'text-foreground-muted hover:bg-white/5 hover:text-foreground'

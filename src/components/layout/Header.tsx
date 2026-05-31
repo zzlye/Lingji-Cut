@@ -8,8 +8,8 @@ import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { SettingsCenter } from '@/features/settings/SettingsCenter'
 
 /** 设置弹窗默认尺寸和窗口边距 */
-const SETTINGS_MODAL_WIDTH = 760
-const SETTINGS_MODAL_HEIGHT = 460
+const SETTINGS_MODAL_WIDTH = 960
+const SETTINGS_MODAL_HEIGHT = 600
 const SETTINGS_MODAL_MARGIN = 16
 
 /** 设置弹窗坐标 */
@@ -296,7 +296,7 @@ export function Header() {
 
       {isSettingsOpen && (
         <div
-          className="no-drag fixed z-50 w-[760px] max-w-[calc(100vw-32px)] rounded-lg border border-border-bright bg-background-elevated shadow-2xl"
+          className="no-drag fixed z-50 w-[960px] max-w-[calc(100vw-32px)] rounded-lg border border-border-bright bg-background-elevated shadow-2xl"
           style={{
             left: `${(settingsPosition || getDefaultSettingsPosition()).x}px`,
             top: `${(settingsPosition || getDefaultSettingsPosition()).y}px`,
