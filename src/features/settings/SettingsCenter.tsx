@@ -25,11 +25,10 @@ export function SettingsCenter({ onClose }: SettingsCenterProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>('api')
 
   return (
-    <div className="max-h-[78vh] min-h-[560px] flex flex-col">
-      <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+    <div className="h-[460px] max-h-[62vh] flex flex-col">
+      <div className="px-4 py-2.5 border-b border-border flex items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium">设置</h3>
-          <p className="text-xs text-foreground-muted">API、字幕、配音和项目文件夹</p>
         </div>
         <button
           onClick={onClose}
@@ -44,7 +43,7 @@ export function SettingsCenter({ onClose }: SettingsCenterProps) {
       </div>
 
       <div className="flex flex-1 min-h-0">
-        <nav className="w-40 border-r border-border p-3 space-y-1">
+        <nav className="w-36 border-r border-border p-2.5 space-y-1">
           <SettingsTabButton id="api" active={activeTab} onClick={setActiveTab} label="API 设置" />
           <SettingsTabButton id="subtitle" active={activeTab} onClick={setActiveTab} label="字幕设置" />
           <SettingsTabButton id="voice" active={activeTab} onClick={setActiveTab} label="配音配置" />

@@ -193,7 +193,7 @@ export function Header() {
       </div>
 
       {isSettingsOpen && (
-        <div className="no-drag absolute left-4 right-4 top-[calc(100%+8px)] z-50 rounded-lg border border-border-bright bg-background-elevated shadow-2xl">
+        <div className="no-drag absolute right-4 top-[calc(100%+8px)] z-50 w-[760px] max-w-[calc(100vw-32px)] rounded-lg border border-border-bright bg-background-elevated shadow-2xl">
           <SettingsCenter onClose={() => setIsSettingsOpen(false)} />
         </div>
       )}

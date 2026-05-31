@@ -8,21 +8,13 @@ import { Sidebar } from './Sidebar'
 import { LogPanel } from './LogPanel'
 import { TaskPanel } from '@/features/tasks/TaskPanel'
 import { VideoPreview } from '@/features/download/VideoPreview'
-import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
-import { ApiConfigPanel } from '@/features/settings/ApiConfigPanel'
-import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { LibraryPanel } from '@/features/library/LibraryPanel'
 import { HistoryPanel } from '@/features/history/HistoryPanel'
-import { EffectsPanel } from '@/features/effects/EffectsPanel'
 
 /** 侧边栏导航项类型 */
 export type SidebarItem =
-  | 'tasks'       // 任务队列
-  | 'effects'     // 画面处理
   | 'library'     // 素材库
-  | 'subtitles'   // 字幕预设
-  | 'api'         // API 配置
-  | 'voice'       // 配音配置
+  | 'tasks'       // 任务队列
   | 'history'     // 历史记录
 
 /**
@@ -31,7 +23,7 @@ export type SidebarItem =
  */
 export function AppShell() {
   // 当前选中的侧边栏项
-  const [activeItem, setActiveItem] = useState<SidebarItem>('tasks')
+  const [activeItem, setActiveItem] = useState<SidebarItem>('library')
   // 日志面板是否展开
   const [isLogExpanded, setIsLogExpanded] = useState(false)
   // 右侧预览面板是否折叠
@@ -89,21 +81,13 @@ export function AppShell() {
  */
 function ContentPanel({ item }: { item: SidebarItem }) {
   switch (item) {
-    case 'tasks':
-      return <TaskPanel />
-    case 'effects':
-      return <EffectsPanel />
     case 'library':
       return <LibraryPanel />
-    case 'subtitles':
-      return <SubtitleEditor />
-    case 'api':
-      return <ApiConfigPanel />
-    case 'voice':
-      return <VoiceConfigPanel />
+    case 'tasks':
+      return <TaskPanel />
     case 'history':
       return <HistoryPanel />
     default:
-      return <TaskPanel />
+      return <LibraryPanel />
   }
 }
