@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .models import init_db
-from .api import videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router
+from .api import videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router
 
 # 创建 FastAPI 应用实例
 app = FastAPI(
@@ -34,6 +34,7 @@ app.include_router(profiles_router)
 app.include_router(voice_router)
 app.include_router(exports_router)
 app.include_router(effects_router)
+app.include_router(settings_router)
 
 
 @app.on_event("startup")
@@ -62,7 +63,8 @@ async def root():
             "voice": "/voice",
             "exports": "/exports",
             "profiles": "/profiles",
-            "effects": "/effects"
+            "effects": "/effects",
+            "settings": "/settings"
         }
     }
 

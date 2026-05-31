@@ -186,3 +186,10 @@ export const exportApi = {
       body: JSON.stringify(params),
     }),
 }
+
+/** 设置 API */
+export const settingsApi = {
+  /** 获取项目文件夹和工具路径 */
+  paths: () =>
+    request<Record<string, { path: string; exists: boolean }>>('/settings/paths'),
+}

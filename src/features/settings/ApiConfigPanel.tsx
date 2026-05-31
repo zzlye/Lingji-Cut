@@ -10,7 +10,7 @@ import { useTaskStore } from '@/stores/taskStore'
  * API 配置面板
  * 支持添加、查看、测试文本 API 和配音 API 配置
  */
-export function ApiConfigPanel() {
+export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [activeTab, setActiveTab] = useState<'text' | 'voice'>('text')
   const [profiles, setProfiles] = useState<ApiProfile[]>([])
   const [isAdding, setIsAdding] = useState(false)
@@ -75,6 +75,12 @@ export function ApiConfigPanel() {
 
   return (
     <div className="h-full flex flex-col">
+      {!compact && (
+        <div className="px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-medium">API 配置</h3>
+        </div>
+      )}
+
       {/* 标签切换 */}
       <div className="flex border-b border-border">
         <button

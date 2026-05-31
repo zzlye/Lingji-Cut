@@ -4,7 +4,8 @@
 import { useState } from 'react'
 import { videoApi, effectsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
-import { EffectsSettingsPanel, loadAutomationConfig } from '@/features/effects/EffectsPanel'
+import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
+import { SettingsCenter } from '@/features/settings/SettingsCenter'
 
 /**
  * 顶部栏组件
@@ -17,7 +18,7 @@ export function Header() {
   const [isParsing, setIsParsing] = useState(false)
   // 是否正在执行一键流程
   const [isRunningAuto, setIsRunningAuto] = useState(false)
-  // 自动化设置弹层是否打开
+  // 设置中心弹层是否打开
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   // 全局状态
   const { setCurrentVideo, setParsing, addLog, addTask } = useTaskStore()
@@ -130,17 +131,6 @@ export function Header() {
           className="flex-1 h-9 px-3 bg-background border border-border rounded-md text-sm text-foreground placeholder:text-foreground-muted focus:outline-none focus:border-primary transition-colors"
         />
         <button
-          onClick={() => setIsSettingsOpen(true)}
-          className="w-10 h-9 flex items-center justify-center border border-border rounded-md text-foreground-muted hover:text-foreground hover:bg-white/5 transition-colors"
-          title="自动化参数设置"
-          aria-label="自动化参数设置"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
-        <button
           onClick={handleParse}
           disabled={!url.trim() || isParsing}
           className="h-9 min-w-28 px-6 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -156,12 +146,19 @@ export function Header() {
         </button>
       </div>
 
-      {/* 全局任务状态 */}
+      {/* 设置入口 - 放在原状态位置 */}
       <div className="flex items-center gap-2 shrink-0 no-drag">
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-background/50 text-xs">
-          <span className={`w-2 h-2 rounded-full ${isParsing ? 'bg-warning animate-pulse' : 'bg-success'}`} />
-          <span className="text-foreground-muted">{isRunningAuto ? '自动化' : isParsing ? '解析中' : '就绪'}</span>
-        </div>
+        <button
+          onClick={() => setIsSettingsOpen(true)}
+          className="w-10 h-9 flex items-center justify-center border border-border rounded-md text-foreground-muted hover:text-foreground hover:bg-white/5 transition-colors"
+          title="设置"
+          aria-label="设置"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </button>
       </div>
 
       {/* 窗口控制按钮 */}
@@ -197,7 +194,7 @@ export function Header() {
 
       {isSettingsOpen && (
         <div className="no-drag absolute left-4 right-4 top-[calc(100%+8px)] z-50 rounded-lg border border-border-bright bg-background-elevated shadow-2xl">
-          <EffectsSettingsPanel variant="compact" onClose={() => setIsSettingsOpen(false)} />
+          <SettingsCenter onClose={() => setIsSettingsOpen(false)} />
         </div>
       )}
     </header>

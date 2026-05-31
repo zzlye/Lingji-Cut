@@ -8,6 +8,7 @@ from .profiles import router as profiles_router
 from .voice import router as voice_router
 from .exports import router as exports_router
 from .effects import router as effects_router
+from .settings import router as settings_router
 
 __all__ = [
     "videos_router",
@@ -17,4 +18,5 @@ __all__ = [
     "voice_router",
     "exports_router",
     "effects_router",
+    "settings_router",
 ]

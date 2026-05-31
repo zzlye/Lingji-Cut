@@ -9,7 +9,7 @@ import { useTaskStore } from '@/stores/taskStore'
  * 配音配置面板
  * 配置配音参数和测试配音生成
  */
-export function VoiceConfigPanel() {
+export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [text, setText] = useState('')
   const [profileId, setProfileId] = useState(1)
   const [voice, setVoice] = useState('alloy')
@@ -38,9 +38,11 @@ export function VoiceConfigPanel() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-4 py-3 border-b border-border">
-        <h3 className="text-sm font-medium">配音配置</h3>
-      </div>
+      {!compact && (
+        <div className="px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-medium">配音配置</h3>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-4 space-y-4">
         {/* 配置说明 */}

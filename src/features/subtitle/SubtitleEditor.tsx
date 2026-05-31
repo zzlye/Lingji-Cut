@@ -10,7 +10,7 @@ import { useTaskStore } from '@/stores/taskStore'
  * 字幕预设配置面板
  * 支持添加、编辑、删除字幕样式预设
  */
-export function SubtitleEditor() {
+export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [presets, setPresets] = useState<SubtitlePreset[]>([])
   const [isAdding, setIsAdding] = useState(false)
   const { addLog } = useTaskStore()
@@ -83,9 +83,11 @@ export function SubtitleEditor() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-4 py-3 border-b border-border">
-        <h3 className="text-sm font-medium">字幕预设</h3>
-      </div>
+      {!compact && (
+        <div className="px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-medium">字幕预设</h3>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-4">
         {/* 添加按钮 */}
