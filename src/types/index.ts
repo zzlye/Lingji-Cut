@@ -79,7 +79,7 @@ export interface SubtitlePreset {
   shadow_x: number
   shadow_y: number
   background_alpha: number
-  position: 'bottom' | 'top' | 'center'
+  position: 'top_left' | 'top' | 'top_right' | 'middle_left' | 'center' | 'middle_right' | 'bottom_left' | 'bottom' | 'bottom_right'
   margin_v: number
 }
 

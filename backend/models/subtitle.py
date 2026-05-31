@@ -44,7 +44,7 @@ class SubtitlePreset(Base):
     shadow_y = Column(Integer, default=2)
     # 背景透明度（0-255）
     background_alpha = Column(Integer, default=0)
-    # 位置（bottom、top、center）
+    # 位置（九宫格：top_left、top、top_right、middle_left、center、middle_right、bottom_left、bottom、bottom_right）
     position = Column(String(20), default="bottom")
     # 边距
     margin_v = Column(Integer, default=30)

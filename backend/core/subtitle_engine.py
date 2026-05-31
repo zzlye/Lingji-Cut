@@ -101,11 +101,17 @@ class SubtitleEngine:
         position = preset.get("position", "bottom")
         margin_v = preset.get("margin_v", 30)
 
-        # 位置映射
+        # 位置映射，ASS 对齐值按数字键盘方向定义
         alignment_map = {
-            "bottom": 2,    # 底部居中
-            "top": 8,       # 顶部居中
-            "center": 5,    # 中间居中
+            "bottom_left": 1,   # 左下
+            "bottom": 2,        # 底部居中
+            "bottom_right": 3,  # 右下
+            "middle_left": 4,   # 左中
+            "center": 5,        # 居中
+            "middle_right": 6,  # 右中
+            "top_left": 7,      # 左上
+            "top": 8,           # 顶部居中
+            "top_right": 9,     # 右上
         }
         alignment = alignment_map.get(position, 2)
 
