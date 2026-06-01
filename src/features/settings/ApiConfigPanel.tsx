@@ -78,6 +78,8 @@ function createDefaultSettings(): TextApiSettings {
     retry_count: 2,
     retry_interval_ms: 1200,
     rate_limit_rpm: 60,
+    subtitle_batch_size: 12,
+    subtitle_batch_chars: 2800,
     system_prompt: '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。',
     response_format: 'text',
     stream: false,
@@ -403,6 +405,8 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
                 <NumberField label="失败重试" value={settings.retry_count} min={0} max={10} step={1} onChange={(value) => updateSetting('retry_count', Math.round(value))} />
                 <NumberField label="重试间隔（毫秒）" value={settings.retry_interval_ms} min={100} max={30000} step={100} onChange={(value) => updateSetting('retry_interval_ms', Math.round(value))} />
                 <NumberField label="限速 RPM" value={settings.rate_limit_rpm} min={0} max={10000} step={1} onChange={(value) => updateSetting('rate_limit_rpm', Math.round(value))} />
+                <NumberField label="字幕批量条数" value={settings.subtitle_batch_size} min={1} max={60} step={1} onChange={(value) => updateSetting('subtitle_batch_size', Math.round(value))} />
+                <NumberField label="批量字符上限" value={settings.subtitle_batch_chars} min={200} max={12000} step={100} onChange={(value) => updateSetting('subtitle_batch_chars', Math.round(value))} />
               </div>
             </section>
           </main>

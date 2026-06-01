@@ -120,6 +120,8 @@ export interface TextApiSettings {
   retry_count: number
   retry_interval_ms: number
   rate_limit_rpm: number
+  subtitle_batch_size: number
+  subtitle_batch_chars: number
   system_prompt: string
   response_format: 'text' | 'json'
   stream: boolean

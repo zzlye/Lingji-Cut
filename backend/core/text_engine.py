@@ -1,6 +1,10 @@
 # backend/core/text_engine.py
 # 文本模型引擎 - 调用 OpenAI、Gemini、Anthropic 和兼容渠道处理字幕文本
 
+import asyncio
+import json
+import re
+import time
 from typing import Any
 
 from ..utils import get_logger
@@ -31,14 +35,138 @@ class TextEngine:
         prompt = self._build_prompt(text, operation, target_language, options)
         logger.info(f"调用文本模型处理字幕: {provider_type}, operation={operation}")
 
+        return await self._call_prompt_with_retry(
+            prompt=prompt,
+            provider_type=provider_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=options,
+        )
+
+    async def process_subtitle_entries(
+        self,
+        entries: list[dict[str, Any]],
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any] | None = None,
+        operation: str = "polish",
+        target_language: str = "",
+        progress_callback: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        按字幕条目分批处理文本，并保持每条字幕原有时间轴。
+        返回 entries 结构，text 被替换为处理后的内容。
+        """
+        if not entries:
+            return []
+
+        options = settings or {}
+        chunks = self._chunk_subtitle_entries(
+            entries,
+            batch_size=self._int(options.get("subtitle_batch_size"), 12),
+            max_chars=self._int(options.get("subtitle_batch_chars"), 2800),
+        )
+        if not chunks:
+            return [dict(entry) for entry in entries]
+
+        concurrency = max(1, min(16, self._int(options.get("concurrency"), 2)))
+        semaphore = asyncio.Semaphore(concurrency)
+        limiter = _AsyncRateLimiter(self._int(options.get("rate_limit_rpm"), 0))
+        results: list[list[dict[str, Any]] | None] = [None] * len(chunks)
+
+        async def run_chunk(index: int, chunk: list[dict[str, Any]]) -> None:
+            """执行单个字幕批次，并保存原始顺序"""
+            async with semaphore:
+                await limiter.wait()
+                results[index] = await self._process_subtitle_chunk(
+                    chunk=chunk,
+                    provider_type=provider_type,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    settings=options,
+                    operation=operation,
+                    target_language=target_language,
+                )
+                if progress_callback:
+                    progress_callback((index + 1) / len(chunks) * 100)
+
+        await asyncio.gather(*(run_chunk(index, chunk) for index, chunk in enumerate(chunks)))
+
+        processed: list[dict[str, Any]] = []
+        for index, chunk in enumerate(chunks):
+            processed.extend(results[index] or [dict(entry) for entry in chunk])
+        return processed
+
+    async def _call_prompt_with_retry(
+        self,
+        prompt: str,
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """按配置执行文本模型请求，支持失败重试"""
+        retry_count = max(0, self._int(settings.get("retry_count"), 0))
+        retry_interval_ms = max(0, self._int(settings.get("retry_interval_ms"), 1000))
+        last_error: Exception | None = None
+
+        for attempt in range(retry_count + 1):
+            try:
+                return await self._call_prompt_once(prompt, provider_type, api_key, base_url, model, settings)
+            except Exception as exc:
+                last_error = exc
+                if attempt >= retry_count:
+                    break
+                await asyncio.sleep(retry_interval_ms / 1000)
+
+        raise RuntimeError(str(last_error) if last_error else "文本 API 调用失败")
+
+    async def _call_prompt_once(
+        self,
+        prompt: str,
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """根据渠道类型执行一次文本模型请求"""
         if provider_type in {"openai", "openai_compatible", "custom", "minimax", "xiaomi_mimo"}:
-            return await self._call_openai_compatible(prompt, provider_type, api_key, base_url, model, options)
+            return await self._call_openai_compatible(prompt, provider_type, api_key, base_url, model, settings)
         if provider_type in {"gemini", "gemini_compatible"}:
-            return await self._call_gemini(prompt, api_key, base_url, model, options)
+            return await self._call_gemini(prompt, api_key, base_url, model, settings)
         if provider_type == "anthropic":
-            return await self._call_anthropic(prompt, api_key, base_url, model, options)
+            return await self._call_anthropic(prompt, api_key, base_url, model, settings)
 
         raise ValueError(f"不支持的文本 API 渠道: {provider_type}")
+
+    async def _process_subtitle_chunk(
+        self,
+        chunk: list[dict[str, Any]],
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+        operation: str,
+        target_language: str,
+    ) -> list[dict[str, Any]]:
+        """处理单个字幕批次，模型输出解析失败时退回原条目"""
+        prompt = self._build_subtitle_entries_prompt(chunk, operation, target_language, settings)
+        response_text = await self._call_prompt_with_retry(
+            prompt=prompt,
+            provider_type=provider_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+        )
+        return self._merge_processed_entries(chunk, response_text)
 
     def _build_prompt(self, text: str, operation: str, target_language: str, settings: dict[str, Any]) -> str:
         """生成字幕处理提示词"""
@@ -50,6 +178,103 @@ class TextEngine:
         }
         instruction = operation_map.get(operation, operation_map["polish"])
         return f"{system_prompt}\n\n{instruction}\n\n要求：只输出处理后的字幕正文，不要输出解释。\n\n原文：\n{text}"
+
+    def _build_subtitle_entries_prompt(self, entries: list[dict[str, Any]], operation: str, target_language: str, settings: dict[str, Any]) -> str:
+        """生成保留字幕编号的批处理提示词"""
+        system_prompt = settings.get("system_prompt") or "你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。"
+        operation_map = {
+            "generate": "请基于每条原字幕生成更适合短视频硬字幕和配音的字幕文案。",
+            "translate": f"请将每条字幕翻译成{target_language or '目标语言'}，保留原意，表达自然。",
+            "polish": "请逐条润色字幕，使其更适合短视频观看和口播，不要添加无关信息。",
+        }
+        instruction = operation_map.get(operation, operation_map["polish"])
+        payload = [
+            {
+                "id": index + 1,
+                "text": str(entry.get("text", "")).replace("\\N", "\n"),
+            }
+            for index, entry in enumerate(entries)
+        ]
+        return (
+            f"{system_prompt}\n\n{instruction}\n\n"
+            "必须保持条目数量和 id 不变。只返回 JSON 数组，不要 Markdown，不要解释。\n"
+            "JSON 格式示例：[{\"id\":1,\"text\":\"处理后的字幕\"}]\n\n"
+            f"原字幕 JSON：\n{json.dumps(payload, ensure_ascii=False)}"
+        )
+
+    def _merge_processed_entries(self, original_entries: list[dict[str, Any]], response_text: str) -> list[dict[str, Any]]:
+        """将模型返回内容按 id 合并回原字幕时间轴"""
+        processed_map = self._parse_processed_subtitle_response(response_text)
+        if not processed_map:
+            lines = [line.strip() for line in response_text.splitlines() if line.strip()]
+            if len(lines) == len(original_entries):
+                processed_map = {index + 1: line for index, line in enumerate(lines)}
+
+        merged: list[dict[str, Any]] = []
+        for index, entry in enumerate(original_entries, 1):
+            next_entry = dict(entry)
+            text = processed_map.get(index)
+            if text:
+                next_entry["text"] = text
+            merged.append(next_entry)
+        return merged
+
+    def _parse_processed_subtitle_response(self, response_text: str) -> dict[int, str]:
+        """解析模型返回的 JSON 或编号列表"""
+        cleaned = self._strip_markdown_fence(response_text.strip())
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, dict) and isinstance(data.get("items"), list):
+                data = data["items"]
+            if isinstance(data, list):
+                parsed: dict[int, str] = {}
+                for index, item in enumerate(data, 1):
+                    if isinstance(item, dict):
+                        item_id = self._int(item.get("id"), index)
+                        text = str(item.get("text") or "").strip()
+                    else:
+                        item_id = index
+                        text = str(item).strip()
+                    if text:
+                        parsed[item_id] = text
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        parsed: dict[int, str] = {}
+        pattern = re.compile(r"^\s*(?:\[?(\d+)\]?[\.:：、\)\-]\s*)(.+?)\s*$")
+        for line in cleaned.splitlines():
+            match = pattern.match(line)
+            if match:
+                parsed[int(match.group(1))] = match.group(2).strip()
+        return parsed
+
+    def _strip_markdown_fence(self, text: str) -> str:
+        """去掉模型可能包裹的 Markdown 代码块"""
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        return text.strip()
+
+    def _chunk_subtitle_entries(self, entries: list[dict[str, Any]], batch_size: int, max_chars: int) -> list[list[dict[str, Any]]]:
+        """按条数和字符数切分字幕批次"""
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_chars = 0
+        safe_batch_size = max(1, batch_size)
+        safe_max_chars = max(200, max_chars)
+
+        for entry in entries:
+            text_len = len(str(entry.get("text", "")))
+            if current and (len(current) >= safe_batch_size or current_chars + text_len > safe_max_chars):
+                chunks.append(current)
+                current = []
+                current_chars = 0
+            current.append(entry)
+            current_chars += text_len
+        if current:
+            chunks.append(current)
+        return chunks
 
     async def _call_openai_compatible(
         self,
@@ -213,3 +438,23 @@ class TextEngine:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+
+class _AsyncRateLimiter:
+    """简单异步限速器，用于控制文本 API 的每分钟请求数"""
+
+    def __init__(self, rpm: int):
+        """初始化限速器，rpm 小于等于 0 表示不限速"""
+        self.interval = 60 / rpm if rpm and rpm > 0 else 0
+        self._lock = asyncio.Lock()
+        self._next_time = 0.0
+
+    async def wait(self) -> None:
+        """等待到下一次允许请求的时间"""
+        if self.interval <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            if self._next_time > now:
+                await asyncio.sleep(self._next_time - now)
+            self._next_time = time.monotonic() + self.interval

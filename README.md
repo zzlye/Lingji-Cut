@@ -41,6 +41,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
   - `/automation/batch/{batch_id}/pause` 和 `/automation/batch/{batch_id}/resume` 支持批次暂停/恢复，暂停会阻止后续待调度任务继续执行。
   - `/automation/run` 保留同步执行入口，方便脚本和测试直接跑完整链路。
   - 字幕步骤会自动选择解析到的字幕轨，并使用默认/首个字幕预设生成 `ASS`，同时尝试烧录硬字幕。
+  - 文本 API 会优先按字幕条目分批处理，保持原时间轴；支持并发数、失败重试、重试间隔、RPM 限速、批量条数和字符上限。
   - 配音为可选步骤：存在已保存配音配置时优先按字幕时间轴分段生成并对齐配音，失败时回退整段配音；没有配置或生成失败时跳过并继续导出。
   - 导出步骤会生成最终 `mp4` 到项目 `exports` 目录。
 - 画面处理预设：轻度、标准、强处理、自定义。
@@ -61,7 +62,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 当前一键流程已经具备闭环，但还有这些产品化限制：
 
 - 字幕内容优先来自 YouTube 原字幕/自动字幕；存在已保存文本 API 配置时，一键流程会默认对字幕正文做润色。
-- 文本 API 已支持生成、翻译、润色入口；一键流程会把处理后的文本映射回原字幕时间轴，后续还需要做更精细的分段批处理和逐句对齐。
+- 文本 API 已支持生成、翻译、润色入口；一键流程会优先逐条/分批处理字幕并保留原时间轴，失败时才回退整段文本映射。
 - 自动配音当前优先使用字幕时间轴分段生成并通过 ffmpeg 对齐为完整音轨；字幕缺失或分段失败时回退整段配音或标题文案。
 - 一键流程已沉到后端后台任务编排，并支持批量入队、批次暂停/恢复、SSE 实时进度、任务重试和断点续跑；后续还需要更细的优先级、定时和失败策略控制。
 
@@ -114,6 +115,7 @@ Invoke-RestMethod http://127.0.0.1:8765/effects/presets
 
 ```powershell
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_subtitle_mapping.py -v
+D:\tools\python-3.12.10-embed\python.exe backend\tests\test_text_engine.py -v
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_local_media_pipeline.py -v
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_automation_jobs.py -v
 ```

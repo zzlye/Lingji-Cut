@@ -632,20 +632,47 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 text_profile = _pick_text_profile(db, request.text_profile_id)
                 if text_profile and request.subtitle_operation != "none":
                     try:
-                        processed_text = asyncio.run(TextEngine().process_text(
-                            text=subtitle_text,
-                            provider_type=text_profile.provider_type,
-                            api_key=decrypt_api_key(text_profile.api_key_encrypted),
-                            base_url=text_profile.base_url,
-                            model=text_profile.model or "",
-                            settings=_load_profile_settings(text_profile),
-                            operation=request.subtitle_operation,
-                            target_language=request.subtitle_target_language or "",
-                        ))
-                        processed_entries = map_text_to_timed_entries(processed_text, entries)
-                        if processed_entries:
-                            entries = processed_entries
-                            subtitle_text = processed_text
+                        text_settings = _load_profile_settings(text_profile)
+                        text_api_key = decrypt_api_key(text_profile.api_key_encrypted)
+                        text_engine = TextEngine()
+
+                        def on_text_progress(progress: float) -> None:
+                            """同步文本 API 批处理进度到字幕阶段"""
+                            subtitle_task.progress = 35 + progress * 0.3
+                            db.commit()
+                            if job:
+                                _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
+
+                        try:
+                            processed_entries = asyncio.run(text_engine.process_subtitle_entries(
+                                entries=entries,
+                                provider_type=text_profile.provider_type,
+                                api_key=text_api_key,
+                                base_url=text_profile.base_url,
+                                model=text_profile.model or "",
+                                settings=text_settings,
+                                operation=request.subtitle_operation,
+                                target_language=request.subtitle_target_language or "",
+                                progress_callback=on_text_progress,
+                            ))
+                            if processed_entries:
+                                entries = processed_entries
+                                subtitle_text = entries_to_plain_text(entries)
+                        except Exception:
+                            processed_text = asyncio.run(text_engine.process_text(
+                                text=subtitle_text,
+                                provider_type=text_profile.provider_type,
+                                api_key=text_api_key,
+                                base_url=text_profile.base_url,
+                                model=text_profile.model or "",
+                                settings=text_settings,
+                                operation=request.subtitle_operation,
+                                target_language=request.subtitle_target_language or "",
+                            ))
+                            processed_entries = map_text_to_timed_entries(processed_text, entries)
+                            if processed_entries:
+                                entries = processed_entries
+                                subtitle_text = processed_text
                     except Exception:
                         # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
                         pass
