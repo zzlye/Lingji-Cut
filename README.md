@@ -38,9 +38,10 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
   - `/automation/batch/start` 支持一次提交多个 YouTube 链接，按用户设置的批次并发数排队执行。
   - `/automation/jobs/{id}/retry` 支持失败或已完成任务按原参数重新进入队列。
   - `/automation/jobs/{id}/resume` 支持断点续跑，会复用已完成且文件仍存在的下载、画面处理、字幕和配音阶段。
+  - `/automation/batch/{batch_id}/pause` 和 `/automation/batch/{batch_id}/resume` 支持批次暂停/恢复，暂停会阻止后续待调度任务继续执行。
   - `/automation/run` 保留同步执行入口，方便脚本和测试直接跑完整链路。
   - 字幕步骤会自动选择解析到的字幕轨，并使用默认/首个字幕预设生成 `ASS`，同时尝试烧录硬字幕。
-  - 配音为可选步骤：存在已保存配音配置时优先使用字幕正文生成配音；没有配置或生成失败时跳过并继续导出。
+  - 配音为可选步骤：存在已保存配音配置时优先按字幕时间轴分段生成并对齐配音，失败时回退整段配音；没有配置或生成失败时跳过并继续导出。
   - 导出步骤会生成最终 `mp4` 到项目 `exports` 目录。
 - 画面处理预设：轻度、标准、强处理、自定义。
 - 画面参数：亮度、对比度、饱和度、锐化、降噪、分辨率、裁切/拉伸/背景模糊、翻转、轻微旋转、帧率、抽帧、动态缩放、固定码率。
@@ -49,7 +50,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - `/effects/apply` 可执行完整画面处理任务。
 - `/subtitles/render` 可下载 YouTube 字幕、生成 `ASS`，并可烧录硬字幕视频。
 - `/subtitles/process-text` 可使用已保存文本 API 生成、翻译或润色字幕正文。
-- `/automation/start`、`/automation/batch/start`、`/automation/jobs`、`/automation/jobs/{id}`、`/automation/jobs/{id}/events`、`/automation/jobs/{id}/retry`、`/automation/jobs/{id}/resume` 可创建、批量入队、列表展示、实时推送、查询、重试和断点续跑后台自动化任务。
+- `/automation/start`、`/automation/batch/start`、`/automation/batch/{batch_id}/pause`、`/automation/batch/{batch_id}/resume`、`/automation/jobs`、`/automation/jobs/{id}`、`/automation/jobs/{id}/events`、`/automation/jobs/{id}/retry`、`/automation/jobs/{id}/resume` 可创建、批量入队、批次暂停/恢复、列表展示、实时推送、查询、重试和断点续跑后台自动化任务。
 - `/automation/run` 可同步执行完整一键流程，并返回每个阶段的任务状态和最终导出路径。
 - 字幕预设支持语言、单/双行、字体、字号、九宫格位置、颜色、描边、阴影、背景透明度和实时预览。
 - 配音配置内置配音 API 管理、音色目录、试听、语速、音量、音调、输出格式、采样率、码率和风格提示。
@@ -61,8 +62,8 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 
 - 字幕内容优先来自 YouTube 原字幕/自动字幕；存在已保存文本 API 配置时，一键流程会默认对字幕正文做润色。
 - 文本 API 已支持生成、翻译、润色入口；一键流程会把处理后的文本映射回原字幕时间轴，后续还需要做更精细的分段批处理和逐句对齐。
-- 自动配音当前优先使用字幕正文，字幕缺失时才回退到标题文案；按字幕时间轴分段配音和对齐仍需继续做。
-- 一键流程已沉到后端后台任务编排，并支持批量入队、SSE 实时进度、任务重试和断点续跑；后续还需要按批次暂停/恢复和更细的调度控制。
+- 自动配音当前优先使用字幕时间轴分段生成并通过 ffmpeg 对齐为完整音轨；字幕缺失或分段失败时回退整段配音或标题文案。
+- 一键流程已沉到后端后台任务编排，并支持批量入队、批次暂停/恢复、SSE 实时进度、任务重试和断点续跑；后续还需要更细的优先级、定时和失败策略控制。
 
 ## 配音渠道支持
 
@@ -116,6 +117,8 @@ D:\tools\python-3.12.10-embed\python.exe backend\tests\test_subtitle_mapping.py 
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_local_media_pipeline.py -v
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_automation_jobs.py -v
 ```
+
+`test_local_media_pipeline.py` 会用本地 ffmpeg 验证画面处理、字幕烧录、导出和分段配音混合，不依赖外部 YouTube 或真实 TTS API。
 
 ## 外部工具路径
 

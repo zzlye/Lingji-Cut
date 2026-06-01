@@ -3,13 +3,20 @@
 
 import base64
 import os
-from typing import Any, List, Optional
+import shutil
+import subprocess
+import tempfile
+from typing import Any, Callable, List, Optional
 
 from ..utils import get_logger
 from .paths import ensure_project_dirs
 
 # 日志记录器
 logger = get_logger("voice")
+
+# 工具路径配置，配音分段对齐时需要用 ffmpeg 混合音轨。
+TOOLS_DIR = r"D:\tools"
+FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
 
 
 class VoiceEngine:
@@ -58,6 +65,135 @@ class VoiceEngine:
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
 
         raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
+
+    async def generate_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """
+        按字幕时间轴生成分段配音，并混合成一个对齐后的完整音轨。
+        segments: [{start_ms, end_ms, text}, ...]
+        """
+        normalized_segments = self._normalize_timed_segments(segments)
+        if not normalized_segments:
+            raise ValueError("没有可生成配音的字幕分段")
+
+        options = settings or {}
+        audio_format = self._provider_audio_format(provider_type, options)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # 分段音频属于临时素材，最终会保留对齐后的完整音轨。
+        temp_dir = tempfile.mkdtemp(prefix="voice_segments_", dir=ensure_project_dirs()["output_dir"])
+        timed_audio_paths: list[dict[str, Any]] = []
+        try:
+            total = len(normalized_segments)
+            for index, segment in enumerate(normalized_segments, 1):
+                segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
+                await self.generate_voice(
+                    text=str(segment["text"]),
+                    output_path=segment_path,
+                    provider_type=provider_type,
+                    voice=voice,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    settings=options,
+                )
+                timed_audio_paths.append({
+                    "path": segment_path,
+                    "start_ms": int(segment["start_ms"]),
+                    "duration_ms": max(1, int(segment["end_ms"]) - int(segment["start_ms"])),
+                })
+                if progress_callback:
+                    progress_callback(10 + index / max(total, 1) * 75)
+
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            if progress_callback:
+                progress_callback(95)
+            return result
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def mix_timed_audio_files(
+        self,
+        timed_audio_paths: list[dict[str, Any]],
+        output_path: str,
+        max_inputs: int = 32,
+    ) -> str:
+        """把多个带起始时间的音频片段混合成完整时间轴音轨"""
+        items = self._normalize_timed_audio_paths(timed_audio_paths)
+        if not items:
+            raise ValueError("没有音频文件可混合")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # Windows 命令行长度有限，输入过多时先分批混合，再合成总音轨。
+        if len(items) > max_inputs:
+            chunk_dir = tempfile.mkdtemp(prefix="voice_mix_chunks_", dir=os.path.dirname(output_path))
+            try:
+                chunk_outputs: list[dict[str, Any]] = []
+                for index in range(0, len(items), max_inputs):
+                    chunk = items[index:index + max_inputs]
+                    chunk_path = os.path.join(chunk_dir, f"chunk_{index // max_inputs:03d}.wav")
+                    self.mix_timed_audio_files(chunk, chunk_path, max_inputs=max_inputs)
+                    chunk_outputs.append({"path": chunk_path, "start_ms": 0})
+                return self.mix_timed_audio_files(chunk_outputs, output_path, max_inputs=max_inputs)
+            finally:
+                shutil.rmtree(chunk_dir, ignore_errors=True)
+
+        cmd = [self._ffmpeg_cmd()]
+        for item in items:
+            cmd.extend(["-i", item["path"]])
+
+        filters: list[str] = []
+        labels: list[str] = []
+        for index, item in enumerate(items):
+            label = f"a{index}"
+            delay = max(0, int(item["start_ms"]))
+            duration_ms = int(item.get("duration_ms") or 0)
+            if duration_ms > 0:
+                duration_seconds = max(0.001, duration_ms / 1000)
+                filters.append(f"[{index}:a]aresample=44100,atrim=0:{duration_seconds:.3f},asetpts=PTS-STARTPTS,adelay={delay}:all=1[{label}]")
+            else:
+                filters.append(f"[{index}:a]aresample=44100,adelay={delay}:all=1[{label}]")
+            labels.append(f"[{label}]")
+
+        if len(labels) == 1:
+            filters.append(f"{labels[0]}anull[out]")
+        else:
+            filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0[out]")
+
+        cmd.extend([
+            "-filter_complex", ";".join(filters),
+            "-map", "[out]",
+            "-ac", "2",
+            "-ar", "44100",
+        ])
+        cmd.extend(self._audio_encoder_args(output_path))
+        cmd.extend(["-y", output_path])
+
+        logger.info(f"混合分段配音: {len(items)} 段 -> {output_path}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"分段配音混合失败: {result.stderr}")
+
+        logger.info(f"分段配音混合完成: {output_path}")
+        return output_path
 
     async def _generate_openai_tts(
         self,
@@ -294,8 +430,6 @@ class VoiceEngine:
 
     def merge_segments(self, audio_paths: List[str], output_path: str) -> str:
         """合并多个音频片段"""
-        import subprocess
-
         if not audio_paths:
             raise ValueError("没有音频文件可合并")
 
@@ -307,7 +441,7 @@ class VoiceEngine:
 
         # 使用 ffmpeg 合并
         cmd = [
-            "ffmpeg",
+            self._ffmpeg_cmd(),
             "-f", "concat",
             "-safe", "0",
             "-i", list_file,
@@ -346,6 +480,53 @@ class VoiceEngine:
             value = str(settings.get("format") or "wav").lower()
             return value if value in {"wav", "pcm16"} else "wav"
         return self._audio_format(settings)
+
+    def _normalize_timed_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """清理字幕分段，过滤空文本和非法时间"""
+        normalized: list[dict[str, Any]] = []
+        for segment in segments:
+            text = " ".join(str(segment.get("text") or "").replace("\\N", " ").split())
+            if not text:
+                continue
+            start_ms = self._int(segment.get("start_ms"), 0)
+            end_ms = self._int(segment.get("end_ms"), start_ms + 1000)
+            normalized.append({
+                "text": text,
+                "start_ms": max(0, start_ms),
+                "end_ms": max(start_ms + 1, end_ms),
+            })
+        return normalized
+
+    def _normalize_timed_audio_paths(self, timed_audio_paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """清理带时间轴的音频路径"""
+        items: list[dict[str, Any]] = []
+        for item in timed_audio_paths:
+            path = str(item.get("path") or "")
+            if not path or not os.path.exists(path):
+                continue
+            items.append({
+                "path": path,
+                "start_ms": max(0, self._int(item.get("start_ms"), 0)),
+                "duration_ms": max(0, self._int(item.get("duration_ms"), 0)),
+            })
+        return items
+
+    def _audio_encoder_args(self, output_path: str) -> list[str]:
+        """根据输出扩展名选择稳定的音频编码参数"""
+        ext = os.path.splitext(output_path)[1].lower().lstrip(".")
+        if ext == "mp3":
+            return ["-c:a", "libmp3lame", "-q:a", "2"]
+        if ext in {"wav", "pcm"}:
+            return ["-c:a", "pcm_s16le"]
+        if ext == "flac":
+            return ["-c:a", "flac"]
+        if ext == "opus":
+            return ["-c:a", "libopus", "-b:a", "128k"]
+        return ["-c:a", "aac", "-b:a", "192k"]
+
+    def _ffmpeg_cmd(self) -> str:
+        """获取 ffmpeg 可执行文件路径"""
+        return FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else "ffmpeg"
 
     def _float(self, value: Any, default: float) -> float:
         """安全读取浮点数"""

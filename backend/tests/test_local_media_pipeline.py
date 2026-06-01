@@ -16,6 +16,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.core.ffmpeg_processor import FFmpegProcessor
 from backend.core.subtitle_engine import SubtitleEngine
+from backend.core.voice_engine import VoiceEngine
 
 
 class LocalMediaPipelineTest(unittest.TestCase):
@@ -27,6 +28,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.processor = FFmpegProcessor()
         self.input_video = os.path.join(self.temp_dir, "input.mp4")
         self.ass_path = os.path.join(self.temp_dir, "subtitle.ass")
+        self.voice_engine = VoiceEngine()
 
     def tearDown(self):
         """清理临时测试文件"""
@@ -61,6 +63,22 @@ class LocalMediaPipelineTest(unittest.TestCase):
             self.assertTrue(os.path.exists(path), path)
             self.assertGreater(os.path.getsize(path), 0, path)
 
+    def test_timed_voice_mix_generates_aligned_audio_file(self):
+        """带时间轴的分段音频可以混合成完整配音文件"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        second_audio = os.path.join(self.temp_dir, "second.wav")
+        output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        self._create_test_audio(second_audio, 880)
+
+        result_path = self.voice_engine.mix_timed_audio_files([
+            {"path": first_audio, "start_ms": 0, "duration_ms": 300},
+            {"path": second_audio, "start_ms": 600, "duration_ms": 300},
+        ], output_audio)
+
+        self.assertTrue(os.path.exists(result_path))
+        self.assertGreater(os.path.getsize(result_path), 0)
+
     def _create_test_video(self):
         """用 ffmpeg 生成短测试视频"""
         cmd = [
@@ -79,6 +97,20 @@ class LocalMediaPipelineTest(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         if result.returncode != 0:
             self.fail(f"生成测试视频失败: {result.stderr}")
+
+    def _create_test_audio(self, output_path: str, frequency: int):
+        """用 ffmpeg 生成短测试音频"""
+        cmd = [
+            self.processor.ffmpeg_cmd,
+            "-f", "lavfi",
+            "-i", f"sine=frequency={frequency}:duration=0.4",
+            "-c:a", "pcm_s16le",
+            "-y",
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if result.returncode != 0:
+            self.fail(f"生成测试音频失败: {result.stderr}")
 
     def _minimal_preset(self):
         """最小处理参数，保证测试快速稳定"""

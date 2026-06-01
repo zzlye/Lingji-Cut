@@ -6,8 +6,41 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _default_stages, _job_to_response, _normalize_batch_urls, _prepare_job_for_resume, _reset_job_for_retry, _stage_output_if_reusable  # noqa: E402
+from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _job_to_response, _normalize_batch_urls, _pause_batch_jobs, _prepare_job_for_resume, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.models import AutomationJobRecord  # noqa: E402
+
+
+class FakeQuery:
+    """测试用查询对象，模拟 SQLAlchemy 的最小行为"""
+
+    def __init__(self, jobs):
+        self.jobs = jobs
+
+    def order_by(self, *_):
+        return self
+
+    def all(self):
+        return self.jobs
+
+    def first(self):
+        return self.jobs[0] if self.jobs else None
+
+
+class FakeDb:
+    """测试用数据库会话，避免污染本地 SQLite"""
+
+    def __init__(self, jobs):
+        self.jobs = jobs
+        self.commit_count = 0
+
+    def query(self, *_):
+        return FakeQuery(self.jobs)
+
+    def commit(self):
+        self.commit_count += 1
+
+    def add(self, job):
+        self.jobs.append(job)
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -19,6 +52,7 @@ class AutomationJobTests(unittest.TestCase):
             status="running",
             progress=32,
             current_step="下载入库",
+            params=json.dumps({"batch_id": "batch-test"}, ensure_ascii=False),
             stages=json.dumps([
                 {"key": "parse", "status": "completed", "progress": 100, "task_id": None, "output_path": None, "error_message": None},
                 {"key": "download", "status": "running", "progress": 42, "task_id": 7, "output_path": None, "error_message": None},
@@ -31,6 +65,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.stages[0].status, "completed")
         self.assertEqual(response.stages[1].progress, 42)
         self.assertEqual(response.stages[1].task_id, 7)
+        self.assertEqual(response.batch_id, "batch-test")
 
     def test_default_stages_include_full_automation_flow(self):
         keys = [stage["key"] for stage in _default_stages()]
@@ -123,6 +158,61 @@ class AutomationJobTests(unittest.TestCase):
             "https://youtube.com/watch?v=1",
             "https://youtube.com/watch?v=2",
         ])
+
+    def test_batch_pause_and_resume_update_pending_jobs(self):
+        jobs = [
+            AutomationJobRecord(id="auto-1", source_url="https://youtube.com/1", status="pending", params=json.dumps({"batch_id": "batch-a"})),
+            AutomationJobRecord(id="auto-2", source_url="https://youtube.com/2", status="running", params=json.dumps({"batch_id": "batch-a"})),
+            AutomationJobRecord(id="auto-3", source_url="https://youtube.com/3", status="completed", params=json.dumps({"batch_id": "batch-a"})),
+            AutomationJobRecord(id="auto-4", source_url="https://youtube.com/4", status="pending", params=json.dumps({"batch_id": "batch-b"})),
+        ]
+        db = FakeDb(jobs)
+
+        paused_count = _pause_batch_jobs(db, "batch-a")
+
+        self.assertEqual(paused_count, 2)
+        self.assertEqual(jobs[0].status, "paused")
+        self.assertEqual(jobs[0].current_step, "批次暂停")
+        self.assertEqual(jobs[1].status, "running")
+        self.assertTrue(json.loads(jobs[0].params)["batch_paused"])
+        self.assertTrue(json.loads(jobs[1].params)["batch_paused"])
+        self.assertEqual(jobs[3].status, "pending")
+
+        resumed_ids = _resume_batch_jobs(db, "batch-a")
+
+        self.assertEqual(resumed_ids, ["auto-1"])
+        self.assertEqual(jobs[0].status, "pending")
+        self.assertEqual(jobs[0].current_step, "等待批次调度")
+        self.assertFalse(json.loads(jobs[0].params)["batch_paused"])
+
+    def test_create_batch_job_stores_concurrency_for_resume_after_restart(self):
+        db = FakeDb([])
+
+        job = _create_automation_job(
+            db,
+            AutomationRunRequest(url="https://youtube.com/watch?v=test"),
+            batch_id="batch-a",
+            batch_concurrency=6,
+        )
+
+        params = json.loads(job.params)
+        self.assertEqual(params["batch_id"], "batch-a")
+        self.assertEqual(params["batch_concurrency"], 6)
+        self.assertEqual(_get_batch_concurrency_from_job(job), 6)
+
+    def test_subtitle_entries_to_voice_segments_preserves_timeline(self):
+        entries = [
+            {"index": 1, "start": "00:00:01,250", "end": "00:00:03,000", "text": "第一句字幕"},
+            {"index": 2, "start": "00:00:03,000", "end": "00:00:05,000", "text": "第二句字幕" * 80},
+        ]
+
+        segments = subtitle_entries_to_voice_segments(entries, max_chars_per_segment=30)
+
+        self.assertGreater(len(segments), 2)
+        self.assertEqual(segments[0]["start_ms"], 1250)
+        self.assertEqual(segments[0]["end_ms"], 3000)
+        self.assertTrue(all(segment["text"] for segment in segments))
+        self.assertEqual(segments[-1]["end_ms"], 5000)
 
 
 if __name__ == "__main__":

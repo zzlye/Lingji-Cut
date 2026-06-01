@@ -45,13 +45,14 @@
 - 配音系统：
   - 配音为可选步骤。
   - 支持从字幕文本、翻译文本或用户自定义文案生成配音。
-  - 当前一键流程优先使用字幕正文生成整段配音；按字幕时间轴分段生成和对齐是后续增强。
+  - 当前一键流程优先按字幕时间轴分段生成配音，并通过 `ffmpeg adelay + amix` 对齐为完整音轨；分段失败时回退整段配音。
   - 支持保留原声、降低原声音量、替换原声。
   - 生成音频后由 `ffmpeg` 合成到最终视频。
 
 - 一键自动化：
   - `POST /automation/start` 创建后台自动化任务，立即返回 `job_id`。
   - `POST /automation/batch/start` 支持多个链接批量入队，复用同一套处理参数，并按批次并发数执行。
+  - `POST /automation/batch/{batch_id}/pause` 和 `POST /automation/batch/{batch_id}/resume` 支持批次暂停/恢复，暂停会阻止后续待调度任务继续执行。
   - `GET /automation/jobs` 和 `GET /automation/jobs/{id}` 展示自动化任务列表、阶段进度、错误和最终导出路径。
   - `GET /automation/jobs/{id}/events` 通过 SSE 推送实时进度；前端异常时降级为查询接口。
   - `POST /automation/jobs/{id}/retry` 支持按原参数重试失败或已完成任务。
@@ -59,7 +60,7 @@
   - `POST /automation/run` 保留同步执行入口，方便脚本、测试和调试直接跑完整链路。
   - 如果已保存文本 API 配置，一键流程会默认对字幕正文做润色；没有文本配置时直接使用 YouTube 字幕。
   - 字幕失败、配音失败属于可跳过阶段，主流程会尽量继续导出。
-  - 当前已是后台任务执行，后续要升级为按批次暂停/恢复和更细的调度控制。
+  - 当前已是后台任务执行，并支持批次暂停/恢复；后续要升级为优先级、定时执行和更细的失败策略控制。
 
 - UI/UX：
   - 第一屏直接进入工作台，不做营销页。
@@ -76,6 +77,8 @@
   - `POST /videos/download`：创建下载任务。
   - `POST /automation/start`：创建后台一键自动流程任务。
   - `POST /automation/batch/start`：批量创建后台一键自动流程任务。
+  - `POST /automation/batch/{batch_id}/pause`：暂停批量流程中待调度任务。
+  - `POST /automation/batch/{batch_id}/resume`：恢复批量流程中暂停任务。
   - `GET /automation/jobs`：获取一键自动流程任务列表。
   - `GET /automation/jobs/{id}`：获取一键自动流程任务进度。
   - `GET /automation/jobs/{id}/events`：订阅一键自动流程实时进度。
@@ -109,6 +112,7 @@
 - 自动化测试：
   - `/automation/start` 可创建后台自动化任务，前端任务列表能通过 SSE 显示进度。
   - `/automation/batch/start` 可按多个 URL 创建自动化任务，并去除空行和重复链接。
+  - `/automation/batch/{batch_id}/pause` 和 `/automation/batch/{batch_id}/resume` 可控制批次待调度任务。
   - `/automation/jobs/{id}/retry` 可让失败或已完成任务重新进入队列。
   - `/automation/jobs/{id}/resume` 可复用已完成阶段，避免失败后重复下载和重复处理。
   - `/automation/run` 可按顺序创建下载、画面处理、字幕、配音、导出任务。
@@ -126,6 +130,7 @@
   - OpenAI-compatible、Gemini、Anthropic 文本配置可保存和切换。
   - 配置测试失败时展示原因，不泄露 key。
   - 配音配置可生成音频并参与合成。
+  - 分段配音可按字幕时间轴混合为完整音轨，失败时不会阻断主流程。
 
 - 桌面测试：
   - Electron 能启动 Python 后端。

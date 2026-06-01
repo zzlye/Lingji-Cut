@@ -97,6 +97,7 @@ export const useTaskStore = create<TaskState>((set) => ({
       status: 'pending',
       progress: 0,
       current_step: '等待开始',
+      batch_id: null,
       created_at: new Date().toISOString(),
       completed_at: null,
       steps: AUTOMATION_STEPS.map((step) => ({ ...step })),

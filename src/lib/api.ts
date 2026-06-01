@@ -274,6 +274,7 @@ type AutomationStartParams = {
   enable_voice?: boolean
   voice_profile_id?: number
   voice_text?: string
+  voice_mode?: 'full' | 'segmented'
   audio_mode?: 'replace' | 'mix'
   original_volume?: number
 }
@@ -299,6 +300,14 @@ export const automationApi = {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+
+  /** 暂停批量流程中还没开始的任务 */
+  pauseBatch: (batchId: string) =>
+    request<import('@/types').AutomationBatchControlResponse>(`/automation/batch/${batchId}/pause`, { method: 'POST' }),
+
+  /** 恢复批量流程中暂停的任务 */
+  resumeBatch: (batchId: string) =>
+    request<import('@/types').AutomationBatchControlResponse>(`/automation/batch/${batchId}/resume`, { method: 'POST' }),
 
   /** 获取后台一键流程列表 */
   listJobs: () =>

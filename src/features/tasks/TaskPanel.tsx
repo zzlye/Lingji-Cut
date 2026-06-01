@@ -21,6 +21,7 @@ export function TaskPanel() {
   const [batchUrls, setBatchUrls] = useState('')
   const [batchConcurrency, setBatchConcurrency] = useState(2)
   const [isStartingBatch, setIsStartingBatch] = useState(false)
+  const [controllingBatchId, setControllingBatchId] = useState<string | null>(null)
 
   const mergedTasks = useMemo(() => {
     const taskMap = new Map<number, DownloadTask>()
@@ -31,12 +32,14 @@ export function TaskPanel() {
 
   const activeJobIds = useMemo(
     () => automationJobs
-      .filter((job) => job.status === 'running' || job.status === 'pending')
+      .filter((job) => job.status === 'running' || job.status === 'pending' || job.status === 'paused')
       .map((job) => job.id)
       .sort()
       .join('|'),
     [automationJobs],
   )
+
+  const batchSummaries = useMemo(() => collectBatchSummaries(automationJobs), [automationJobs])
 
   /** 从后端读取持久化任务记录 */
   const loadTasks = async () => {
@@ -107,6 +110,7 @@ export function TaskPanel() {
           subtitle_operation: 'none',
           burn_subtitles: true,
           enable_voice: true,
+          voice_mode: 'segmented',
           audio_mode: 'mix',
           original_volume: 0.25,
         },
@@ -118,6 +122,22 @@ export function TaskPanel() {
       addLog('error', `批量自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setIsStartingBatch(false)
+    }
+  }
+
+  /** 暂停或恢复一个批次 */
+  const controlBatch = async (batchId: string, action: 'pause' | 'resume') => {
+    setControllingBatchId(batchId)
+    try {
+      const result = action === 'pause'
+        ? await automationApi.pauseBatch(batchId)
+        : await automationApi.resumeBatch(batchId)
+      addLog('info', `${result.message}: ${result.affected_count} 个任务`)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `${action === 'pause' ? '暂停' : '恢复'}批量任务失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setControllingBatchId(null)
     }
   }
 
@@ -188,6 +208,20 @@ export function TaskPanel() {
             </div>
             <StatusSummary jobs={automationJobs} />
           </div>
+
+          {batchSummaries.length > 0 && (
+            <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-3">
+              {batchSummaries.map((batch) => (
+                <BatchSummaryCard
+                  key={batch.batchId}
+                  batch={batch}
+                  isBusy={controllingBatchId === batch.batchId}
+                  onPause={() => controlBatch(batch.batchId, 'pause')}
+                  onResume={() => controlBatch(batch.batchId, 'resume')}
+                />
+              ))}
+            </div>
+          )}
 
           {automationJobs.length === 0 ? (
             <EmptyAutomationList />
@@ -288,6 +322,7 @@ function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJob {
     status: job.status,
     progress: Math.round(job.progress || 0),
     current_step: job.current_step || '等待开始',
+    batch_id: job.batch_id,
     created_at: job.created_at || new Date().toISOString(),
     completed_at: job.completed_at,
     steps,
@@ -297,13 +332,100 @@ function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJob {
 /** 自动流程概览 */
 function StatusSummary({ jobs }: { jobs: AutomationJob[] }) {
   const runningCount = jobs.filter((job) => job.status === 'running').length
+  const pausedCount = jobs.filter((job) => job.status === 'paused').length
   const failedCount = jobs.filter((job) => job.status === 'failed').length
 
   return (
     <div className="flex flex-wrap gap-2 text-xs">
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-foreground-muted">全部 {jobs.length}</span>
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-accent">执行中 {runningCount}</span>
+      <span className="rounded-md border border-border bg-background px-2.5 py-1 text-warning">暂停 {pausedCount}</span>
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-destructive">失败 {failedCount}</span>
+    </div>
+  )
+}
+
+type BatchSummary = {
+  batchId: string
+  total: number
+  running: number
+  pending: number
+  paused: number
+  completed: number
+  failed: number
+  progress: number
+}
+
+/** 按批次聚合自动任务，用于批量暂停和恢复 */
+function collectBatchSummaries(jobs: AutomationJob[]): BatchSummary[] {
+  const map = new Map<string, BatchSummary>()
+  for (const job of jobs) {
+    if (!job.batch_id) continue
+    const summary = map.get(job.batch_id) || {
+      batchId: job.batch_id,
+      total: 0,
+      running: 0,
+      pending: 0,
+      paused: 0,
+      completed: 0,
+      failed: 0,
+      progress: 0,
+    }
+    summary.total += 1
+    summary.progress += job.progress || 0
+    summary[job.status] += 1
+    map.set(job.batch_id, summary)
+  }
+  return Array.from(map.values()).map((summary) => ({
+    ...summary,
+    progress: summary.total ? Math.round(summary.progress / summary.total) : 0,
+  }))
+}
+
+/** 批量任务控制卡片 */
+function BatchSummaryCard({
+  batch,
+  isBusy,
+  onPause,
+  onResume,
+}: {
+  batch: BatchSummary
+  isBusy: boolean
+  onPause: () => void
+  onResume: () => void
+}) {
+  const canPause = batch.pending + batch.running > 0 && batch.paused === 0
+  const canResume = batch.paused > 0
+
+  return (
+    <div className="rounded-lg border border-border bg-background p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">批次 {batch.batchId}</p>
+          <p className="mt-1 text-xs text-foreground-muted">
+            共 {batch.total} 个，完成 {batch.completed}，执行 {batch.running}，等待 {batch.pending}，暂停 {batch.paused}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button
+            onClick={onPause}
+            disabled={!canPause || isBusy}
+            className="h-8 rounded-md border border-warning/40 px-3 text-xs text-warning hover:bg-warning/10 disabled:opacity-50"
+          >
+            {isBusy && canPause ? '处理中...' : '暂停'}
+          </button>
+          <button
+            onClick={onResume}
+            disabled={!canResume || isBusy}
+            className="h-8 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
+          >
+            {isBusy && canResume ? '处理中...' : '恢复'}
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background-elevated">
+        <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${batch.progress}%` }} />
+      </div>
     </div>
   )
 }
@@ -453,12 +575,14 @@ function StatusBadge({ status }: { status: AutomationJob['status'] }) {
   const labels: Record<AutomationJob['status'], string> = {
     pending: '等待中',
     running: '执行中',
+    paused: '已暂停',
     completed: '已完成',
     failed: '失败',
   }
   const classes: Record<AutomationJob['status'], string> = {
     pending: 'border-border text-foreground-muted',
     running: 'border-accent/40 text-accent',
+    paused: 'border-warning/40 text-warning',
     completed: 'border-success/40 text-success',
     failed: 'border-destructive/40 text-destructive',
   }

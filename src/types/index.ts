@@ -149,9 +149,10 @@ export interface AutomationJob {
   title: string
   source_url: string
   video_id: number | null
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
   progress: number
   current_step: string
+  batch_id: string | null
   created_at: string
   completed_at: string | null
   steps: AutomationStep[]
@@ -163,11 +164,12 @@ export interface BackendAutomationJob {
   source_url: string
   video_id: number | null
   title: string | null
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
   progress: number
   current_step: string | null
   output_path: string | null
   error_message: string | null
+  batch_id: string | null
   stages: AutomationStageResult[]
   subtitle_text: string
   created_at: string | null
@@ -207,6 +209,13 @@ export interface AutomationBatchStartResponse {
   job_ids: string[]
   accepted_count: number
   skipped_count: number
+}
+
+/** 后端批量流程控制响应 */
+export interface AutomationBatchControlResponse {
+  message: string
+  batch_id: string
+  affected_count: number
 }
 
 /** 自动化字幕文本处理方式 */

@@ -4,6 +4,7 @@
 import json
 import os
 import asyncio
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -29,7 +30,10 @@ AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
 
 # 批次级并发控制，确保同一批任务按用户设置的并发数执行。
 BATCH_SEMAPHORES: dict[str, Semaphore] = {}
+BATCH_PAUSED: set[str] = set()
 BATCH_SEMAPHORE_LOCK = Lock()
+SCHEDULED_AUTOMATION_JOBS: set[str] = set()
+SCHEDULED_JOB_LOCK = Lock()
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -57,6 +61,7 @@ class AutomationRunRequest(BaseModel):
     enable_voice: bool = True
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
+    voice_mode: str = "segmented"
     audio_mode: str = "mix"
     original_volume: float = 0.25
 
@@ -82,6 +87,7 @@ class AutomationJobResponse(BaseModel):
     current_step: Optional[str] = None
     output_path: Optional[str] = None
     error_message: Optional[str] = None
+    batch_id: Optional[str] = None
     stages: list[AutomationStageResult] = Field(default_factory=list)
     subtitle_text: str = ""
     created_at: Optional[datetime] = None
@@ -111,6 +117,13 @@ class AutomationBatchStartResponse(BaseModel):
     job_ids: list[str]
     accepted_count: int
     skipped_count: int
+
+
+class AutomationBatchControlResponse(BaseModel):
+    """批量任务控制响应"""
+    message: str
+    batch_id: str
+    affected_count: int
 
 
 class AutomationRunResponse(BaseModel):
@@ -225,6 +238,7 @@ def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
         current_step=job.current_step,
         output_path=job.output_path,
         error_message=job.error_message,
+        batch_id=_get_batch_id_from_job(job),
         stages=stages,
         subtitle_text=job.subtitle_text or "",
         created_at=job.created_at,
@@ -385,6 +399,55 @@ def _fallback_voice_text(video: VideoSource) -> str:
     return "这是一段自动生成的短视频配音。"
 
 
+def _voice_output_extension(provider_type: str, settings: dict[str, Any]) -> str:
+    """按配音渠道和设置决定输出音频扩展名"""
+    value = str(settings.get("format") or "").lower()
+    if value:
+        return "wav" if value == "pcm16" else value
+    return "wav" if provider_type == "xiaomi_mimo_tts" else "mp3"
+
+
+def _srt_time_to_milliseconds(value: str) -> int:
+    """把 SRT/VTT 时间码转换成毫秒"""
+    value = value.strip().replace(",", ".")
+    parts = value.split(":")
+    if len(parts) != 3:
+        return 0
+    try:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
+    except ValueError:
+        return 0
+    return int(round((hours * 3600 + minutes * 60 + seconds) * 1000))
+
+
+def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_per_segment: int = 220) -> list[dict[str, Any]]:
+    """把字幕条目转换为配音分段，保留每段在视频里的起止时间"""
+    segments: list[dict[str, Any]] = []
+    for entry in entries:
+        text = " ".join(str(entry.get("text") or "").replace("\\N", " ").split())
+        if not text:
+            continue
+        start_ms = _srt_time_to_milliseconds(str(entry.get("start", "00:00:00,000")))
+        end_ms = _srt_time_to_milliseconds(str(entry.get("end", "00:00:00,000")))
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1000
+
+        # 单条字幕过长时按文本长度拆成小段，时间按比例均分，避免单次 TTS 输入过大。
+        if len(text) <= max_chars_per_segment:
+            segments.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
+            continue
+
+        parts = [text[index:index + max_chars_per_segment] for index in range(0, len(text), max_chars_per_segment)]
+        duration = max(1, end_ms - start_ms)
+        for index, part in enumerate(parts):
+            part_start = start_ms + int(duration * index / len(parts))
+            part_end = start_ms + int(duration * (index + 1) / len(parts))
+            segments.append({"start_ms": part_start, "end_ms": max(part_start + 1, part_end), "text": part.strip()})
+    return segments
+
+
 def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[dict[str, str | int]]:
     """把文本 API 返回内容映射回原字幕时间轴"""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -454,6 +517,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     processor = FFmpegProcessor()
     stages: list[AutomationStageResult] = []
     subtitle_text = ""
+    subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
     audio_path: Optional[str] = None
 
@@ -585,6 +649,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     except Exception:
                         # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
                         pass
+                subtitle_entries = entries
                 if job:
                     job.subtitle_text = subtitle_text
                     _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
@@ -621,18 +686,59 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings = _load_profile_settings(voice_profile)
             voice = settings.get("voice") or voice_profile.voice or "alloy"
             voice_text = (request.voice_text or subtitle_text or _fallback_voice_text(video)).strip()
-            output_ext = str(settings.get("format") or "mp3").lower()
+            output_ext = _voice_output_extension(voice_profile.provider_type, settings)
             audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice.{output_ext}")
-            audio_path = asyncio.run(VoiceEngine().generate_voice(
-                text=voice_text,
-                output_path=audio_path,
-                provider_type=voice_profile.provider_type,
-                voice=voice,
-                api_key=decrypt_api_key(voice_profile.api_key_encrypted),
-                base_url=voice_profile.base_url,
-                model=voice_profile.voice or "",
-                settings=settings,
-            ))
+            voice_engine = VoiceEngine()
+            api_key = decrypt_api_key(voice_profile.api_key_encrypted)
+            model = voice_profile.voice or ""
+            segments = subtitle_entries_to_voice_segments(subtitle_entries)
+            if request.voice_mode == "segmented" and segments and not request.voice_text:
+                try:
+                    audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice_timed.{output_ext}")
+
+                    def on_voice_progress(progress: float) -> None:
+                        """同步分段配音进度到后台任务"""
+                        voice_task.progress = progress
+                        db.commit()
+                        if job:
+                            _update_job_stage(db, job, "voice", "running", progress=progress, task_id=voice_task.id)
+
+                    audio_path = asyncio.run(voice_engine.generate_timed_voice_track(
+                        segments=segments,
+                        output_path=audio_path,
+                        provider_type=voice_profile.provider_type,
+                        voice=voice,
+                        api_key=api_key,
+                        base_url=voice_profile.base_url,
+                        model=model,
+                        settings=settings,
+                        progress_callback=on_voice_progress,
+                    ))
+                except Exception as segmented_exc:
+                    if job:
+                        _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"分段配音失败，回退整段配音: {segmented_exc}")
+                    audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice.{output_ext}")
+                    audio_path = asyncio.run(voice_engine.generate_voice(
+                        text=voice_text,
+                        output_path=audio_path,
+                        provider_type=voice_profile.provider_type,
+                        voice=voice,
+                        api_key=api_key,
+                        base_url=voice_profile.base_url,
+                        model=model,
+                        settings=settings,
+                    ))
+            else:
+                audio_path = asyncio.run(voice_engine.generate_voice(
+                    text=voice_text,
+                    output_path=audio_path,
+                    provider_type=voice_profile.provider_type,
+                    voice=voice,
+                    api_key=api_key,
+                    base_url=voice_profile.base_url,
+                    model=model,
+                    settings=settings,
+                ))
             _complete_task(db, voice_task, audio_path)
             stages.append(AutomationStageResult(key="voice", status="completed", task_id=voice_task.id, output_path=audio_path))
             if job:
@@ -706,10 +812,13 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
 def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> None:
     """后台线程入口：读取任务参数并执行一键流程"""
     db = SessionLocal()
+    job: Optional[AutomationJobRecord] = None
     try:
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if not job:
             return
+        if job.status == "paused":
+            job.status = "pending"
         job.status = "running"
         job.current_step = "准备自动处理"
         db.commit()
@@ -761,12 +870,13 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     job.stages = json.dumps(stages, ensure_ascii=False)
 
 
-def _create_automation_job(db: Session, request: AutomationRunRequest, batch_id: Optional[str] = None, title: str = "一键自动流程") -> AutomationJobRecord:
+def _create_automation_job(db: Session, request: AutomationRunRequest, batch_id: Optional[str] = None, batch_concurrency: Optional[int] = None, title: str = "一键自动流程") -> AutomationJobRecord:
     """创建自动化任务记录"""
     job_id = f"auto-{uuid.uuid4().hex[:16]}"
     params = request.model_dump()
     if batch_id:
         params["batch_id"] = batch_id
+        params["batch_concurrency"] = max(1, min(8, int(batch_concurrency or 2)))
 
     job = AutomationJobRecord(
         id=job_id,
@@ -795,28 +905,168 @@ def _get_batch_id_from_job(job: AutomationJobRecord) -> Optional[str]:
     return batch_id if isinstance(batch_id, str) and batch_id else None
 
 
+def _get_batch_concurrency_from_job(job: Optional[AutomationJobRecord]) -> int:
+    """从任务参数里读取批次并发数，重启后恢复批次时使用"""
+    if not job:
+        return 2
+    params = _get_job_params(job)
+    try:
+        return max(1, min(8, int(params.get("batch_concurrency") or 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _get_job_params(job: AutomationJobRecord) -> dict[str, Any]:
+    """安全读取自动化任务参数"""
+    if not job.params:
+        return {}
+    try:
+        params = json.loads(job.params)
+        return params if isinstance(params, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
+    """保存自动化任务参数 JSON"""
+    job.params = json.dumps(params, ensure_ascii=False)
+
+
+def _pause_batch_jobs(db: Session, batch_id: str) -> int:
+    """暂停批次中尚未执行完成的自动化任务"""
+    affected = 0
+    jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.asc()).all()
+    for job in jobs:
+        params = _get_job_params(job)
+        if params.get("batch_id") != batch_id or job.status in {"completed", "failed"}:
+            continue
+        params["batch_paused"] = True
+        _set_job_params(job, params)
+        if job.status == "pending":
+            job.status = "paused"
+            job.current_step = "批次暂停"
+        affected += 1
+    db.commit()
+    return affected
+
+
+def _resume_batch_jobs(db: Session, batch_id: str) -> list[str]:
+    """恢复批次任务，并返回需要重新提交到线程池的任务 ID"""
+    job_ids: list[str] = []
+    jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.asc()).all()
+    for job in jobs:
+        params = _get_job_params(job)
+        if params.get("batch_id") != batch_id:
+            continue
+        params["batch_paused"] = False
+        _set_job_params(job, params)
+        if job.status == "paused":
+            job.status = "pending"
+            job.current_step = "等待批次调度"
+            job_ids.append(job.id)
+    db.commit()
+    return job_ids
+
+
+def _is_batch_paused(batch_id: Optional[str]) -> bool:
+    """读取内存中的批次暂停状态"""
+    return bool(batch_id and batch_id in BATCH_PAUSED)
+
+
+def _sync_paused_job_state(job_id: str, batch_id: Optional[str]) -> None:
+    """等待批次恢复期间，把任务状态同步成暂停"""
+    if not batch_id:
+        return
+    db = SessionLocal()
+    try:
+        job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+        if job and job.status in {"pending", "paused"}:
+            job.status = "paused"
+            job.current_step = "批次暂停"
+            params = _get_job_params(job)
+            params["batch_paused"] = True
+            _set_job_params(job, params)
+            db.commit()
+    finally:
+        db.close()
+
+
+def _wait_until_batch_resumed(job_id: str, batch_id: Optional[str]) -> bool:
+    """批次暂停时阻塞后台任务，恢复后继续调度"""
+    if not batch_id:
+        return True
+    marked = False
+    while _is_batch_paused(batch_id):
+        if not marked:
+            _sync_paused_job_state(job_id, batch_id)
+            marked = True
+        time.sleep(1)
+    if marked:
+        db = SessionLocal()
+        try:
+            job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+            if job and job.status == "paused":
+                job.status = "pending"
+                job.current_step = "等待批次调度"
+                params = _get_job_params(job)
+                params["batch_paused"] = False
+                _set_job_params(job, params)
+                db.commit()
+        finally:
+            db.close()
+    return True
+
+
 def _register_batch_semaphore(batch_id: str, concurrency: int) -> None:
     """注册批次并发控制器"""
     with BATCH_SEMAPHORE_LOCK:
         BATCH_SEMAPHORES[batch_id] = Semaphore(max(1, min(8, concurrency)))
+        BATCH_PAUSED.discard(batch_id)
 
 
 def _run_background_job_with_batch_limit(job_id: str, resume_from_checkpoint: bool = False) -> None:
     """后台线程入口，按批次并发限制执行任务"""
-    db = SessionLocal()
     try:
-        job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
-        batch_id = _get_batch_id_from_job(job) if job else None
+        db = SessionLocal()
+        try:
+            job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+            batch_id = _get_batch_id_from_job(job) if job else None
+            batch_concurrency = _get_batch_concurrency_from_job(job)
+        finally:
+            db.close()
+
+        _wait_until_batch_resumed(job_id, batch_id)
+        semaphore = BATCH_SEMAPHORES.get(batch_id) if batch_id else None
+        if batch_id and not semaphore:
+            _register_batch_semaphore(batch_id, batch_concurrency)
+            semaphore = BATCH_SEMAPHORES.get(batch_id)
+        if not semaphore:
+            _run_background_job(job_id, resume_from_checkpoint)
+            return
+
+        while True:
+            _wait_until_batch_resumed(job_id, batch_id)
+            semaphore.acquire()
+            if _is_batch_paused(batch_id):
+                semaphore.release()
+                continue
+            try:
+                _run_background_job(job_id, resume_from_checkpoint)
+            finally:
+                semaphore.release()
+            return
     finally:
-        db.close()
+        with SCHEDULED_JOB_LOCK:
+            SCHEDULED_AUTOMATION_JOBS.discard(job_id)
 
-    semaphore = BATCH_SEMAPHORES.get(batch_id) if batch_id else None
-    if not semaphore:
-        _run_background_job(job_id, resume_from_checkpoint)
-        return
 
-    with semaphore:
-        _run_background_job(job_id, resume_from_checkpoint)
+def _submit_automation_job(job_id: str, resume_from_checkpoint: bool = False) -> None:
+    """提交后台自动化任务，避免同一个任务被重复调度"""
+    with SCHEDULED_JOB_LOCK:
+        if job_id in SCHEDULED_AUTOMATION_JOBS:
+            return
+        SCHEDULED_AUTOMATION_JOBS.add(job_id)
+    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id, resume_from_checkpoint)
 
 
 def _normalize_batch_urls(urls: list[str]) -> list[str]:
@@ -853,7 +1103,7 @@ def start_automation(request: AutomationRunRequest, db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
 
     job = _create_automation_job(db, request)
-    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job.id)
+    _submit_automation_job(job.id)
     return AutomationStartResponse(message="自动化任务已启动", job_id=job.id)
 
 
@@ -869,9 +1119,9 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
     job_ids: list[str] = []
     for index, url in enumerate(normalized_urls, 1):
         job_request = request.template.model_copy(update={"url": url})
-        job = _create_automation_job(db, job_request, batch_id=batch_id, title=f"批量自动流程 {index}/{len(normalized_urls)}")
+        job = _create_automation_job(db, job_request, batch_id=batch_id, batch_concurrency=request.concurrency, title=f"批量自动流程 {index}/{len(normalized_urls)}")
         job_ids.append(job.id)
-        AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job.id)
+        _submit_automation_job(job.id)
 
     return AutomationBatchStartResponse(
         message="批量自动化任务已进入队列",
@@ -911,7 +1161,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
 
     _reset_job_for_retry(job)
     db.commit()
-    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id)
+    _submit_automation_job(job_id)
     return AutomationStartResponse(message="自动化任务已重新进入队列", job_id=job_id)
 
 
@@ -928,8 +1178,30 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
 
     _prepare_job_for_resume(job)
     db.commit()
-    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id, True)
+    _submit_automation_job(job_id, True)
     return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
+
+
+@router.post("/batch/{batch_id}/pause", response_model=AutomationBatchControlResponse)
+def pause_batch_automation(batch_id: str, db: Session = Depends(get_db)):
+    """暂停一个批次中尚未开始的自动化任务"""
+    with BATCH_SEMAPHORE_LOCK:
+        BATCH_PAUSED.add(batch_id)
+    affected_count = _pause_batch_jobs(db, batch_id)
+    if affected_count == 0:
+        raise HTTPException(status_code=404, detail="没有找到可暂停的批量任务")
+    return AutomationBatchControlResponse(message="批量任务已暂停", batch_id=batch_id, affected_count=affected_count)
+
+
+@router.post("/batch/{batch_id}/resume", response_model=AutomationBatchControlResponse)
+def resume_batch_automation(batch_id: str, db: Session = Depends(get_db)):
+    """恢复一个批次中暂停的自动化任务"""
+    with BATCH_SEMAPHORE_LOCK:
+        BATCH_PAUSED.discard(batch_id)
+    job_ids = _resume_batch_jobs(db, batch_id)
+    for job_id in job_ids:
+        _submit_automation_job(job_id)
+    return AutomationBatchControlResponse(message="批量任务已恢复", batch_id=batch_id, affected_count=len(job_ids))
 
 
 @router.get("/jobs/{job_id}/events")

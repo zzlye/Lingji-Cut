@@ -140,6 +140,7 @@ export function Header() {
         subtitle_operation: textProfileId ? 'polish' : 'none',
         burn_subtitles: true,
         enable_voice: true,
+        voice_mode: 'segmented',
         audio_mode: 'mix',
         original_volume: 0.25,
       } as const
@@ -263,6 +264,7 @@ export function Header() {
       status: job.status,
       progress: Math.round(job.progress || 0),
       current_step: job.current_step || '等待开始',
+      batch_id: job.batch_id,
       created_at: job.created_at || new Date().toISOString(),
       completed_at: job.completed_at,
       steps,
