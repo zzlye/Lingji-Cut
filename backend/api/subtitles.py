@@ -3,8 +3,9 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
+from datetime import datetime
 import os
 
 from ..core import Downloader, FFmpegProcessor, SubtitleEngine, TextEngine
@@ -99,6 +100,50 @@ class SubtitleTextProcessResponse(BaseModel):
     operation: str
 
 
+class SubtitleEntryPayload(BaseModel):
+    """字幕校对条目"""
+    index: int = 1
+    start: str
+    end: str
+    text: str
+
+
+class SubtitleCorrectionParseFileRequest(BaseModel):
+    """读取本地字幕文件请求"""
+    subtitle_path: str
+
+
+class SubtitleCorrectionParseTextRequest(BaseModel):
+    """解析粘贴字幕文本请求"""
+    content: str
+    format: str = "srt"
+
+
+class SubtitleCorrectionSaveRequest(BaseModel):
+    """保存校对后字幕请求"""
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    output_path: Optional[str] = None
+    file_name: Optional[str] = None
+    format: str = "srt"
+
+
+class SubtitleCorrectionSaveAssRequest(BaseModel):
+    """保存校对后 ASS 字幕请求"""
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    output_path: Optional[str] = None
+    file_name: Optional[str] = None
+    preset_id: Optional[int] = None
+
+
+class SubtitleCorrectionResponse(BaseModel):
+    """字幕校对响应"""
+    message: str
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    plain_text: str = ""
+    output_path: Optional[str] = None
+    format: Optional[str] = None
+
+
 def _preset_to_dict(preset: SubtitlePreset | None) -> dict:
     """将字幕预设模型转换为渲染配置"""
     if not preset:
@@ -141,6 +186,65 @@ def _parse_subtitle_entries(engine: SubtitleEngine, subtitle_path: str) -> list[
     if ext == ".vtt":
         return engine.parse_vtt(subtitle_path)
     raise HTTPException(status_code=400, detail=f"暂不支持的字幕格式: {ext}")
+
+
+def _parse_subtitle_text(engine: SubtitleEngine, content: str, subtitle_format: str) -> list[dict]:
+    """按格式解析粘贴的字幕文本"""
+    normalized_format = subtitle_format.lower().lstrip(".")
+    if normalized_format == "srt":
+        return engine.parse_srt_content(content)
+    if normalized_format == "vtt":
+        return engine.parse_vtt_content(content)
+    raise HTTPException(status_code=400, detail=f"暂不支持的字幕文本格式: {subtitle_format}")
+
+
+def _normalize_correction_entries(engine: SubtitleEngine, entries: list[SubtitleEntryPayload]) -> list[dict]:
+    """清理前端提交的字幕条目，保证时间码和序号稳定"""
+    normalized: list[dict] = []
+    for item in entries:
+        text = item.text.replace("\\N", "\n").strip()
+        if not text:
+            continue
+        start = engine.normalize_srt_time(item.start)
+        end = engine.normalize_srt_time(item.end)
+        normalized.append({
+            "index": len(normalized) + 1,
+            "start": start,
+            "end": end,
+            "text": text,
+        })
+    if not normalized:
+        raise HTTPException(status_code=400, detail="字幕条目不能为空")
+    return normalized
+
+
+def _entry_payloads(entries: list[dict]) -> list[SubtitleEntryPayload]:
+    """把字幕字典转换成 API 响应模型"""
+    return [
+        SubtitleEntryPayload(
+            index=int(entry.get("index") or index),
+            start=str(entry.get("start") or "00:00:00,000"),
+            end=str(entry.get("end") or "00:00:00,000"),
+            text=str(entry.get("text") or ""),
+        )
+        for index, entry in enumerate(entries, 1)
+    ]
+
+
+def _safe_subtitle_output_path(output_path: Optional[str], file_name: Optional[str], extension: str) -> str:
+    """生成字幕输出路径，未指定时保存到项目 output 目录"""
+    if output_path and output_path.strip():
+        path = os.path.abspath(os.path.expanduser(output_path.strip()))
+    else:
+        paths = ensure_project_dirs()
+        raw_name = (file_name or f"manual_subtitle_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
+        safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in raw_name) or "manual_subtitle"
+        if not safe_name.lower().endswith(f".{extension}"):
+            safe_name = f"{os.path.splitext(safe_name)[0]}.{extension}"
+        path = os.path.join(paths["output_dir"], safe_name)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
 
 
 def entries_to_plain_text(entries: list[dict], max_chars: int = 6000) -> str:
@@ -242,6 +346,88 @@ async def process_subtitle_text(request: SubtitleTextProcessRequest, db: Session
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/parse-file", response_model=SubtitleCorrectionResponse)
+async def parse_subtitle_file(request: SubtitleCorrectionParseFileRequest):
+    """读取本地字幕文件，返回可手动校对的条目"""
+    raw_path = request.subtitle_path.strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="请填写字幕文件路径")
+    subtitle_path = os.path.abspath(os.path.expanduser(raw_path))
+    if not os.path.exists(subtitle_path):
+        raise HTTPException(status_code=404, detail=f"字幕文件不存在: {subtitle_path}")
+
+    engine = SubtitleEngine()
+    entries = _parse_subtitle_entries(engine, subtitle_path)
+    if not entries:
+        raise HTTPException(status_code=400, detail="字幕文件为空或格式无法识别")
+
+    return SubtitleCorrectionResponse(
+        message=f"已读取 {len(entries)} 条字幕",
+        entries=_entry_payloads(entries),
+        plain_text=entries_to_plain_text(entries),
+        output_path=subtitle_path,
+        format=os.path.splitext(subtitle_path)[1].lower().lstrip("."),
+    )
+
+
+@router.post("/parse-text", response_model=SubtitleCorrectionResponse)
+async def parse_subtitle_text(request: SubtitleCorrectionParseTextRequest):
+    """解析粘贴的 SRT/VTT 文本，返回可编辑字幕条目"""
+    if not request.content.strip():
+        raise HTTPException(status_code=400, detail="字幕文本不能为空")
+
+    engine = SubtitleEngine()
+    entries = _parse_subtitle_text(engine, request.content, request.format)
+    if not entries:
+        raise HTTPException(status_code=400, detail="没有解析到有效字幕条目")
+
+    return SubtitleCorrectionResponse(
+        message=f"已解析 {len(entries)} 条字幕",
+        entries=_entry_payloads(entries),
+        plain_text=entries_to_plain_text(entries),
+        format=request.format.lower().lstrip("."),
+    )
+
+
+@router.post("/save", response_model=SubtitleCorrectionResponse)
+async def save_corrected_subtitle(request: SubtitleCorrectionSaveRequest):
+    """保存手动校对后的 SRT 字幕文件"""
+    normalized_format = request.format.lower().lstrip(".")
+    if normalized_format != "srt":
+        raise HTTPException(status_code=400, detail="当前只支持保存 SRT 字幕")
+
+    engine = SubtitleEngine()
+    entries = _normalize_correction_entries(engine, request.entries)
+    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "srt")
+    engine.save_srt(entries, output_path)
+
+    return SubtitleCorrectionResponse(
+        message=f"已保存 {len(entries)} 条字幕",
+        entries=_entry_payloads(entries),
+        plain_text=entries_to_plain_text(entries),
+        output_path=output_path,
+        format="srt",
+    )
+
+
+@router.post("/save-ass", response_model=SubtitleCorrectionResponse)
+async def save_corrected_ass(request: SubtitleCorrectionSaveAssRequest, db: Session = Depends(get_db)):
+    """按当前字幕预设生成 ASS 字幕文件"""
+    engine = SubtitleEngine()
+    entries = _normalize_correction_entries(engine, request.entries)
+    preset = _pick_subtitle_preset(db, request.preset_id)
+    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "ass")
+    engine.generate_ass(entries, output_path, _preset_to_dict(preset))
+
+    return SubtitleCorrectionResponse(
+        message=f"已生成 ASS 字幕 {len(entries)} 条",
+        entries=_entry_payloads(entries),
+        plain_text=entries_to_plain_text(entries),
+        output_path=output_path,
+        format="ass",
+    )
 
 
 @router.post("/render", response_model=SubtitleRenderResponse)

@@ -48,6 +48,14 @@ export interface SubtitleTrack {
   type: 'original' | 'auto'
 }
 
+/** 可手动校对的字幕条目 */
+export interface SubtitleEntry {
+  index: number
+  start: string
+  end: string
+  text: string
+}
+
 /** 下载任务 */
 export interface DownloadTask {
   id: number

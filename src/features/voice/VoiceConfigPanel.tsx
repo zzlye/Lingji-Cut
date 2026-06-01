@@ -115,7 +115,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 选择已有配音 API 配置 */
   const selectProfile = (profile: ApiProfile) => {
     setSelectedProfileId(profile.id)
-    setAutomationOptions(saveAutomationPreferences({ voice_profile_id: profile.id, enable_voice: true }))
+    setAutomationOptions(saveAutomationPreferences({ voice_profile_id: profile.id }))
     setProfileForm({
       name: profile.name,
       provider_type: profile.provider_type,
@@ -252,7 +252,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         ? await profileApi.updateVoice(selectedProfileId, payload)
         : await profileApi.createVoice({ ...payload, api_key: profileForm.api_key })
 
-      setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id, enable_voice: true }))
+      setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id }))
       setNotice({ type: 'success', message: `配音配置 "${saved.name}" 已保存` })
       addLog('info', `配音配置 "${saved.name}" 已保存`)
       await loadProfiles()
@@ -550,10 +550,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             </section>
 
             <section className="rounded-lg border border-border bg-background p-4">
-              <SectionTitle title="一键完成配音策略" description="控制自动化流程是否配音，以及配音和原声如何合成。" />
+              <SectionTitle title="可选配音策略" description="配音默认跳过；只有打开开关后，一键完成才会生成配音并参与合成。" />
               <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                 <ToggleField
-                  label="启用自动配音"
+                  label="一键流程启用配音"
                   checked={automationOptions.enable_voice}
                   onChange={(value) => setAutomationOptions(saveAutomationPreferences({ enable_voice: value }))}
                 />
@@ -587,11 +587,19 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
             <section className="rounded-lg border border-border bg-background p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <SectionTitle title="多人说话人音色" description="字幕中出现“旁白：”“角色 A:”等说话人标签时，会自动匹配对应音色。" />
+                <SectionTitle
+                  title="多人说话人音色"
+                  description={automationOptions.enable_voice ? '字幕中出现“旁白：”“角色 A:”等说话人标签时，会自动匹配对应音色。' : '这是配音开启后的备用映射；当前一键流程会跳过配音。'}
+                />
                 <button onClick={addSpeaker} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
                   添加说话人
                 </button>
               </div>
+              {!automationOptions.enable_voice && (
+                <div className="mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                  配音现在是关闭状态。可以先配置音色和试听，但一键完成不会生成或合成配音。
+                </div>
+              )}
               <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-3">
                 {automationOptions.voice_speakers.map((speaker) => (
                   <div key={speaker.id} className="rounded-lg border border-border bg-background-elevated p-3">

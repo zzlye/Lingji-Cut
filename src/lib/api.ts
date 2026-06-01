@@ -166,6 +166,34 @@ export const subtitleApi = {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+
+  /** 读取本地字幕文件并转换成可编辑条目 */
+  parseFile: (subtitlePath: string) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path?: string; format?: string }>('/subtitles/parse-file', {
+      method: 'POST',
+      body: JSON.stringify({ subtitle_path: subtitlePath }),
+    }),
+
+  /** 解析粘贴的 SRT/VTT 字幕文本 */
+  parseText: (params: { content: string; format: 'srt' | 'vtt' }) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path?: string; format?: string }>('/subtitles/parse-text', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 保存手动校对后的 SRT 文件 */
+  saveCorrected: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; format?: 'srt' }) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path: string; format: string }>('/subtitles/save', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 按字幕预设生成 ASS 文件 */
+  saveAss: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; preset_id?: number | null }) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path: string; format: string }>('/subtitles/save-ass', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
 }
 
 /** API 配置 */

@@ -63,7 +63,7 @@ class AutomationRunRequest(BaseModel):
     subtitle_operation: str = "none"
     subtitle_target_language: Optional[str] = None
     burn_subtitles: bool = True
-    enable_voice: bool = True
+    enable_voice: bool = False
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
     voice_mode: str = "segmented"

@@ -6,6 +6,9 @@ import type { AutomationPreferences } from '@/types'
 /** 一键自动化偏好本地缓存键 */
 const AUTOMATION_PREFERENCES_STORAGE_KEY = 'youtube-video-processor:auto-preferences'
 
+/** 配音可选迁移标记，避免旧版本默认开启配音影响新流程 */
+const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
+
 /** 默认一键自动化偏好 */
 export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   output_format: 'mp4',
@@ -15,7 +18,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_operation: 'polish',
   subtitle_target_language: '',
   burn_subtitles: true,
-  enable_voice: true,
+  enable_voice: false,
   voice_profile_id: null,
   voice_mode: 'segmented',
   audio_mode: 'mix',
@@ -94,11 +97,13 @@ export function loadAutomationPreferences(): AutomationPreferences {
   try {
     const saved = localStorage.getItem(AUTOMATION_PREFERENCES_STORAGE_KEY)
     const parsed = saved ? JSON.parse(saved) : {}
+    const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
     return {
       ...DEFAULT_AUTOMATION_PREFERENCES,
       ...parsed,
       subtitle_preset_id: normalizeId(parsed.subtitle_preset_id),
       text_profile_id: normalizeId(parsed.text_profile_id),
+      enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
@@ -120,7 +125,11 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
   }
 
   if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify(next))
+    const persisted = {
+      ...next,
+      ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
+    }
+    localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify(persisted))
   }
 
   return next

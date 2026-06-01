@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ApiConfigPanel } from './ApiConfigPanel'
 import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
+import { SubtitleCorrectionPanel } from '@/features/subtitle/SubtitleCorrectionPanel'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { GlossaryPanel } from './GlossaryPanel'
@@ -14,7 +15,7 @@ import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationPreferences, ProjectPaths, ToolStatusMap } from '@/types'
 
 /** 设置页签类型 */
-export type SettingsTab = 'auto' | 'effects' | 'api' | 'subtitle' | 'voice' | 'glossary' | 'banned' | 'paths'
+export type SettingsTab = 'auto' | 'effects' | 'api' | 'subtitle' | 'subtitle_correction' | 'voice' | 'glossary' | 'banned' | 'paths'
 
 /** 设置中心属性 */
 interface SettingsCenterProps {
@@ -38,6 +39,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; description: string
   { id: 'effects', label: '画面处理', description: '差异化、画布和输出' },
   { id: 'api', label: 'API 设置', description: '文本模型渠道' },
   { id: 'subtitle', label: '字幕设置', description: '语言和字幕样式' },
+  { id: 'subtitle_correction', label: '字幕校对', description: '手动修正字幕正文和时间轴' },
   { id: 'voice', label: '配音配置', description: 'TTS 和声音' },
   { id: 'glossary', label: '术语表', description: '专业词和固定写法' },
   { id: 'banned', label: '禁词表', description: '提醒和拦截策略' },
@@ -105,6 +107,7 @@ export function SettingsCenter({ onClose, onDragStart, initialTab = 'effects', o
           {activeTab === 'effects' && <EffectsSettingsPanel variant="compact" />}
           {activeTab === 'api' && <ApiConfigPanel compact />}
           {activeTab === 'subtitle' && <SubtitleEditor compact />}
+          {activeTab === 'subtitle_correction' && <SubtitleCorrectionPanel />}
           {activeTab === 'voice' && <VoiceConfigPanel compact />}
           {activeTab === 'glossary' && <GlossaryPanel />}
           {activeTab === 'banned' && <BannedWordsPanel />}
@@ -137,7 +140,7 @@ function AutomationConfirmPanel({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-medium">一键完成确认</h3>
-            <p className="mt-1 text-xs text-foreground-muted">确认画面、字幕、API、配音、术语和禁词后再启动完整自动流程。</p>
+            <p className="mt-1 text-xs text-foreground-muted">确认画面、字幕、术语、禁词和可选配音后再启动完整自动流程。</p>
           </div>
           <button
             onClick={onConfirm}
@@ -167,28 +170,37 @@ function AutomationConfirmPanel({
             <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
               <AutoSummaryCard title="画面处理" value="使用当前画面模板" action="调整画面" onClick={() => onOpenTab('effects')} />
               <AutoSummaryCard title="字幕策略" value={`${subtitleOperationLabel(preferences.subtitle_operation)} · ${preferences.burn_subtitles ? '硬字幕' : '保留字幕文件'}`} action="调整字幕" onClick={() => onOpenTab('subtitle')} />
+              <AutoSummaryCard title="字幕校对" value="可先手动修正字幕并保存 SRT/ASS" action="打开校对" onClick={() => onOpenTab('subtitle_correction')} />
               <AutoSummaryCard title="文本 API" value={preferences.text_profile_id ? `配置 #${preferences.text_profile_id}` : '未指定则使用首个保存配置'} action="API 设置" onClick={() => onOpenTab('api')} />
-              <AutoSummaryCard title="配音" value={preferences.enable_voice ? `${voiceModeLabel(preferences.voice_mode)} · ${preferences.multi_speaker_enabled ? '多人音色' : '单音色'}` : '已关闭'} action="配音配置" onClick={() => onOpenTab('voice')} />
+              <AutoSummaryCard title="可选配音" value={preferences.enable_voice ? `${voiceModeLabel(preferences.voice_mode)} · ${preferences.multi_speaker_enabled ? '多人音色' : '单音色'}` : '关闭，流程跳过'} action="配音配置" onClick={() => onOpenTab('voice')} />
             </div>
 
             <section className="rounded-lg border border-border bg-background p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-sm font-medium">多人配音检查</h4>
-                  <p className="mt-1 text-xs text-foreground-muted">自动流程会按说话人标签匹配音色，未匹配时使用默认音色。</p>
+                  <h4 className="text-sm font-medium">可选配音检查</h4>
+                  <p className="mt-1 text-xs text-foreground-muted">
+                    {preferences.enable_voice ? '已启用配音，自动流程会按说话人标签匹配音色，未匹配时使用默认音色。' : '配音当前关闭，一键完成会直接跳过配音和音频合成。'}
+                  </p>
                 </div>
                 <button onClick={() => onOpenTab('voice')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
-                  管理音色
+                  {preferences.enable_voice ? '管理音色' : '开启配音'}
                 </button>
               </div>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
-                {preferences.voice_speakers.map((speaker) => (
-                  <div key={speaker.id} className="rounded-md border border-border bg-background-elevated p-3">
-                    <div className="truncate text-xs font-medium">{speaker.label}</div>
-                    <div className="mt-1 truncate font-mono text-xs text-foreground-muted">{speaker.voice}</div>
-                  </div>
-                ))}
-              </div>
+              {preferences.enable_voice ? (
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
+                  {preferences.voice_speakers.map((speaker) => (
+                    <div key={speaker.id} className="rounded-md border border-border bg-background-elevated p-3">
+                      <div className="truncate text-xs font-medium">{speaker.label}</div>
+                      <div className="mt-1 truncate font-mono text-xs text-foreground-muted">{speaker.voice}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-border p-3 text-xs text-foreground-muted">
+                  当前流程不会调用配音 API。需要多人对话、音色匹配或替换原声时，再到配音配置里打开开关。
+                </div>
+              )}
             </section>
 
             <section className="rounded-lg border border-border bg-background p-4">

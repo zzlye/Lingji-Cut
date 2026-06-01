@@ -9,7 +9,14 @@ import type { AutomationStartParams } from '@/lib/api'
 export function buildAutomationPayload(url: string): AutomationStartParams {
   const preferences = loadAutomationPreferences()
   const textProfileId = preferences.text_profile_id || undefined
-  const voiceProfileId = preferences.voice_profile_id || undefined
+  const voiceProfileId = preferences.enable_voice ? preferences.voice_profile_id || undefined : undefined
+  const speakerVoiceMap = preferences.enable_voice && preferences.multi_speaker_enabled
+    ? Object.fromEntries(
+      preferences.voice_speakers
+        .filter((speaker) => speaker.label.trim() && speaker.voice.trim())
+        .map((speaker) => [speaker.label.trim(), speaker.voice.trim()]),
+    )
+    : undefined
 
   return {
     url,
@@ -25,15 +32,11 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     burn_subtitles: preferences.burn_subtitles,
     enable_voice: preferences.enable_voice,
     voice_profile_id: voiceProfileId,
-    voice_mode: preferences.voice_mode,
-    audio_mode: preferences.audio_mode,
-    original_volume: preferences.original_volume,
-    multi_speaker_enabled: preferences.multi_speaker_enabled,
-    speaker_voice_map: Object.fromEntries(
-      preferences.voice_speakers
-        .filter((speaker) => speaker.label.trim() && speaker.voice.trim())
-        .map((speaker) => [speaker.label.trim(), speaker.voice.trim()]),
-    ),
+    voice_mode: preferences.enable_voice ? preferences.voice_mode : undefined,
+    audio_mode: preferences.enable_voice ? preferences.audio_mode : undefined,
+    original_volume: preferences.enable_voice ? preferences.original_volume : undefined,
+    multi_speaker_enabled: preferences.enable_voice ? preferences.multi_speaker_enabled : undefined,
+    speaker_voice_map: speakerVoiceMap,
     glossary_terms: preferences.glossary_terms,
     banned_words: preferences.banned_words,
     banned_word_action: preferences.banned_word_action,
