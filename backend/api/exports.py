@@ -61,12 +61,18 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
     try:
         working_video = request.video_path
 
+        def on_progress(progress: float, start: float, weight: float) -> None:
+            """同步导出任务进度"""
+            task.progress = max(0.0, min(99.0, start + progress * weight))
+            db.commit()
+
         # 先烧录字幕，再按需合成配音，最后复制/转换到导出目录。
         if request.subtitle_path:
             working_video = processor.burn_subtitles(
                 video_path=working_video,
                 subtitle_path=request.subtitle_path,
                 control_keys=[f"task:{task.id}"],
+                progress_callback=lambda progress: on_progress(progress, 0, 0.35),
             )
             task.progress = 35
             db.commit()
@@ -78,6 +84,7 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
                 mode=request.audio_mode,
                 volume_ratio=request.original_volume,
                 control_keys=[f"task:{task.id}"],
+                progress_callback=lambda progress: on_progress(progress, 35, 0.35),
             )
             task.progress = 70
             db.commit()
@@ -86,6 +93,7 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
             input_path=working_video,
             output_format=request.output_format,
             control_keys=[f"task:{task.id}"],
+            progress_callback=lambda progress: on_progress(progress, 70, 0.29),
         )
 
         task.status = "completed"

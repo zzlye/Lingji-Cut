@@ -291,12 +291,18 @@ def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_db)):
     db.refresh(task)
 
     try:
+        def on_progress(progress: float) -> None:
+            """同步直接画面处理进度"""
+            task.progress = max(0.0, min(99.0, progress))
+            db.commit()
+
         output_path = processor.apply_effects(
             video_path=request.video_path,
             preset=preset,
             output_path=request.output_path,
             preview=False,
             control_keys=[f"task:{task.id}"],
+            progress_callback=on_progress,
         )
         task.status = "completed"
         task.progress = 100

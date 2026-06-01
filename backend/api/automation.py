@@ -370,6 +370,15 @@ def _handle_task_control(db: Session, task: DownloadTask, exc: TaskControlReques
         _cancel_task(db, task)
 
 
+def _update_export_progress(db: Session, job: Optional[AutomationJobRecord], task: DownloadTask, progress: float) -> None:
+    """同步导出阶段的细分进度"""
+    _check_control(db, job, task)
+    task.progress = max(0.0, min(99.0, progress))
+    db.commit()
+    if job:
+        _update_job_stage(db, job, "export", "running", progress=task.progress, task_id=task.id)
+
+
 def _create_task(db: Session, video_id: int, task_type: str, params: Optional[dict[str, Any]] = None, parent_job_id: Optional[str] = None) -> DownloadTask:
     """创建后端自动流程子任务"""
     task = DownloadTask(
@@ -746,10 +755,21 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             _update_job_stage(db, job, "effects", "running", progress=15, task_id=effects_task.id)
         try:
             _check_control(db, job, effects_task)
+
+            def on_effects_progress(progress: float) -> None:
+                """同步画面处理进度，避免长视频重编码看起来卡住"""
+                _check_control(db, job, effects_task)
+                stage_progress = min(95.0, 15.0 + progress * 0.8)
+                effects_task.progress = stage_progress
+                db.commit()
+                if job:
+                    _update_job_stage(db, job, "effects", "running", progress=stage_progress, task_id=effects_task.id)
+
             effects_path = processor.apply_effects(
                 video_path=downloaded_path,
                 preset=request.processing_preset,
                 control_keys=_control_keys(job, effects_task),
+                progress_callback=on_effects_progress,
             )
             _check_control(db, job, effects_task)
             _complete_task(db, effects_task, effects_path)
@@ -1020,6 +1040,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 video_path=working_video,
                 subtitle_path=subtitle_ass_path,
                 control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 15.0 + progress * 0.4)),
             )
             _check_control(db, job, export_task)
             export_task.progress = 35
@@ -1033,6 +1054,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 mode=request.audio_mode,
                 volume_ratio=request.original_volume,
                 control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(80.0, 55.0 + progress * 0.25)),
             )
             _check_control(db, job, export_task)
             export_task.progress = 70
@@ -1043,6 +1065,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             input_path=working_video,
             output_format=request.output_format,
             control_keys=_control_keys(job, export_task),
+            progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(95.0, 80.0 + progress * 0.15)),
         )
         _check_control(db, job, export_task)
         _complete_task(db, export_task, output_path)

@@ -104,7 +104,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         gpu_cmd = [self.processor.ffmpeg_cmd, "-i", self.input_video, "-c:v", "h264_nvenc", "-preset", "p4", "-y", output_path]
         calls: list[list[str]] = []
 
-        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None):
+        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None, progress_callback=None, progress_total_seconds=None):
             calls.append(cmd)
             if "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "h264_nvenc":
                 raise RuntimeError(f"{action_name}失败: Cannot load nvcuda.dll")
@@ -123,6 +123,23 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result, output_path)
         self.assertEqual(calls[0][calls[0].index("-c:v") + 1], "h264_nvenc")
         self.assertEqual(calls[1][calls[1].index("-c:v") + 1], "libx264")
+
+    def test_effects_reports_progress_during_ffmpeg_run(self):
+        """画面处理会从 ffmpeg 进度输出同步百分比"""
+        self._create_test_video()
+        progress_values: list[float] = []
+
+        output_path = self.processor.apply_effects(
+            video_path=self.input_video,
+            preset=self._minimal_preset(),
+            output_path=os.path.join(self.temp_dir, "progress.mp4"),
+            progress_callback=progress_values.append,
+        )
+
+        self.assertTrue(os.path.exists(output_path))
+        self.assertTrue(progress_values)
+        self.assertEqual(progress_values[-1], 100)
+        self.assertTrue(any(value > 0 for value in progress_values))
 
     def _create_test_video(self):
         """用 ffmpeg 生成短测试视频"""

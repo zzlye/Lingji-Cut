@@ -42,6 +42,10 @@ export function TaskPanel() {
       .join('|'),
     [automationJobs],
   )
+  const hasActiveServerTasks = useMemo(
+    () => mergedTasks.some((task) => task.status === 'processing' || task.status === 'downloading' || task.status === 'pending'),
+    [mergedTasks],
+  )
 
   const batchSummaries = useMemo(() => collectBatchSummaries(automationJobs), [automationJobs])
 
@@ -225,9 +229,8 @@ export function TaskPanel() {
   }
 
   useEffect(() => {
-    if (!activeJobIds) return
-
     const sources = activeJobIds.split('|').map((jobId) => {
+      if (!jobId) return null
       const source = new EventSource(automationApi.eventsUrl(jobId))
       source.addEventListener('job', (event) => {
         upsertAutomationJob(mapBackendAutomationJob(JSON.parse((event as MessageEvent).data) as BackendAutomationJob))
@@ -236,14 +239,16 @@ export function TaskPanel() {
         source.close()
       })
       return source
-    })
+    }).filter((source): source is EventSource => Boolean(source))
 
-    const timer = window.setInterval(loadTasks, 4000)
+    if (sources.length === 0 && !hasActiveServerTasks) return
+
+    const timer = window.setInterval(loadTasks, hasActiveServerTasks ? 1500 : 4000)
     return () => {
       sources.forEach((source) => source.close())
       window.clearInterval(timer)
     }
-  }, [activeJobIds])
+  }, [activeJobIds, hasActiveServerTasks])
 
   return (
     <div className="min-h-full p-4">

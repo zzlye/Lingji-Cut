@@ -481,12 +481,18 @@ def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_d
 
         output_path = None
         if request.burn_in:
+            def on_burn_progress(progress: float) -> None:
+                """同步字幕烧录进度"""
+                task.progress = max(0.0, min(99.0, progress))
+                db.commit()
+
             output_path = FFmpegProcessor().burn_subtitles(
                 video_path=request.video_path,
                 subtitle_path=ass_path,
                 output_path=request.output_path,
                 preset=preset_dict,
                 control_keys=[f"task:{task.id}"],
+                progress_callback=on_burn_progress,
             )
 
         plain_text = entries_to_plain_text(entries)

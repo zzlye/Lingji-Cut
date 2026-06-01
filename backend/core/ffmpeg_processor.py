@@ -2,10 +2,14 @@
 # FFmpeg 处理封装 - 视频合成、字幕烧录、音频处理
 
 import os
+import queue
 import random
+import re
 import subprocess
+import threading
+import time
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from ..utils import get_logger
 from .paths import ensure_project_dirs
 from .process_control import normalize_control_keys, raise_if_control_requested, register_process, subprocess_creation_flags, terminate_process, unregister_process
@@ -64,6 +68,7 @@ class FFmpegProcessor:
         start_time: float = 0,
         duration: float = 8,
         control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
         """
         应用画面处理预设
@@ -114,6 +119,8 @@ class FFmpegProcessor:
             preset=preset,
             for_subtitles=False,
             control_keys=control_keys,
+            progress_callback=progress_callback,
+            progress_total_seconds=max(duration, 1) if preview else self._media_duration_seconds(video_path),
         )
 
     def build_effect_filter_graph(self, preset: dict[str, Any]) -> str:
@@ -216,6 +223,7 @@ class FFmpegProcessor:
         output_path: Optional[str] = None,
         preset: Optional[dict] = None,
         control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
         """
         将字幕烧录到视频（硬字幕）
@@ -257,6 +265,8 @@ class FFmpegProcessor:
             preset=preset_dict,
             for_subtitles=True,
             control_keys=control_keys,
+            progress_callback=progress_callback,
+            progress_total_seconds=self._media_duration_seconds(video_path),
         )
 
     def _build_subtitle_filter(self, subtitle_path: str, preset: Optional[dict] = None) -> str:
@@ -324,6 +334,7 @@ class FFmpegProcessor:
         mode: str = "replace",
         volume_ratio: float = 1.0,
         control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
         """
         合并音频和视频
@@ -371,7 +382,14 @@ class FFmpegProcessor:
             raise ValueError(f"不支持的合并模式: {mode}")
 
         logger.info(f"合并音视频: {video_path} + {audio_path} -> {output_path}")
-        return self._run_ffmpeg(cmd, "音视频合并", timeout=21600, control_keys=control_keys)
+        return self._run_ffmpeg(
+            cmd,
+            "音视频合并",
+            timeout=21600,
+            control_keys=control_keys,
+            progress_callback=progress_callback,
+            progress_total_seconds=self._media_duration_seconds(video_path),
+        )
 
     def convert_format(
         self,
@@ -379,6 +397,7 @@ class FFmpegProcessor:
         output_format: str = "mp4",
         output_path: Optional[str] = None,
         control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
         """转换视频格式"""
         if not os.path.exists(input_path):
@@ -398,26 +417,51 @@ class FFmpegProcessor:
 
         logger.info(f"转换格式: {input_path} -> {output_path}")
 
-        return self._run_ffmpeg(cmd, "格式转换", timeout=7200, control_keys=control_keys)
+        return self._run_ffmpeg(
+            cmd,
+            "格式转换",
+            timeout=7200,
+            control_keys=control_keys,
+            progress_callback=progress_callback,
+            progress_total_seconds=self._media_duration_seconds(input_path),
+        )
 
-    def _run_ffmpeg(self, cmd: list[str], action_name: str, timeout: int = 600, control_keys: Optional[list[str]] = None) -> str:
+    def _run_ffmpeg(
+        self,
+        cmd: list[str],
+        action_name: str,
+        timeout: int = 600,
+        control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_total_seconds: Optional[float] = None,
+    ) -> str:
         """执行 ffmpeg 命令并统一处理错误"""
         output_path = cmd[-1]
         control_keys = normalize_control_keys(control_keys)
         process = None
         try:
             raise_if_control_requested(control_keys)
+            run_cmd = self._command_with_progress(cmd) if progress_callback else cmd
             process = subprocess.Popen(
-                cmd,
+                run_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT if progress_callback else subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 creationflags=subprocess_creation_flags(),
             )
-            register_process(control_keys, process, cmd)
-            stdout, stderr = process.communicate(timeout=timeout)
+            register_process(control_keys, process, run_cmd)
+            if progress_callback:
+                stdout, stderr = self._communicate_with_progress(
+                    process=process,
+                    timeout=timeout,
+                    control_keys=control_keys,
+                    progress_callback=progress_callback,
+                    total_seconds=progress_total_seconds,
+                )
+            else:
+                stdout, stderr = process.communicate(timeout=timeout)
             raise_if_control_requested(control_keys)
 
             if process.returncode != 0:
@@ -429,6 +473,10 @@ class FFmpegProcessor:
             if process:
                 terminate_process(process)
             raise RuntimeError(f"{action_name}超时")
+        except Exception:
+            if process and process.poll() is None:
+                terminate_process(process)
+            raise
         finally:
             if process:
                 unregister_process(process)
@@ -442,17 +490,184 @@ class FFmpegProcessor:
         preset: dict[str, Any],
         for_subtitles: bool,
         control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+        progress_total_seconds: Optional[float] = None,
     ) -> str:
         """GPU 编码失败时自动重试 CPU，避免驱动或设备不可用导致任务卡死"""
         try:
-            return self._run_ffmpeg(cmd, action_name, timeout=timeout, control_keys=control_keys)
+            return self._run_ffmpeg(
+                cmd,
+                action_name,
+                timeout=timeout,
+                control_keys=control_keys,
+                progress_callback=progress_callback,
+                progress_total_seconds=progress_total_seconds,
+            )
         except RuntimeError as exc:
             if encoder == "libx264":
                 raise
             logger.warning(f"{action_name}使用 {encoder} 失败，自动回退 CPU 编码: {exc}")
             cpu_args = self._video_encoder_args(preset, for_subtitles=for_subtitles, encoder="libx264")
             cpu_cmd = self._replace_video_encoder_args(cmd, cpu_args)
-            return self._run_ffmpeg(cpu_cmd, f"{action_name}CPU回退", timeout=timeout, control_keys=control_keys)
+            return self._run_ffmpeg(
+                cpu_cmd,
+                f"{action_name}CPU回退",
+                timeout=timeout,
+                control_keys=control_keys,
+                progress_callback=progress_callback,
+                progress_total_seconds=progress_total_seconds,
+            )
+
+    def _communicate_with_progress(
+        self,
+        process: subprocess.Popen,
+        timeout: int,
+        control_keys: list[str],
+        progress_callback: Callable[[float], None],
+        total_seconds: Optional[float],
+    ) -> tuple[str, str]:
+        """实时读取 ffmpeg -progress 输出，并把处理进度回调给任务系统"""
+        output_lines: list[str] = []
+        line_queue: queue.Queue[str | None] = queue.Queue()
+
+        def read_stdout() -> None:
+            """后台读取管道，避免主线程阻塞后无法响应取消"""
+            try:
+                if process.stdout:
+                    for raw_line in process.stdout:
+                        line_queue.put(raw_line)
+            finally:
+                line_queue.put(None)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        deadline = time.time() + timeout
+        reader_done = False
+        last_progress = -1.0
+
+        while True:
+            raise_if_control_requested(control_keys)
+            if time.time() > deadline:
+                terminate_process(process)
+                raise subprocess.TimeoutExpired(process.args, timeout)
+
+            try:
+                line = line_queue.get(timeout=0.2)
+            except queue.Empty:
+                if process.poll() is not None and reader_done:
+                    break
+                continue
+
+            if line is None:
+                reader_done = True
+                if process.poll() is not None:
+                    break
+                continue
+
+            text = line.strip()
+            if text:
+                output_lines.append(text)
+                output_lines = output_lines[-160:]
+                parsed_progress = self._parse_progress_line(text, total_seconds)
+                if parsed_progress is not None and parsed_progress >= last_progress:
+                    last_progress = parsed_progress
+                    progress_callback(parsed_progress)
+
+            if process.poll() is not None and reader_done:
+                break
+
+        process.wait(timeout=5)
+        reader.join(timeout=2)
+        if process.stdout:
+            process.stdout.close()
+        if process.returncode == 0:
+            progress_callback(100)
+        return "\n".join(output_lines), ""
+
+    def _command_with_progress(self, cmd: list[str]) -> list[str]:
+        """给 ffmpeg 命令加上机器可读进度输出"""
+        if "-progress" in cmd:
+            return cmd
+        return [cmd[0], "-nostdin", "-nostats", "-stats_period", "1", "-progress", "pipe:1", *cmd[1:]]
+
+    def _parse_progress_line(self, line: str, total_seconds: Optional[float]) -> Optional[float]:
+        """解析 ffmpeg 进度行，转换为 0-99 的百分比"""
+        if not total_seconds or total_seconds <= 0:
+            return None
+        seconds = None
+        if line.startswith(("out_time_ms=", "out_time_us=")):
+            try:
+                seconds = int(line.split("=", 1)[1]) / 1_000_000
+            except ValueError:
+                return None
+        elif line.startswith("out_time="):
+            seconds = self._timestamp_to_seconds(line.split("=", 1)[1])
+        if seconds is None:
+            return None
+        return max(0.0, min(99.0, seconds / total_seconds * 100))
+
+    def _timestamp_to_seconds(self, value: str) -> Optional[float]:
+        """把 ffmpeg 时间戳转换成秒"""
+        match = re.match(r"(?P<h>\d+):(?P<m>\d+):(?P<s>\d+(?:\.\d+)?)", value.strip())
+        if not match:
+            return None
+        return int(match.group("h")) * 3600 + int(match.group("m")) * 60 + float(match.group("s"))
+
+    def _media_duration_seconds(self, media_path: str) -> Optional[float]:
+        """读取媒体时长，用于把 ffmpeg 时间进度换算成百分比"""
+        ffprobe_cmd = self._ffprobe_command()
+        if ffprobe_cmd:
+            try:
+                result = subprocess.run(
+                    [
+                        ffprobe_cmd,
+                        "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        media_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    duration = float(result.stdout.strip())
+                    return duration if duration > 0 else None
+            except Exception:
+                pass
+        return self._media_duration_from_ffmpeg(media_path)
+
+    def _ffprobe_command(self) -> Optional[str]:
+        """优先使用 D:\\tools\\ffmpeg 同目录里的 ffprobe"""
+        ffmpeg_dir = os.path.dirname(self.ffmpeg_cmd) if os.path.isabs(self.ffmpeg_cmd) else ""
+        if ffmpeg_dir:
+            ffprobe_path = os.path.join(ffmpeg_dir, "ffprobe.exe" if os.name == "nt" else "ffprobe")
+            if os.path.exists(ffprobe_path):
+                return ffprobe_path
+        return None
+
+    def _media_duration_from_ffmpeg(self, media_path: str) -> Optional[float]:
+        """没有 ffprobe 时，从 ffmpeg 探测输出里兜底解析时长"""
+        try:
+            result = subprocess.run(
+                [self.ffmpeg_cmd, "-hide_banner", "-i", media_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except Exception:
+            return None
+        output = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+        if not match:
+            return None
+        return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
 
     def _replace_video_encoder_args(self, cmd: list[str], replacement_args: list[str]) -> list[str]:
         """把命令中的视频编码器参数替换为新的编码器参数"""
