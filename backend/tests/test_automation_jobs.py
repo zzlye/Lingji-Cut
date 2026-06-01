@@ -1,11 +1,12 @@
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _default_stages, _job_to_response, _reset_job_for_retry  # noqa: E402
+from backend.api.automation import _default_stages, _job_to_response, _prepare_job_for_resume, _reset_job_for_retry, _stage_output_if_reusable  # noqa: E402
 from backend.models import AutomationJobRecord  # noqa: E402
 
 
@@ -62,6 +63,52 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIsNone(job.subtitle_text)
         self.assertIsNone(job.error_message)
         self.assertEqual([stage["key"] for stage in json.loads(job.stages)], ["parse", "download", "effects", "subtitle", "voice", "export"])
+
+    def test_resume_keeps_completed_stages_and_clears_failed_stage(self):
+        job = AutomationJobRecord(
+            id="auto-resume",
+            source_url="https://youtube.com/watch?v=test",
+            status="failed",
+            progress=70,
+            current_step="流程失败",
+            error_message="导出失败",
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+                {"key": "effects", "status": "completed", "progress": 100, "task_id": 2, "output_path": "D:/effects.mp4", "error_message": None},
+                {"key": "export", "status": "failed", "progress": 35, "task_id": 3, "output_path": None, "error_message": "导出失败"},
+            ], ensure_ascii=False),
+        )
+
+        _prepare_job_for_resume(job)
+        stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+        self.assertEqual(job.status, "pending")
+        self.assertEqual(job.current_step, "等待继续")
+        self.assertIsNone(job.error_message)
+        self.assertEqual(stages["download"]["status"], "completed")
+        self.assertEqual(stages["effects"]["status"], "completed")
+        self.assertEqual(stages["export"]["status"], "pending")
+        self.assertIsNone(stages["export"]["task_id"])
+        self.assertIsNone(stages["export"]["error_message"])
+
+    def test_stage_output_reusable_requires_existing_file(self):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            temp_path = temp_file.name
+        try:
+            job = AutomationJobRecord(
+                id="auto-stage-file",
+                source_url="https://youtube.com/watch?v=test",
+                status="failed",
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": temp_path, "error_message": None},
+                    {"key": "effects", "status": "completed", "progress": 100, "task_id": 2, "output_path": "D:/missing.mp4", "error_message": None},
+                ], ensure_ascii=False),
+            )
+
+            self.assertEqual(_stage_output_if_reusable(job, "download"), temp_path)
+            self.assertIsNone(_stage_output_if_reusable(job, "effects"))
+        finally:
+            os.remove(temp_path)
 
 
 if __name__ == "__main__":

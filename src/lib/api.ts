@@ -319,6 +319,10 @@ export const automationApi = {
   retry: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/retry`, { method: 'POST' }),
 
+  /** 从已有阶段继续后台一键流程 */
+  resume: (id: string) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/resume`, { method: 'POST' }),
+
   /** 后台一键流程事件流地址 */
   eventsUrl: (id: string) =>
     `${BASE_URL}/automation/jobs/${id}/events`,

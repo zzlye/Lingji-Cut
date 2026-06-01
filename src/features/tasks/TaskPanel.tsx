@@ -16,6 +16,7 @@ export function TaskPanel() {
   const [serverTasks, setServerTasks] = useState<DownloadTask[]>([])
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
+  const [resumingJobId, setResumingJobId] = useState<string | null>(null)
 
   const mergedTasks = useMemo(() => {
     const taskMap = new Map<number, DownloadTask>()
@@ -68,6 +69,20 @@ export function TaskPanel() {
     }
   }
 
+  /** 从已完成阶段继续自动化任务 */
+  const resumeAutomationJob = async (jobId: string) => {
+    setResumingJobId(jobId)
+    try {
+      const result = await automationApi.resume(jobId)
+      addLog('info', `自动处理任务已从断点继续: ${result.job_id}`)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `继续自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setResumingJobId(null)
+    }
+  }
+
   useEffect(() => {
     if (!activeJobIds) return
 
@@ -112,7 +127,9 @@ export function TaskPanel() {
                   key={job.id}
                   job={job}
                   isRetrying={retryingJobId === job.id}
+                  isResuming={resumingJobId === job.id}
                   onRetry={() => retryAutomationJob(job.id)}
+                  onResume={() => resumeAutomationJob(job.id)}
                 />
               ))}
             </div>
@@ -236,7 +253,19 @@ function EmptyAutomationList() {
 }
 
 /** 自动流程卡片 */
-function AutomationJobCard({ job, isRetrying, onRetry }: { job: AutomationJob; isRetrying: boolean; onRetry: () => void }) {
+function AutomationJobCard({
+  job,
+  isRetrying,
+  isResuming,
+  onRetry,
+  onResume,
+}: {
+  job: AutomationJob
+  isRetrying: boolean
+  isResuming: boolean
+  onRetry: () => void
+  onResume: () => void
+}) {
   return (
     <article className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -253,13 +282,22 @@ function AutomationJobCard({ job, isRetrying, onRetry }: { job: AutomationJob; i
             <div className="mt-1">{job.current_step}</div>
           </div>
           {(job.status === 'failed' || job.status === 'completed') && (
-            <button
-              onClick={onRetry}
-              disabled={isRetrying}
-              className="h-8 rounded-md border border-border px-3 text-xs text-foreground hover:bg-white/5 disabled:opacity-50"
-            >
-              {isRetrying ? '重试中...' : '重试'}
-            </button>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button
+                onClick={onResume}
+                disabled={isResuming}
+                className="h-8 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
+              >
+                {isResuming ? '继续中...' : '继续'}
+              </button>
+              <button
+                onClick={onRetry}
+                disabled={isRetrying}
+                className="h-8 rounded-md border border-border px-3 text-xs text-foreground hover:bg-white/5 disabled:opacity-50"
+              >
+                {isRetrying ? '重试中...' : '重试'}
+              </button>
+            </div>
           )}
         </div>
       </div>

@@ -211,6 +211,34 @@ def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
     )
 
 
+def _stage_by_key(job: Optional[AutomationJobRecord], key: str) -> Optional[dict[str, Any]]:
+    """按阶段 key 读取自动化任务阶段记录"""
+    if not job:
+        return None
+    for stage in _load_job_stages(job):
+        if stage.get("key") == key:
+            return stage
+    return None
+
+
+def _stage_output_if_reusable(job: Optional[AutomationJobRecord], key: str) -> Optional[str]:
+    """返回可复用的阶段输出文件路径"""
+    stage = _stage_by_key(job, key)
+    if not stage or stage.get("status") not in {"completed", "skipped"}:
+        return None
+    output_path = stage.get("output_path")
+    if isinstance(output_path, str) and output_path and os.path.exists(output_path):
+        return output_path
+    return None
+
+
+def _mark_stage_reused(db: Session, job: Optional[AutomationJobRecord], key: str, output_path: Optional[str] = None) -> None:
+    """把已完成阶段标记为复用，保持前端能看到断点续跑进度"""
+    if not job:
+        return
+    _update_job_stage(db, job, key, "completed", progress=100, output_path=output_path)
+
+
 def _complete_task(db: Session, task: DownloadTask, output_path: Optional[str] = None) -> None:
     """标记任务完成"""
     task.status = "completed"
@@ -399,7 +427,7 @@ def _seconds_to_srt_time(total_seconds: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},000"
 
 
-def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Optional[AutomationJobRecord] = None) -> AutomationRunResponse:
+def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Optional[AutomationJobRecord] = None, resume_from_checkpoint: bool = False) -> AutomationRunResponse:
     """同步执行完整一键自动流程，供直接调用和后台任务复用"""
     downloader = Downloader()
     processor = FFmpegProcessor()
@@ -416,130 +444,155 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         job.status = "running"
         _update_job_stage(db, job, "parse", "completed")
 
-    download_task = _create_task(db, video.id, "download", {"format_id": request.format_id}, job.id if job else None)
-    if job:
-        _update_job_stage(db, job, "download", "running", progress=0, task_id=download_task.id)
+    reusable_download_path = _stage_output_if_reusable(job, "download") if resume_from_checkpoint else None
+    if reusable_download_path:
+        downloaded_path = reusable_download_path
+        _mark_stage_reused(db, job, "download", downloaded_path)
+        stages.append(AutomationStageResult(key="download", status="completed", progress=100, output_path=downloaded_path))
+    else:
+        download_task = _create_task(db, video.id, "download", {"format_id": request.format_id}, job.id if job else None)
+        if job:
+            _update_job_stage(db, job, "download", "running", progress=0, task_id=download_task.id)
 
-    def on_progress(progress: float, _: str) -> None:
-        """更新下载任务和自动化任务进度"""
-        download_task.progress = progress
-        db.commit()
-        if job:
-            _update_job_stage(db, job, "download", "running", progress=progress, task_id=download_task.id)
+        def on_progress(progress: float, _: str) -> None:
+            """更新下载任务和自动化任务进度"""
+            download_task.progress = progress
+            db.commit()
+            if job:
+                _update_job_stage(db, job, "download", "running", progress=progress, task_id=download_task.id)
 
-    try:
-        downloaded_path = downloader.download_video(
-            url=video.url,
-            format_id=request.format_id,
-            output_format="mp4",
-            progress_callback=on_progress,
-        )
-        _complete_task(db, download_task, downloaded_path)
-        stages.append(AutomationStageResult(key="download", status="completed", task_id=download_task.id, output_path=downloaded_path))
-        if job:
-            _update_job_stage(db, job, "download", "completed", task_id=download_task.id, output_path=downloaded_path)
-    except Exception as exc:
-        _fail_task(db, download_task, exc)
-        if job:
-            _update_job_stage(db, job, "download", "failed", task_id=download_task.id, error_message=str(exc))
-        raise
+        try:
+            downloaded_path = downloader.download_video(
+                url=video.url,
+                format_id=request.format_id,
+                output_format="mp4",
+                progress_callback=on_progress,
+            )
+            _complete_task(db, download_task, downloaded_path)
+            stages.append(AutomationStageResult(key="download", status="completed", task_id=download_task.id, output_path=downloaded_path))
+            if job:
+                _update_job_stage(db, job, "download", "completed", task_id=download_task.id, output_path=downloaded_path)
+        except Exception as exc:
+            _fail_task(db, download_task, exc)
+            if job:
+                _update_job_stage(db, job, "download", "failed", task_id=download_task.id, error_message=str(exc))
+            raise
 
-    effects_task = _create_task(db, video.id, "effects", {"preset": request.processing_preset}, job.id if job else None)
-    if job:
-        _update_job_stage(db, job, "effects", "running", progress=15, task_id=effects_task.id)
-    try:
-        effects_path = processor.apply_effects(
-            video_path=downloaded_path,
-            preset=request.processing_preset,
-        )
-        _complete_task(db, effects_task, effects_path)
-        stages.append(AutomationStageResult(key="effects", status="completed", task_id=effects_task.id, output_path=effects_path))
+    reusable_effects_path = _stage_output_if_reusable(job, "effects") if resume_from_checkpoint else None
+    if reusable_effects_path:
+        effects_path = reusable_effects_path
+        _mark_stage_reused(db, job, "effects", effects_path)
+        stages.append(AutomationStageResult(key="effects", status="completed", progress=100, output_path=effects_path))
+    else:
+        effects_task = _create_task(db, video.id, "effects", {"preset": request.processing_preset}, job.id if job else None)
         if job:
-            _update_job_stage(db, job, "effects", "completed", task_id=effects_task.id, output_path=effects_path)
-    except Exception as exc:
-        _fail_task(db, effects_task, exc)
-        if job:
-            _update_job_stage(db, job, "effects", "failed", task_id=effects_task.id, error_message=str(exc))
-        raise
+            _update_job_stage(db, job, "effects", "running", progress=15, task_id=effects_task.id)
+        try:
+            effects_path = processor.apply_effects(
+                video_path=downloaded_path,
+                preset=request.processing_preset,
+            )
+            _complete_task(db, effects_task, effects_path)
+            stages.append(AutomationStageResult(key="effects", status="completed", task_id=effects_task.id, output_path=effects_path))
+            if job:
+                _update_job_stage(db, job, "effects", "completed", task_id=effects_task.id, output_path=effects_path)
+        except Exception as exc:
+            _fail_task(db, effects_task, exc)
+            if job:
+                _update_job_stage(db, job, "effects", "failed", task_id=effects_task.id, error_message=str(exc))
+            raise
 
     video_for_export = effects_path
-    subtitle_task = _create_task(db, video.id, "subtitle", parent_job_id=job.id if job else None)
-    if job:
-        _update_job_stage(db, job, "subtitle", "running", progress=10, task_id=subtitle_task.id)
-    try:
-        preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
-        track = _pick_subtitle_track(video, request.subtitle_language or (preset.language if preset else None))
-        if not track and not preset:
-            subtitle_task.status = "completed"
-            subtitle_task.progress = 100
-            subtitle_task.error_message = "没有检测到字幕轨，已跳过字幕"
-            db.commit()
-            stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message))
-            if job:
-                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message)
-        else:
-            paths = ensure_project_dirs()
-            preset_dict = _preset_to_dict(preset)
-            language = request.subtitle_language or (track or {}).get("language") or preset_dict.get("language") or "en"
-            if language == "auto":
-                language = "en"
-            subtitle_path = downloader.download_subtitle(
-                url=video.url,
-                language=language,
-                output_dir=paths["output_dir"],
-                sub_type=(track or {}).get("type", "auto"),
-            )
-            if job:
-                _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
-            engine = SubtitleEngine()
-            entries = _parse_subtitle_entries(engine, subtitle_path)
-            if not entries:
-                raise RuntimeError("字幕文件为空，无法继续自动字幕处理")
-            subtitle_text = entries_to_plain_text(entries)
-            text_profile = _pick_text_profile(db, request.text_profile_id)
-            if text_profile and request.subtitle_operation != "none":
-                try:
-                    processed_text = asyncio.run(TextEngine().process_text(
-                        text=subtitle_text,
-                        provider_type=text_profile.provider_type,
-                        api_key=decrypt_api_key(text_profile.api_key_encrypted),
-                        base_url=text_profile.base_url,
-                        model=text_profile.model or "",
-                        settings=_load_profile_settings(text_profile),
-                        operation=request.subtitle_operation,
-                        target_language=request.subtitle_target_language or "",
-                    ))
-                    processed_entries = map_text_to_timed_entries(processed_text, entries)
-                    if processed_entries:
-                        entries = processed_entries
-                        subtitle_text = processed_text
-                except Exception:
-                    # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
-                    pass
-            if job:
-                job.subtitle_text = subtitle_text
-                _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
-            base_name = os.path.splitext(os.path.basename(effects_path))[0]
-            subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
-            engine.generate_ass(entries, subtitle_ass_path, preset_dict)
-            if request.burn_subtitles:
-                video_for_export = processor.burn_subtitles(
-                    video_path=effects_path,
-                    subtitle_path=subtitle_ass_path,
-                    preset=preset_dict,
-                )
-            _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
-            stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
-            if job:
-                _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path)
-    except Exception as exc:
-        _fail_task(db, subtitle_task, exc)
-        stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=str(exc)))
+    reusable_subtitle_path = _stage_output_if_reusable(job, "subtitle") if resume_from_checkpoint else None
+    if reusable_subtitle_path:
+        video_for_export = reusable_subtitle_path if request.burn_subtitles else video_for_export
+        subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else None
+        subtitle_text = job.subtitle_text or ""
+        _mark_stage_reused(db, job, "subtitle", reusable_subtitle_path)
+        stages.append(AutomationStageResult(key="subtitle", status="completed", progress=100, output_path=reusable_subtitle_path))
+    else:
+        subtitle_task = _create_task(db, video.id, "subtitle", parent_job_id=job.id if job else None)
         if job:
-            _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=str(exc))
+            _update_job_stage(db, job, "subtitle", "running", progress=10, task_id=subtitle_task.id)
+        try:
+            preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
+            track = _pick_subtitle_track(video, request.subtitle_language or (preset.language if preset else None))
+            if not track and not preset:
+                subtitle_task.status = "completed"
+                subtitle_task.progress = 100
+                subtitle_task.error_message = "没有检测到字幕轨，已跳过字幕"
+                db.commit()
+                stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message))
+                if job:
+                    _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message)
+            else:
+                paths = ensure_project_dirs()
+                preset_dict = _preset_to_dict(preset)
+                language = request.subtitle_language or (track or {}).get("language") or preset_dict.get("language") or "en"
+                if language == "auto":
+                    language = "en"
+                subtitle_path = downloader.download_subtitle(
+                    url=video.url,
+                    language=language,
+                    output_dir=paths["output_dir"],
+                    sub_type=(track or {}).get("type", "auto"),
+                )
+                if job:
+                    _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
+                engine = SubtitleEngine()
+                entries = _parse_subtitle_entries(engine, subtitle_path)
+                if not entries:
+                    raise RuntimeError("字幕文件为空，无法继续自动字幕处理")
+                subtitle_text = entries_to_plain_text(entries)
+                text_profile = _pick_text_profile(db, request.text_profile_id)
+                if text_profile and request.subtitle_operation != "none":
+                    try:
+                        processed_text = asyncio.run(TextEngine().process_text(
+                            text=subtitle_text,
+                            provider_type=text_profile.provider_type,
+                            api_key=decrypt_api_key(text_profile.api_key_encrypted),
+                            base_url=text_profile.base_url,
+                            model=text_profile.model or "",
+                            settings=_load_profile_settings(text_profile),
+                            operation=request.subtitle_operation,
+                            target_language=request.subtitle_target_language or "",
+                        ))
+                        processed_entries = map_text_to_timed_entries(processed_text, entries)
+                        if processed_entries:
+                            entries = processed_entries
+                            subtitle_text = processed_text
+                    except Exception:
+                        # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
+                        pass
+                if job:
+                    job.subtitle_text = subtitle_text
+                    _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
+                base_name = os.path.splitext(os.path.basename(effects_path))[0]
+                subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
+                engine.generate_ass(entries, subtitle_ass_path, preset_dict)
+                if request.burn_subtitles:
+                    video_for_export = processor.burn_subtitles(
+                        video_path=effects_path,
+                        subtitle_path=subtitle_ass_path,
+                        preset=preset_dict,
+                    )
+                _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
+                stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
+                if job:
+                    _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path)
+        except Exception as exc:
+            _fail_task(db, subtitle_task, exc)
+            stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=str(exc)))
+            if job:
+                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=str(exc))
 
     voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice else None
-    if voice_profile:
+    reusable_audio_path = _stage_output_if_reusable(job, "voice") if resume_from_checkpoint else None
+    if reusable_audio_path:
+        audio_path = reusable_audio_path
+        _mark_stage_reused(db, job, "voice", audio_path)
+        stages.append(AutomationStageResult(key="voice", status="completed", progress=100, output_path=audio_path))
+    elif voice_profile:
         voice_task = _create_task(db, video.id, "voice", parent_job_id=job.id if job else None)
         if job:
             _update_job_stage(db, job, "voice", "running", progress=15, task_id=voice_task.id)
@@ -629,7 +682,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     )
 
 
-def _run_background_job(job_id: str) -> None:
+def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> None:
     """后台线程入口：读取任务参数并执行一键流程"""
     db = SessionLocal()
     try:
@@ -642,7 +695,7 @@ def _run_background_job(job_id: str) -> None:
 
         params = json.loads(job.params or "{}")
         request = AutomationRunRequest(**params)
-        _run_automation_sync(request, db, job)
+        _run_automation_sync(request, db, job, resume_from_checkpoint=resume_from_checkpoint)
     except Exception as exc:
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if job:
@@ -665,6 +718,26 @@ def _reset_job_for_retry(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(_default_stages(), ensure_ascii=False)
+
+
+def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
+    """准备断点续跑，保留已完成阶段并清理失败阶段"""
+    stages = _load_job_stages(job)
+    for stage in stages:
+        if stage.get("status") in {"running", "failed"}:
+            stage["status"] = "pending"
+            stage["progress"] = 0
+            stage["task_id"] = None
+            stage["output_path"] = None
+            stage["error_message"] = None
+
+    job.status = "pending"
+    job.progress = _calculate_job_progress(stages)
+    job.current_step = "等待继续"
+    job.output_path = None
+    job.error_message = None
+    job.completed_at = None
+    job.stages = json.dumps(stages, ensure_ascii=False)
 
 
 @router.post("/run", response_model=AutomationRunResponse)
@@ -735,6 +808,23 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
     db.commit()
     AUTOMATION_EXECUTOR.submit(_run_background_job, job_id)
     return AutomationStartResponse(message="自动化任务已重新进入队列", job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/resume", response_model=AutomationStartResponse)
+def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
+    """从已完成阶段后继续执行一键自动化任务"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status not in {"failed", "completed"}:
+        raise HTTPException(status_code=400, detail="只有失败或已完成的自动化任务可以继续处理")
+    if not job.params:
+        raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
+
+    _prepare_job_for_resume(job)
+    db.commit()
+    AUTOMATION_EXECUTOR.submit(_run_background_job, job_id, True)
+    return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
 
 
 @router.get("/jobs/{job_id}/events")
