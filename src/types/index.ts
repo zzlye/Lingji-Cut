@@ -157,6 +157,28 @@ export interface AutomationJob {
   steps: AutomationStep[]
 }
 
+/** 后端自动化阶段结果 */
+export interface AutomationStageResult {
+  key: AutomationStep['key'] | 'pipeline'
+  status: 'completed' | 'failed' | 'skipped'
+  task_id?: number | null
+  output_path?: string | null
+  error_message?: string | null
+}
+
+/** 后端一键流程响应 */
+export interface AutomationRunResponse {
+  message: string
+  video_id: number
+  title: string | null
+  output_path: string
+  stages: AutomationStageResult[]
+  subtitle_text: string
+}
+
+/** 自动化字幕文本处理方式 */
+export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
+
 /** 配音音色 */
 export interface VoiceOption {
   id: string

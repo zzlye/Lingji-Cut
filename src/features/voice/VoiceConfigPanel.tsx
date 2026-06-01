@@ -301,7 +301,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <TextField label="Base URL" value={profileForm.base_url} onChange={(value) => setProfileForm({ ...profileForm, base_url: value })} />
                 <TextField label="模型" value={profileForm.model} onChange={(value) => setProfileForm({ ...profileForm, model: value })} />
                 <PasswordField
-                  label={selectedProfileId ? 'API Key（留空会覆盖为空，更新前请重新输入）' : 'API Key'}
+                  label={selectedProfileId ? 'API Key（留空则保留已保存密钥）' : 'API Key'}
                   value={profileForm.api_key}
                   onChange={(value) => setProfileForm({ ...profileForm, api_key: value })}
                 />

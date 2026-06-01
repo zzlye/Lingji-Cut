@@ -1,7 +1,7 @@
 {
   "name": "youtube-video-processor",
   "version": "1.0.0",
-  "description": "YouTube 视频处理桌面软件 - 下载、去重、字幕、配音、导出",
+  "description": "YouTube 视频处理桌面软件 - 下载、画面处理、字幕、配音、导出",
   "main": "./out/main/index.js",
   "author": "",
   "license": "MIT",

@@ -94,10 +94,11 @@ class SubtitleEngine:
 
         font_name = preset.get("font_name", "Microsoft YaHei")
         font_size = preset.get("font_size", 48)
-        font_color = preset.get("font_color", "&H00FFFFFF")
-        outline_color = preset.get("outline_color", "&H00000000")
+        font_color = self._color_to_ass(preset.get("font_color", "&H00FFFFFF"))
+        secondary_color = self._color_to_ass(preset.get("secondary_color", "&H000000FF"))
+        outline_color = self._color_to_ass(preset.get("outline_color", "&H00000000"))
         outline_width = preset.get("outline_width", 2)
-        shadow_color = preset.get("shadow_color", "&H80000000")
+        shadow_color = self._color_to_ass(preset.get("shadow_color", "&H80000000"), default_alpha="80")
         position = preset.get("position", "bottom")
         margin_v = preset.get("margin_v", 30)
 
@@ -127,7 +128,7 @@ PlayResY: 1080
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},{font_color},&H000000FF,{outline_color},{shadow_color},0,0,0,0,100,100,0,0,1,{outline_width},1,{alignment},10,10,{margin_v},1
+Style: Default,{font_name},{font_size},{font_color},{secondary_color},{outline_color},{shadow_color},0,0,0,0,100,100,0,0,1,{outline_width},1,{alignment},10,10,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -160,6 +161,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         millis = seconds_parts[1][:2] if len(seconds_parts) > 1 else "00"
 
         return f"{hours}:{minutes}:{seconds}.{millis}"
+
+    def _color_to_ass(self, color: str, default_alpha: str = "00") -> str:
+        """将十六进制颜色转换为 ASS 使用的 AABBGGRR 格式"""
+        if not color:
+            return f"&H{default_alpha}FFFFFF"
+        if color.startswith("&H"):
+            return color
+
+        raw = color.lstrip("#")
+        if len(raw) == 8:
+            alpha = raw[0:2]
+            rgb = raw[2:8]
+        elif len(raw) == 6:
+            alpha = default_alpha
+            rgb = raw
+        else:
+            return f"&H{default_alpha}FFFFFF"
+
+        red, green, blue = rgb[0:2], rgb[2:4], rgb[4:6]
+        return f"&H{alpha}{blue}{green}{red}"
 
     def split_by_duration(
         self,

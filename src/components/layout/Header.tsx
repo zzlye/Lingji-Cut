@@ -2,10 +2,11 @@
 // 顶部栏组件 - URL 输入、解析按钮、全局任务状态、窗口控制
 
 import { useEffect, useRef, useState } from 'react'
-import { videoApi, effectsApi } from '@/lib/api'
+import { automationApi, profileApi, videoApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { SettingsCenter } from '@/features/settings/SettingsCenter'
+import type { AutomationStageResult } from '@/types'
 
 /** 设置弹窗默认尺寸和窗口边距 */
 const SETTINGS_MODAL_WIDTH = 960
@@ -114,133 +115,103 @@ export function Header() {
 
   /**
    * 一键完成流程
-   * 当前先自动执行解析、下载、画面处理；字幕和配音会在对应配置接入后继续串联。
+   * 调用后端编排器执行解析、下载、画面处理、字幕渲染、可选配音和最终导出。
    */
   const handleAutoRun = async () => {
     if (!url.trim() || isRunningAuto) return
 
     const automationJobId = startAutomationJob(url)
-    let activeStep: 'parse' | 'download' | 'effects' | 'subtitle' | 'voice' | 'export' = 'parse'
 
-    /** 标记自动流程当前正在执行的步骤 */
-    const runStep = (step: typeof activeStep) => {
-      activeStep = step
+    /** 后端当前是同步编排，前端先把阶段置为运行中，完成后按返回结果回填。 */
+    const markRunning = () => {
       updateAutomationJob(automationJobId, {
         status: 'running',
-        current_step: step,
+        current_step: '后端自动流程执行中',
       })
-      updateAutomationStep(automationJobId, step, {
-        status: 'running',
-        progress: 25,
-        error_message: null,
+      ;(['parse', 'download', 'effects', 'subtitle', 'voice', 'export'] as const).forEach((step) => {
+        updateAutomationStep(automationJobId, step, {
+          status: 'running',
+          progress: 35,
+          error_message: null,
+        })
       })
+    }
+
+    /** 将后端阶段结果同步到前端任务队列和阶段卡片 */
+    const applyStageResult = (stage: AutomationStageResult, videoId: number) => {
+      if (stage.key === 'pipeline') return
+      updateAutomationStep(automationJobId, stage.key, {
+        status: stage.status,
+        progress: 100,
+        output_path: stage.output_path || null,
+        error_message: stage.error_message || null,
+      })
+      if (stage.task_id && stage.key !== 'parse') {
+        addTask({
+          id: stage.task_id,
+          video_id: videoId,
+          task_type: stage.key,
+          status: stage.status === 'completed' ? 'completed' : stage.status === 'failed' ? 'failed' : 'completed',
+          progress: 100,
+          output_path: stage.output_path || null,
+          error_message: stage.error_message || null,
+          created_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        })
+      }
     }
 
     setIsRunningAuto(true)
     setParsing(true)
     addLog('info', '开始一键完成流程')
-    updateAutomationJob(automationJobId, { status: 'running', current_step: '解析视频' })
+    markRunning()
 
     try {
-      runStep('parse')
-      const video = await videoApi.parse(url)
-      setCurrentVideo(video)
-      addLog('info', `解析成功: ${video.title}`)
+      let textProfileId: number | undefined
+      try {
+        const textProfiles = await profileApi.listText()
+        textProfileId = textProfiles[0]?.id
+      } catch {
+        // 文本 API 配置不是必需项，读取失败时保持原字幕流程。
+        textProfileId = undefined
+      }
+
+      const result = await automationApi.run({
+        url,
+        processing_preset: loadAutomationConfig(),
+        output_format: 'mp4',
+        text_profile_id: textProfileId,
+        subtitle_operation: textProfileId ? 'polish' : 'none',
+        burn_subtitles: true,
+        enable_voice: true,
+        audio_mode: 'mix',
+        original_volume: 0.25,
+      })
+
       updateAutomationJob(automationJobId, {
-        title: video.title || '一键自动流程',
-        video_id: video.id,
-        current_step: '下载入库',
+        title: result.title || '一键自动流程',
+        video_id: result.video_id,
       })
-      updateAutomationStep(automationJobId, 'parse', {
-        status: 'completed',
-        progress: 100,
-      })
-
-      runStep('download')
-      const download = await videoApi.download(video.id)
-      addTask({
-        id: download.task_id,
-        video_id: video.id,
-        task_type: 'download',
-        status: download.output_path ? 'completed' : 'pending',
-        progress: download.output_path ? 100 : 0,
-        output_path: download.output_path || null,
-        error_message: null,
-        created_at: new Date().toISOString(),
-        completed_at: download.output_path ? new Date().toISOString() : null,
-      })
-
-      if (!download.output_path) {
-        addLog('warn', '下载任务已创建，但未返回输出路径')
-        updateAutomationStep(automationJobId, 'download', {
-          status: 'failed',
-          progress: 60,
-          error_message: '下载任务未返回输出路径，无法继续自动流程',
-        })
-        updateAutomationJob(automationJobId, {
-          status: 'failed',
-          current_step: '下载入库失败',
-          completed_at: new Date().toISOString(),
-        })
-        return
-      }
-      updateAutomationStep(automationJobId, 'download', {
-        status: 'completed',
-        progress: 100,
-        output_path: download.output_path,
-      })
-
-      runStep('effects')
-      const effects = await effectsApi.apply({
-        video_path: download.output_path,
-        preset: loadAutomationConfig(),
-      })
-
-      if (effects.task_id) {
-        addTask({
-          id: effects.task_id,
-          video_id: video.id,
-          task_type: 'effects',
-          status: 'completed',
-          progress: 100,
-          output_path: effects.output_path,
-          error_message: null,
-          created_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        })
-      }
-      updateAutomationStep(automationJobId, 'effects', {
-        status: 'completed',
-        progress: 100,
-        output_path: effects.output_path,
-      })
-
-      updateAutomationStep(automationJobId, 'subtitle', {
-        status: 'skipped',
-        progress: 100,
-        error_message: '当前自动流程未启用字幕渲染任务',
-      })
-      updateAutomationStep(automationJobId, 'voice', {
-        status: 'skipped',
-        progress: 100,
-        error_message: '配音为可选步骤，当前自动流程未启用配音',
-      })
-      updateAutomationStep(automationJobId, 'export', {
-        status: 'completed',
-        progress: 100,
-        output_path: effects.output_path,
-      })
+      result.stages.forEach((stage) => applyStageResult(stage, result.video_id))
       updateAutomationJob(automationJobId, {
         status: 'completed',
         progress: 100,
         current_step: '流程完成',
         completed_at: new Date().toISOString(),
       })
+      addLog('info', `一键完成流程已结束: ${result.output_path}`)
 
-      addLog('info', `一键完成流程已结束: ${effects.output_path}`)
+      // 自动流程完成后重新解析一次，刷新素材卡片里的标题、字幕轨和缩略图。
+      try {
+        const video = await videoApi.parse(url)
+        setCurrentVideo(video)
+      } catch {
+        // 成品已经导出，刷新元数据失败只记录为弱提示。
+        addLog('warn', '自动流程已完成，但刷新视频信息失败')
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误'
-      updateAutomationStep(automationJobId, activeStep, {
+      updateAutomationStep(automationJobId, 'export', {
         status: 'failed',
         error_message: message,
       })

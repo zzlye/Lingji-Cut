@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 
+from ..core import FFmpegProcessor
 from ..models import get_db, DownloadTask
 
 # 创建路由器
@@ -20,10 +21,65 @@ class ExportRequest(BaseModel):
     output_format: str = "mp4"
     resolution: Optional[str] = None
     bitrate: Optional[str] = None
+    audio_mode: str = "replace"
+    original_volume: float = 0.25
 
 
-@router.post("/create")
+class ExportResponse(BaseModel):
+    """导出响应"""
+    message: str
+    task_id: int
+    output_path: str
+
+
+@router.post("/create", response_model=ExportResponse)
 async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
-    """创建导出任务"""
-    # TODO: 创建导出任务
-    return {"message": "导出任务已创建", "task_id": 1}
+    """创建并执行导出任务"""
+    task = DownloadTask(
+        video_id=0,
+        task_type="export",
+        status="processing",
+        progress=0,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    processor = FFmpegProcessor()
+    try:
+        working_video = request.video_path
+
+        # 先烧录字幕，再按需合成配音，最后复制/转换到导出目录。
+        if request.subtitle_path:
+            working_video = processor.burn_subtitles(
+                video_path=working_video,
+                subtitle_path=request.subtitle_path,
+            )
+            task.progress = 35
+            db.commit()
+
+        if request.audio_path:
+            working_video = processor.merge_audio_video(
+                video_path=working_video,
+                audio_path=request.audio_path,
+                mode=request.audio_mode,
+                volume_ratio=request.original_volume,
+            )
+            task.progress = 70
+            db.commit()
+
+        output_path = processor.convert_format(
+            input_path=working_video,
+            output_format=request.output_format,
+        )
+
+        task.status = "completed"
+        task.progress = 100
+        task.output_path = output_path
+        db.commit()
+        return ExportResponse(message="导出完成", task_id=task.id, output_path=output_path)
+    except Exception as exc:
+        task.status = "failed"
+        task.error_message = str(exc)
+        db.commit()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -286,7 +286,7 @@ async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get
 
 
 @router.put("/voice/{profile_id}", response_model=ProfileResponse)
-async def update_voice_profile(profile_id: int, profile: ProfileCreate, db: Session = Depends(get_db)):
+async def update_voice_profile(profile_id: int, profile: ProfileUpdate, db: Session = Depends(get_db)):
     """更新配音 API 配置"""
     db_profile = db.query(VoiceProviderProfile).filter(VoiceProviderProfile.id == profile_id).first()
     if not db_profile:
@@ -295,7 +295,8 @@ async def update_voice_profile(profile_id: int, profile: ProfileCreate, db: Sess
     db_profile.name = profile.name
     db_profile.provider_type = profile.provider_type
     db_profile.base_url = profile.base_url
-    db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
+    if profile.api_key is not None and profile.api_key.strip():
+        db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
     db_profile.voice = profile.model
     db_profile.extra_params = profile.extra_params
     db.commit()

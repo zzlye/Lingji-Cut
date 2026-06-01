@@ -9,6 +9,7 @@ from .voice import router as voice_router
 from .exports import router as exports_router
 from .effects import router as effects_router
 from .settings import router as settings_router
+from .automation import router as automation_router
 
 __all__ = [
     "videos_router",
@@ -19,4 +20,5 @@ __all__ = [
     "exports_router",
     "effects_router",
     "settings_router",
+    "automation_router",
 ]

@@ -271,7 +271,17 @@ class FFmpegProcessor:
         if "margin_v" in preset:
             style_parts.append(f"MarginV={preset['margin_v']}")
         if "position" in preset:
-            alignment_map = {"bottom": 2, "center": 5, "top": 8}
+            alignment_map = {
+                "bottom_left": 1,
+                "bottom": 2,
+                "bottom_right": 3,
+                "middle_left": 4,
+                "center": 5,
+                "middle_right": 6,
+                "top_left": 7,
+                "top": 8,
+                "top_right": 9,
+            }
             style_parts.append(f"Alignment={alignment_map.get(preset['position'], 2)}")
 
         style_str = ",".join(style_parts) if style_parts else ""

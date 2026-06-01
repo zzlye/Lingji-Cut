@@ -138,6 +138,34 @@ export const subtitleApi = {
   /** 删除字幕预设 */
   deletePreset: (id: number) =>
     request<{ message: string }>(`/subtitles/presets/${id}`, { method: 'DELETE' }),
+
+  /** 下载/生成字幕文件并可烧录硬字幕 */
+  render: (params: {
+    video_id: number
+    video_path: string
+    preset_id?: number
+    language?: string
+    sub_type?: 'original' | 'auto'
+    burn_in?: boolean
+    subtitle_path?: string
+    output_path?: string
+  }) =>
+    request<{ message: string; task_id: number; subtitle_path: string; ass_path: string; output_path?: string | null; plain_text: string }>('/subtitles/render', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 使用文本 API 生成、翻译或润色字幕正文 */
+  processText: (params: {
+    text: string
+    profile_id: number
+    operation?: 'generate' | 'translate' | 'polish'
+    target_language?: string
+  }) =>
+    request<{ message: string; text: string; operation: string }>('/subtitles/process-text', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
 }
 
 /** API 配置 */
@@ -179,7 +207,7 @@ export const profileApi = {
     }),
 
   /** 更新配音 API 配置 */
-  updateVoice: (id: number, profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>
+  updateVoice: (id: number, profile: { name: string; provider_type: string; base_url: string; api_key?: string; model?: string; extra_params?: string }) =>
     request<import('@/types').ApiProfile>(`/profiles/voice/${id}`, {
       method: 'PUT',
       body: JSON.stringify(profile),
@@ -222,8 +250,36 @@ export const exportApi = {
     subtitle_path?: string
     audio_path?: string
     output_format?: string
+    audio_mode?: 'replace' | 'mix'
+    original_volume?: number
   }) =>
-    request<{ message: string; task_id: number }>('/exports/create', {
+    request<{ message: string; task_id: number; output_path: string }>('/exports/create', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+}
+
+/** 一键自动化 API */
+export const automationApi = {
+  /** 后端完整执行一键流程 */
+  run: (params: {
+    url: string
+    processing_preset: import('@/types').ProcessingConfig
+    format_id?: string
+    output_format?: string
+    subtitle_preset_id?: number
+    subtitle_language?: string
+    text_profile_id?: number
+    subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
+    subtitle_target_language?: string
+    burn_subtitles?: boolean
+    enable_voice?: boolean
+    voice_profile_id?: number
+    voice_text?: string
+    audio_mode?: 'replace' | 'mix'
+    original_volume?: number
+  }) =>
+    request<import('@/types').AutomationRunResponse>('/automation/run', {
       method: 'POST',
       body: JSON.stringify(params),
     }),
