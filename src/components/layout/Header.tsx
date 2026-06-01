@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react'
 import { automationApi, videoApi } from '@/lib/api'
 import { buildAutomationPayload } from '@/lib/automationPayload'
 import { useTaskStore } from '@/stores/taskStore'
-import { SettingsCenter } from '@/features/settings/SettingsCenter'
+import { SettingsCenter, type SettingsTab } from '@/features/settings/SettingsCenter'
 import type { BackendAutomationJob } from '@/types'
 
 /** 设置弹窗默认尺寸和窗口边距 */
@@ -67,6 +67,8 @@ export function Header() {
   const [isRunningAuto, setIsRunningAuto] = useState(false)
   // 设置中心弹层是否打开
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  // 设置中心初始页签
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab>('effects')
   // 设置中心弹层位置
   const [settingsPosition, setSettingsPosition] = useState<SettingsPosition | null>(null)
   // 设置弹窗拖动过程中的起始数据
@@ -118,6 +120,7 @@ export function Header() {
   const handleAutoRun = async () => {
     if (!url.trim() || isRunningAuto) return
 
+    setIsSettingsOpen(false)
     setIsRunningAuto(true)
     setParsing(true)
     addLog('info', '开始一键完成流程')
@@ -275,6 +278,15 @@ export function Header() {
 
   /** 打开设置弹窗，并在第一次打开时放到右上角 */
   const handleOpenSettings = () => {
+    setSettingsInitialTab('effects')
+    setSettingsPosition((current) => current ? clampSettingsPosition(current.x, current.y) : getDefaultSettingsPosition())
+    setIsSettingsOpen(true)
+  }
+
+  /** 点击一键完成时先打开自动确认设置 */
+  const handleOpenAutoConfirm = () => {
+    if (!url.trim() || isRunningAuto) return
+    setSettingsInitialTab('auto')
     setSettingsPosition((current) => current ? clampSettingsPosition(current.x, current.y) : getDefaultSettingsPosition())
     setIsSettingsOpen(true)
   }
@@ -338,7 +350,7 @@ export function Header() {
           {isParsing ? '解析中...' : '解析'}
         </button>
         <button
-          onClick={handleAutoRun}
+          onClick={handleOpenAutoConfirm}
           disabled={!url.trim() || isRunningAuto}
           className="h-9 min-w-32 px-5 bg-accent text-accent-foreground rounded-md text-sm font-medium hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
@@ -403,6 +415,10 @@ export function Header() {
           <SettingsCenter
             onClose={() => setIsSettingsOpen(false)}
             onDragStart={handleSettingsDragStart}
+            initialTab={settingsInitialTab}
+            currentUrl={url}
+            isAutoRunning={isRunningAuto}
+            onConfirmAutoRun={handleAutoRun}
           />
         </div>
       )}

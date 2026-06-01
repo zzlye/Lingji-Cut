@@ -28,5 +28,14 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     voice_mode: preferences.voice_mode,
     audio_mode: preferences.audio_mode,
     original_volume: preferences.original_volume,
+    multi_speaker_enabled: preferences.multi_speaker_enabled,
+    speaker_voice_map: Object.fromEntries(
+      preferences.voice_speakers
+        .filter((speaker) => speaker.label.trim() && speaker.voice.trim())
+        .map((speaker) => [speaker.label.trim(), speaker.voice.trim()]),
+    ),
+    glossary_terms: preferences.glossary_terms,
+    banned_words: preferences.banned_words,
+    banned_word_action: preferences.banned_word_action,
   }
 }

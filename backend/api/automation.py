@@ -47,6 +47,10 @@ STAGE_WEIGHTS = {
 }
 
 
+class BannedWordsDetected(RuntimeError):
+    """禁词命中异常，用于区分普通字幕失败和策略拦截"""
+
+
 class AutomationRunRequest(BaseModel):
     """一键自动流程请求"""
     url: str
@@ -65,6 +69,11 @@ class AutomationRunRequest(BaseModel):
     voice_mode: str = "segmented"
     audio_mode: str = "mix"
     original_volume: float = 0.25
+    multi_speaker_enabled: bool = False
+    speaker_voice_map: dict[str, str] = Field(default_factory=dict)
+    glossary_terms: list[dict[str, Any]] = Field(default_factory=list)
+    banned_words: list[str] = Field(default_factory=list)
+    banned_word_action: str = "warn"
 
 
 class AutomationStageResult(BaseModel):
@@ -400,6 +409,88 @@ def _fallback_voice_text(video: VideoSource) -> str:
     return "这是一段自动生成的短视频配音。"
 
 
+def _normalize_glossary_terms(terms: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """清理专业术语字库，保留原词、固定写法和备注"""
+    normalized: list[dict[str, str]] = []
+    for item in terms or []:
+        source = str(item.get("source") or "").strip()
+        if not source:
+            continue
+        normalized.append({
+            "source": source,
+            "replacement": str(item.get("replacement") or "").strip(),
+            "note": str(item.get("note") or "").strip(),
+        })
+    return normalized
+
+
+def _apply_glossary_terms(entries: list[dict[str, Any]], terms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把术语字库应用到字幕条目，保证固定写法进入字幕和配音"""
+    glossary = _normalize_glossary_terms(terms)
+    if not glossary:
+        return entries
+
+    processed: list[dict[str, Any]] = []
+    for entry in entries:
+        next_entry = dict(entry)
+        text = str(next_entry.get("text") or "")
+        for term in glossary:
+            replacement = term.get("replacement") or term["source"]
+            text = text.replace(term["source"], replacement)
+        next_entry["text"] = text
+        processed.append(next_entry)
+    return processed
+
+
+def _glossary_prompt_suffix(terms: list[dict[str, Any]]) -> str:
+    """把术语字库整理成文本 API 可读的系统提示补充"""
+    glossary = _normalize_glossary_terms(terms)
+    if not glossary:
+        return ""
+    lines = []
+    for term in glossary:
+        replacement = term.get("replacement") or "保持原词"
+        note = f"，备注：{term['note']}" if term.get("note") else ""
+        lines.append(f"- {term['source']} => {replacement}{note}")
+    return "\n\n术语字库要求：\n" + "\n".join(lines)
+
+
+def _find_banned_words(text: str, banned_words: list[str]) -> list[str]:
+    """检测字幕或配音文案里的禁词，返回命中的去重列表"""
+    if not text:
+        return []
+    hits: list[str] = []
+    for word in banned_words or []:
+        normalized = str(word or "").strip()
+        if normalized and normalized in text and normalized not in hits:
+            hits.append(normalized)
+    return hits
+
+
+def _extract_speaker_from_text(text: str) -> tuple[Optional[str], str]:
+    """从字幕文本里提取“说话人：正文”结构"""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None, ""
+    for separator in ("：", ":", " - ", "-"):
+        if separator not in normalized:
+            continue
+        speaker, content = normalized.split(separator, 1)
+        speaker = speaker.strip()
+        content = content.strip()
+        if speaker and content and len(speaker) <= 24:
+            return speaker, content
+    return None, normalized
+
+
+def _voice_for_segment(segment: dict[str, Any], default_voice: str, speaker_voice_map: dict[str, str]) -> str:
+    """按说话人标签选择分段配音音色"""
+    speaker = str(segment.get("speaker") or "").strip()
+    if not speaker:
+        return default_voice
+    return speaker_voice_map.get(speaker) or speaker_voice_map.get(speaker.lower()) or default_voice
+
+
 def _voice_output_extension(provider_type: str, settings: dict[str, Any]) -> str:
     """按配音渠道和设置决定输出音频扩展名"""
     value = str(settings.get("format") or "").lower()
@@ -427,7 +518,8 @@ def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_
     """把字幕条目转换为配音分段，保留每段在视频里的起止时间"""
     segments: list[dict[str, Any]] = []
     for entry in entries:
-        text = " ".join(str(entry.get("text") or "").replace("\\N", " ").split())
+        raw_text = " ".join(str(entry.get("text") or "").replace("\\N", " ").split())
+        speaker, text = _extract_speaker_from_text(raw_text)
         if not text:
             continue
         start_ms = _srt_time_to_milliseconds(str(entry.get("start", "00:00:00,000")))
@@ -437,7 +529,7 @@ def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_
 
         # 单条字幕过长时按文本长度拆成小段，时间按比例均分，避免单次 TTS 输入过大。
         if len(text) <= max_chars_per_segment:
-            segments.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
+            segments.append({"start_ms": start_ms, "end_ms": end_ms, "text": text, "speaker": speaker})
             continue
 
         parts = [text[index:index + max_chars_per_segment] for index in range(0, len(text), max_chars_per_segment)]
@@ -445,7 +537,7 @@ def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_
         for index, part in enumerate(parts):
             part_start = start_ms + int(duration * index / len(parts))
             part_end = start_ms + int(duration * (index + 1) / len(parts))
-            segments.append({"start_ms": part_start, "end_ms": max(part_start + 1, part_end), "text": part.strip()})
+            segments.append({"start_ms": part_start, "end_ms": max(part_start + 1, part_end), "text": part.strip(), "speaker": speaker})
     return segments
 
 
@@ -522,6 +614,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
     audio_path: Optional[str] = None
+    warning_messages: list[str] = []
 
     video = _parse_or_update_video(db, request.url, downloader)
     stages.append(AutomationStageResult(key="parse", status="completed"))
@@ -635,6 +728,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if text_profile and request.subtitle_operation != "none":
                     try:
                         text_settings = _load_profile_settings(text_profile)
+                        glossary_prompt = _glossary_prompt_suffix(request.glossary_terms)
+                        if glossary_prompt:
+                            text_settings["system_prompt"] = f"{text_settings.get('system_prompt') or '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。'}{glossary_prompt}"
                         text_api_key = decrypt_api_key(text_profile.api_key_encrypted)
                         text_engine = TextEngine()
 
@@ -678,6 +774,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     except Exception:
                         # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
                         pass
+                entries = _apply_glossary_terms(entries, request.glossary_terms)
+                subtitle_text = entries_to_plain_text(entries)
+                banned_hits = _find_banned_words(subtitle_text, request.banned_words)
+                if banned_hits:
+                    message = f"禁词命中: {', '.join(banned_hits)}"
+                    if request.banned_word_action == "block":
+                        raise BannedWordsDetected(message)
+                    warning_messages.append(message)
                 subtitle_entries = entries
                 if job:
                     job.subtitle_text = subtitle_text
@@ -692,11 +796,18 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         preset=preset_dict,
                     )
                 _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
+                if warning_messages:
+                    subtitle_task.error_message = "；".join(warning_messages)
+                    db.commit()
                 stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
                 if job:
-                    _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path)
+                    _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path, error_message="；".join(warning_messages) if warning_messages else None)
         except Exception as exc:
             _fail_task(db, subtitle_task, exc)
+            if isinstance(exc, BannedWordsDetected):
+                if job:
+                    _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(exc))
+                raise
             stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=str(exc)))
             if job:
                 _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=str(exc))
@@ -715,6 +826,10 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings = _load_profile_settings(voice_profile)
             voice = settings.get("voice") or voice_profile.voice or "alloy"
             voice_text = (request.voice_text or subtitle_text or _fallback_voice_text(video)).strip()
+            voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text
+            banned_hits = _find_banned_words(voice_text, request.banned_words)
+            if banned_hits and request.banned_word_action == "block":
+                raise BannedWordsDetected(f"配音文案命中禁词: {', '.join(banned_hits)}")
             output_ext = _voice_output_extension(voice_profile.provider_type, settings)
             audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice.{output_ext}")
             voice_engine = VoiceEngine()
@@ -737,6 +852,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         output_path=audio_path,
                         provider_type=voice_profile.provider_type,
                         voice=voice,
+                        voice_selector=(lambda segment: _voice_for_segment(segment, voice, request.speaker_voice_map)) if request.multi_speaker_enabled else None,
                         api_key=api_key,
                         base_url=voice_profile.base_url,
                         model=model,
@@ -774,6 +890,10 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "voice", "completed", task_id=voice_task.id, output_path=audio_path)
         except Exception as exc:
             _fail_task(db, voice_task, exc)
+            if isinstance(exc, BannedWordsDetected):
+                if job:
+                    _update_job_stage(db, job, "voice", "failed", task_id=voice_task.id, error_message=str(exc))
+                raise
             audio_path = None
             stages.append(AutomationStageResult(key="voice", status="skipped", task_id=voice_task.id, error_message=str(exc)))
             if job:

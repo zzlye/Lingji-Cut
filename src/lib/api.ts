@@ -277,6 +277,11 @@ export type AutomationStartParams = {
   voice_mode?: 'full' | 'segmented'
   audio_mode?: 'replace' | 'mix'
   original_volume?: number
+  multi_speaker_enabled?: boolean
+  speaker_voice_map?: Record<string, string>
+  glossary_terms?: import('@/types').GlossaryTerm[]
+  banned_words?: string[]
+  banned_word_action?: 'warn' | 'block'
 }
 
 export const automationApi = {

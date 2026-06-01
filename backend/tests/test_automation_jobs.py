@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.models import AutomationJobRecord, TextProviderProfile  # noqa: E402
 
 
@@ -273,6 +273,39 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(segments[0]["end_ms"], 3000)
         self.assertTrue(all(segment["text"] for segment in segments))
         self.assertEqual(segments[-1]["end_ms"], 5000)
+
+    def test_subtitle_entries_to_voice_segments_extracts_speaker(self):
+        """多人配音分段会保留说话人标签，并把标签从配音正文里去掉"""
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,500", "text": "旁白：进入战斗阶段"},
+            {"index": 2, "start": "00:00:01,500", "end": "00:00:03,000", "text": "角色 A: 放技能"},
+        ]
+
+        segments = subtitle_entries_to_voice_segments(entries)
+
+        self.assertEqual(segments[0]["speaker"], "旁白")
+        self.assertEqual(segments[0]["text"], "进入战斗阶段")
+        self.assertEqual(segments[1]["speaker"], "角色 A")
+        self.assertEqual(segments[1]["text"], "放技能")
+
+    def test_voice_for_segment_uses_speaker_map(self):
+        """分段配音按说话人选择音色，未匹配时回退默认音色"""
+        speaker_map = {"旁白": "alloy", "角色 A": "nova"}
+
+        self.assertEqual(_voice_for_segment({"speaker": "角色 A"}, "onyx", speaker_map), "nova")
+        self.assertEqual(_voice_for_segment({"speaker": "角色 B"}, "onyx", speaker_map), "onyx")
+
+    def test_glossary_terms_and_banned_words(self):
+        """术语字库会替换固定写法，禁词检测返回去重命中"""
+        entries = [{"text": "LOL 的 DPS 很高，不能出现敏感词"}]
+
+        processed = _apply_glossary_terms(entries, [
+            {"source": "LOL", "replacement": "英雄联盟", "note": "游戏名"},
+            {"source": "DPS", "replacement": "输出位", "note": ""},
+        ])
+
+        self.assertEqual(processed[0]["text"], "英雄联盟 的 输出位 很高，不能出现敏感词")
+        self.assertEqual(_find_banned_words(processed[0]["text"], ["敏感词", "敏感词", "不存在"]), ["敏感词"])
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ class VoiceEngine:
         output_path: Optional[str] = None,
         provider_type: str = "openai_tts",
         voice: str = "alloy",
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         api_key: str = "",
         base_url: str = "",
         model: str = "",
@@ -94,11 +95,13 @@ class VoiceEngine:
             total = len(normalized_segments)
             for index, segment in enumerate(normalized_segments, 1):
                 segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
+                # 多人对话时按字幕分段里的说话人选择音色；未匹配则使用默认音色。
+                segment_voice = voice_selector(segment) if voice_selector else voice
                 await self.generate_voice(
                     text=str(segment["text"]),
                     output_path=segment_path,
                     provider_type=provider_type,
-                    voice=voice,
+                    voice=segment_voice or voice,
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
@@ -489,6 +492,7 @@ class VoiceEngine:
             end_ms = self._int(segment.get("end_ms"), start_ms + 1000)
             normalized.append({
                 "text": text,
+                "speaker": str(segment.get("speaker") or "").strip(),
                 "start_ms": max(0, start_ms),
                 "end_ms": max(start_ms + 1, end_ms),
             })

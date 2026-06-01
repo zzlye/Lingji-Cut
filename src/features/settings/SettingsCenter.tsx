@@ -7,11 +7,12 @@ import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { settingsApi } from '@/lib/api'
+import { loadAutomationPreferences } from '@/lib/automationPreferences'
 import { useTaskStore } from '@/stores/taskStore'
-import type { ProjectPaths, ToolStatusMap } from '@/types'
+import type { AutomationPreferences, ProjectPaths, ToolStatusMap } from '@/types'
 
 /** 设置页签类型 */
-type SettingsTab = 'effects' | 'api' | 'subtitle' | 'voice' | 'paths'
+export type SettingsTab = 'auto' | 'effects' | 'api' | 'subtitle' | 'voice' | 'paths'
 
 /** 设置中心属性 */
 interface SettingsCenterProps {
@@ -19,10 +20,19 @@ interface SettingsCenterProps {
   onClose: () => void
   /** 开始拖动设置窗口 */
   onDragStart: (event: React.MouseEvent<HTMLDivElement>) => void
+  /** 初始页签 */
+  initialTab?: SettingsTab
+  /** 一键确认启动 */
+  onConfirmAutoRun?: () => void
+  /** 一键流程是否执行中 */
+  isAutoRunning?: boolean
+  /** 当前输入链接 */
+  currentUrl?: string
 }
 
 /** 页签配置 */
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; description: string }> = [
+  { id: 'auto', label: '自动确认', description: '一键完成前检查参数' },
   { id: 'effects', label: '画面处理', description: '差异化、画布和输出' },
   { id: 'api', label: 'API 设置', description: '文本模型渠道' },
   { id: 'subtitle', label: '字幕设置', description: '语言和字幕样式' },
@@ -34,9 +44,13 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; description: string
  * 设置中心
  * 放在顶部齿轮弹层内，避免多个配置入口分散在侧边栏。
  */
-export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('effects')
+export function SettingsCenter({ onClose, onDragStart, initialTab = 'effects', onConfirmAutoRun, isAutoRunning = false, currentUrl = '' }: SettingsCenterProps) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab)
   const activeConfig = SETTINGS_TABS.find((tab) => tab.id === activeTab) || SETTINGS_TABS[0]
+
+  useEffect(() => {
+    setActiveTab(initialTab)
+  }, [initialTab])
 
   return (
     <div className="flex h-[min(76vh,640px)] min-h-[480px] flex-col overflow-hidden">
@@ -76,6 +90,14 @@ export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
         </nav>
 
         <div className="min-w-0 flex-1 overflow-hidden">
+          {activeTab === 'auto' && (
+            <AutomationConfirmPanel
+              currentUrl={currentUrl}
+              isAutoRunning={isAutoRunning}
+              onConfirm={onConfirmAutoRun}
+              onOpenTab={setActiveTab}
+            />
+          )}
           {activeTab === 'effects' && <EffectsSettingsPanel variant="compact" />}
           {activeTab === 'api' && <ApiConfigPanel compact />}
           {activeTab === 'subtitle' && <SubtitleEditor compact />}
@@ -85,6 +107,197 @@ export function SettingsCenter({ onClose, onDragStart }: SettingsCenterProps) {
       </div>
     </div>
   )
+}
+
+/** 一键完成前的确认面板 */
+function AutomationConfirmPanel({
+  currentUrl,
+  isAutoRunning,
+  onConfirm,
+  onOpenTab,
+}: {
+  currentUrl: string
+  isAutoRunning: boolean
+  onConfirm?: () => void
+  onOpenTab: (tab: SettingsTab) => void
+}) {
+  const preferences = loadAutomationPreferences()
+  const checks = buildAutomationChecks(preferences)
+  const canStart = Boolean(currentUrl.trim()) && checks.every((check) => check.level !== 'block')
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-border px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium">一键完成确认</h3>
+            <p className="mt-1 text-xs text-foreground-muted">确认画面、字幕、API、配音、术语和禁词后再启动完整自动流程。</p>
+          </div>
+          <button
+            onClick={onConfirm}
+            disabled={!canStart || isAutoRunning}
+            className="h-9 min-w-36 rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isAutoRunning ? '执行中...' : '确认并开始'}
+          </button>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(260px,320px)] gap-4 max-lg:grid-cols-1">
+          <main className="space-y-4">
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h4 className="text-sm font-medium">当前任务</h4>
+                  <p className="mt-1 break-all text-xs text-foreground-muted">{currentUrl.trim() || '还没有填写 YouTube 链接'}</p>
+                </div>
+                <button onClick={() => onOpenTab('paths')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                  文件位置
+                </button>
+              </div>
+            </section>
+
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
+              <AutoSummaryCard title="画面处理" value="使用当前画面模板" action="调整画面" onClick={() => onOpenTab('effects')} />
+              <AutoSummaryCard title="字幕策略" value={`${subtitleOperationLabel(preferences.subtitle_operation)} · ${preferences.burn_subtitles ? '硬字幕' : '保留字幕文件'}`} action="调整字幕" onClick={() => onOpenTab('subtitle')} />
+              <AutoSummaryCard title="文本 API" value={preferences.text_profile_id ? `配置 #${preferences.text_profile_id}` : '未指定则使用首个保存配置'} action="API 设置" onClick={() => onOpenTab('api')} />
+              <AutoSummaryCard title="配音" value={preferences.enable_voice ? `${voiceModeLabel(preferences.voice_mode)} · ${preferences.multi_speaker_enabled ? '多人音色' : '单音色'}` : '已关闭'} action="配音配置" onClick={() => onOpenTab('voice')} />
+            </div>
+
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">多人配音检查</h4>
+                  <p className="mt-1 text-xs text-foreground-muted">自动流程会按说话人标签匹配音色，未匹配时使用默认音色。</p>
+                </div>
+                <button onClick={() => onOpenTab('voice')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                  管理音色
+                </button>
+              </div>
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-2">
+                {preferences.voice_speakers.map((speaker) => (
+                  <div key={speaker.id} className="rounded-md border border-border bg-background-elevated p-3">
+                    <div className="truncate text-xs font-medium">{speaker.label}</div>
+                    <div className="mt-1 truncate font-mono text-xs text-foreground-muted">{speaker.voice}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">术语和禁词</h4>
+                  <p className="mt-1 text-xs text-foreground-muted">术语会传给字幕处理，禁词命中会在任务阶段提醒。</p>
+                </div>
+                <button onClick={() => onOpenTab('subtitle')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                  编辑字库
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                <MetricTile label="术语条目" value={String(preferences.glossary_terms.length)} />
+                <MetricTile label="禁词数量" value={String(preferences.banned_words.length)} tone={preferences.banned_words.length ? 'warn' : 'default'} />
+              </div>
+            </section>
+          </main>
+
+          <aside className="space-y-3">
+            {checks.map((check) => (
+              <CheckItem key={check.title} check={check} />
+            ))}
+          </aside>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 一键配置摘要卡片 */
+function AutoSummaryCard({ title, value, action, onClick }: { title: string; value: string; action: string; onClick: () => void }) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-4">
+      <div className="text-xs text-foreground-muted">{title}</div>
+      <div className="mt-1 min-h-10 text-sm font-medium">{value}</div>
+      <button onClick={onClick} className="mt-3 h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+        {action}
+      </button>
+    </div>
+  )
+}
+
+/** 自动化检查项 */
+function CheckItem({ check }: { check: { title: string; message: string; level: 'ok' | 'warn' | 'block' } }) {
+  const tone = {
+    ok: 'border-success/30 text-success',
+    warn: 'border-warning/40 text-warning',
+    block: 'border-destructive/40 text-destructive',
+  }[check.level]
+  return (
+    <div className={`rounded-lg border bg-background p-3 ${tone}`}>
+      <div className="text-sm font-medium">{check.title}</div>
+      <p className="mt-1 text-xs text-foreground-muted">{check.message}</p>
+    </div>
+  )
+}
+
+/** 指标块 */
+function MetricTile({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'warn' }) {
+  return (
+    <div className="rounded-md border border-border bg-background-elevated p-3">
+      <div className="text-[10px] text-foreground-muted">{label}</div>
+      <div className={`mt-1 text-lg font-semibold ${tone === 'warn' ? 'text-warning' : 'text-foreground'}`}>{value}</div>
+    </div>
+  )
+}
+
+/** 构建一键流程启动前检查 */
+function buildAutomationChecks(preferences: AutomationPreferences) {
+  return [
+    {
+      title: '链接检查',
+      message: '顶部输入 YouTube 链接后才能启动一键流程。',
+      level: 'ok' as const,
+    },
+    {
+      title: '字幕处理',
+      message: preferences.text_profile_id || preferences.subtitle_operation === 'none'
+        ? '字幕策略可直接进入自动流程。'
+        : '未指定文本 API，后端会使用首个已保存文本配置；没有配置时会保留原字幕。',
+      level: preferences.text_profile_id || preferences.subtitle_operation === 'none' ? 'ok' as const : 'warn' as const,
+    },
+    {
+      title: '配音配置',
+      message: preferences.enable_voice
+        ? preferences.voice_profile_id
+          ? '已选择配音 API，可生成试听后启动。'
+          : '未指定配音 API，后端会尝试使用首个已保存配音配置。'
+        : '配音已关闭，自动流程会跳过配音阶段。',
+      level: preferences.enable_voice && !preferences.voice_profile_id ? 'warn' as const : 'ok' as const,
+    },
+    {
+      title: '禁词策略',
+      message: preferences.banned_words.length
+        ? `已配置 ${preferences.banned_words.length} 个禁词，策略为${preferences.banned_word_action === 'block' ? '命中停止' : '提醒继续'}。`
+        : '未配置禁词，自动流程不会做敏感词提醒。',
+      level: preferences.banned_words.length ? 'warn' as const : 'ok' as const,
+    },
+  ]
+}
+
+/** 字幕策略标签 */
+function subtitleOperationLabel(value: AutomationPreferences['subtitle_operation']) {
+  return {
+    none: '不处理',
+    generate: '生成文案',
+    translate: '翻译',
+    polish: '润色',
+  }[value]
+}
+
+/** 配音模式标签 */
+function voiceModeLabel(value: AutomationPreferences['voice_mode']) {
+  return value === 'segmented' ? '按字幕分段' : '整段生成'
 }
 
 /** 设置页签按钮 */

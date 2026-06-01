@@ -1,157 +1,27 @@
 # YouTube 视频处理器
 
-YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件。
+## 简介
+YouTube 视频处理器是一款面向短视频二创和内容整理的桌面软件。它可以把 YouTube 链接自动解析、下载入库，并按预设完成画面处理、字幕、配音和导出，减少重复手工操作。
 
-## 技术栈
+## 如何使用
+1. 在顶部输入 YouTube 视频链接。
+2. 点击“解析”查看视频信息，或点击“一键完成”进入自动处理确认。
+3. 在设置里提前配置画面处理、字幕样式、文字处理、配音、文件位置、术语字库和禁词表。
+4. 确认参数后点击“确认并开始”，软件会自动完成下载、画面处理、字幕、配音和导出。
+5. 在任务列表查看每个阶段进度、错误提醒、重试和继续处理。
+6. 批量处理时，在任务页每行粘贴一个链接，设置并发数后批量入队。
 
-- **前端**：React + TypeScript + Vite + Tailwind CSS v4 + shadcn/ui
-- **桌面壳**：Electron + electron-vite
-- **后端**：Python + FastAPI
-- **数据库**：SQLite + SQLAlchemy
-
-## 项目结构
-
-```
-├── electron/                # Electron 主进程和预加载脚本
-│   ├── main/index.ts        # 主进程入口
-│   ├── preload/index.ts     # 预加载脚本
-│   └── shared/types.ts      # 共享类型
-├── src/                     # React 前端
-│   ├── components/layout/   # 布局组件（AppShell、Header、Sidebar、LogPanel）
-│   ├── styles/globals.css   # 全局样式（暗色主题）
-│   ├── App.tsx              # 根组件
-│   └── main.tsx             # React 入口
-├── backend/                 # Python FastAPI 后端
-│   ├── api/                 # API 路由
-│   ├── models/              # 数据库模型
-│   ├── utils/               # 工具函数
-│   ├── main.py              # FastAPI 应用入口
-│   └── run.py               # 嵌入式 Python 启动器
-└── data/                    # 数据库文件目录
-```
-
-## 已实现能力
-
-- YouTube URL 解析和下载任务接口。
-- `/settings/tools` 可检测 `yt-dlp` 和 `ffmpeg` 的可用状态、实际路径、来源和版本；一键自动化启动前会先做环境预检。
-- 一键自动流程已由后端自动化任务编排：`解析 -> 下载 -> 画面处理 -> 字幕渲染 -> 可选配音 -> 导出`。
-  - `/automation/start` 会创建后台任务并立即返回 `job_id`，前端优先通过 `/automation/jobs/{id}/events` 接收 SSE 实时进度，异常时降级为 `/automation/jobs/{id}` 查询。
-  - `/automation/batch/start` 支持一次提交多个 YouTube 链接，按用户设置的批次并发数排队执行。
-  - `/automation/jobs/{id}/retry` 支持失败或已完成任务按原参数重新进入队列。
-  - `/automation/jobs/{id}/resume` 支持断点续跑，会复用已完成且文件仍存在的下载、画面处理、字幕和配音阶段。
-  - `/automation/batch/{batch_id}/pause` 和 `/automation/batch/{batch_id}/resume` 支持批次暂停/恢复，暂停会阻止后续待调度任务继续执行。
-  - 后端启动时会恢复未完成自动化任务：`running` 任务按断点续跑重新入队，`paused` 批次保持暂停状态。
-  - `/automation/run` 保留同步执行入口，方便脚本和测试直接跑完整链路。
-  - 字幕步骤会自动选择解析到的字幕轨，并使用默认/首个字幕预设生成 `ASS`，同时尝试烧录硬字幕。
-  - 文本 API 会优先按字幕条目分批处理，保持原时间轴；支持并发数、失败重试、重试间隔、RPM 限速、批量条数和字符上限。
-  - 配音为可选步骤：存在已保存配音配置时优先按字幕时间轴分段生成并对齐配音，失败时回退整段配音；没有配置或生成失败时跳过并继续导出。
-  - 设置中心的画面处理、字幕策略、文本 API 选择和配音策略会统一保存为一键自动化偏好，顶部“一键完成”和任务页“批量入队”会复用同一套参数。
-  - 导出步骤会生成最终 `mp4` 到项目 `exports` 目录。
-- 画面处理预设：轻度、标准、强处理、自定义。
-- 画面参数：亮度、对比度、饱和度、锐化、降噪、分辨率、裁切/拉伸/背景模糊、翻转、轻微旋转、帧率、抽帧、动态缩放、固定码率。
-- `/effects/filter-graph` 可把处理参数转换为 `ffmpeg` filter graph。
-- `/effects/preview` 可生成短片段预览。
-- `/effects/apply` 可执行完整画面处理任务。
-- `/subtitles/render` 可下载 YouTube 字幕、生成 `ASS`，并可烧录硬字幕视频。
-- `/subtitles/process-text` 可使用已保存文本 API 生成、翻译或润色字幕正文。
-- `/automation/start`、`/automation/batch/start`、`/automation/batch/{batch_id}/pause`、`/automation/batch/{batch_id}/resume`、`/automation/jobs`、`/automation/jobs/{id}`、`/automation/jobs/{id}/events`、`/automation/jobs/{id}/retry`、`/automation/jobs/{id}/resume` 可创建、批量入队、批次暂停/恢复、列表展示、实时推送、查询、重试和断点续跑后台自动化任务。
-- `/automation/run` 可同步执行完整一键流程，并返回每个阶段的任务状态和最终导出路径。
-- 字幕预设支持语言、单/双行、字体、字号、九宫格位置、颜色、描边、阴影、背景透明度和实时预览。
-- 配音配置内置配音 API 管理、音色目录、试听、语速、音量、音调、输出格式、采样率、码率和风格提示。
-- `/exports/create` 可执行字幕烧录、音频合成和最终格式导出。
-
-## 自动化状态
-
-当前一键流程已经具备闭环，但还有这些产品化限制：
-
-- 字幕内容优先来自 YouTube 原字幕/自动字幕；存在已保存文本 API 配置时，一键流程会默认对字幕正文做润色。
-- 文本 API 已支持生成、翻译、润色入口；一键流程会优先逐条/分批处理字幕并保留原时间轴，失败时才回退整段文本映射。
-- 自动配音当前优先使用字幕时间轴分段生成并通过 ffmpeg 对齐为完整音轨；字幕缺失或分段失败时回退整段配音或标题文案。
-- 前端已把字幕处理方式、硬字幕开关、文本 API 选择、配音开关、配音模式、音频合成方式和原声音量保存为一键偏好，单条和批量自动化共用同一套请求参数。
-- 一键流程已沉到后端后台任务编排，并支持批量入队、批次暂停/恢复、SSE 实时进度、任务重试、断点续跑和后端重启恢复；后续还需要更细的优先级、定时和失败策略控制。
-
-## 配音渠道支持
-
-配音参数按各家文档映射到对应 API：
-
-- **OpenAI TTS / OpenAI-compatible**：`voice`、`response_format`、`speed`、`instructions`。
-- **Gemini TTS**：`speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`，风格和语速主要通过提示词控制。
-- **MiniMax T2A**：`voice_setting.voice_id/speed/vol/pitch/emotion`、`audio_setting.format/sample_rate/bitrate/channel`、`voice_modify.intensity/timbre/sound_effects`。
-- **小米 MiMo TTS**：OpenAI 风格 `chat/completions`，使用 `modalities: ["text", "audio"]` 和 `audio.voice/audio.format`。
-- **自定义 TTS**：按 OpenAI `/audio/speech` 兼容接口处理，保留自定义 Base URL、模型和 voice id。
-
-## 快速开始
-
-### 安装依赖
-
-```bash
-# Node.js 依赖
-npm install
-
-# Python 依赖（推荐安装到 D:\tools 的嵌入式 Python）
-D:\tools\python-3.12.10-embed\python.exe -m pip install -r backend\requirements.txt
-```
-
-### 启动开发
-
-```bash
-# 启动 Electron + React 开发服务器
-npm run dev
-```
-
-Electron 主进程会优先使用：
-
-```text
-D:\tools\python-3.12.10-embed\python.exe
-```
-
-并通过 `backend/run.py` 启动 FastAPI 后端。
-
-### 单独验证后端
-
-```powershell
-D:\tools\python-3.12.10-embed\python.exe backend\run.py
-Invoke-RestMethod http://127.0.0.1:8765/health
-Invoke-RestMethod http://127.0.0.1:8765/effects/presets
-```
-
-### 本地自动化测试
-
-```powershell
-D:\tools\python-3.12.10-embed\python.exe backend\tests\test_subtitle_mapping.py -v
-D:\tools\python-3.12.10-embed\python.exe backend\tests\test_text_engine.py -v
-D:\tools\python-3.12.10-embed\python.exe backend\tests\test_local_media_pipeline.py -v
-D:\tools\python-3.12.10-embed\python.exe backend\tests\test_automation_jobs.py -v
-D:\tools\python-3.12.10-embed\python.exe backend\tests\test_tooling.py -v
-```
-
-`test_local_media_pipeline.py` 会用本地 ffmpeg 验证画面处理、字幕烧录、导出和分段配音混合，不依赖外部 YouTube 或真实 TTS API。
-
-## 外部工具路径
-
-后端优先查找：
-
-```text
-D:\tools\yt-dlp\yt-dlp.exe
-D:\tools\ffmpeg\ffmpeg.exe
-```
-
-如果不存在，会回退到系统 `PATH` 中的 `yt-dlp` 和 `ffmpeg`。
-
-### 构建打包
-
-```bash
-# 构建生产版本
-npm run build
-
-# 打包 Windows 安装包
-npm run build:win
-```
-
-## 设计系统
-
-- **风格**：Dark Mode (OLED)
-- **主色**：#EC4899（粉红）
-- **强调色**：#2563EB（蓝）
-- **背景**：#0F172A
-- **字体**：Inter + JetBrains Mono
+## 功能介绍
+- YouTube 链接解析、视频下载和素材入库。
+- 一键自动流程：解析、下载、画面处理、字幕、可选配音、合成导出。
+- 批量自动处理，支持并发、暂停、恢复、重试和断点继续。
+- 画面处理支持亮度、对比度、饱和度、锐化、降噪、分辨率、裁切、背景模糊、翻转、旋转、帧率、抽帧、动态缩放和码率控制。
+- 字幕设置支持单行/双行、语言、字体、字号、九宫格位置、颜色、描边、阴影、背景透明度和实时预览。
+- 字幕内容可生成、翻译或润色，并可保留字幕文件和导出硬字幕视频。
+- 术语字库可固定游戏、品牌、人名和专业词写法。
+- 禁词表可在自动流程中提醒或阻止继续处理。
+- 配音可选，支持保存多个配音配置、获取音色、试听、语速、音量、音调、情绪和风格设置。
+- 多人对话配音支持提前配置“说话人 - 音色”映射，字幕中出现说话人标签时自动匹配音色。
+- 文件位置可自由选择项目目录，软件会自动创建下载、处理、导出和数据子文件夹。
+- 服务配置可保存、切换和测试连接，密钥本地保存且不会出现在日志里。
+- 导出时可选择保留原声混合、降低原声音量或替换原声。

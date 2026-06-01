@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { ApiProfile, VoiceGenerateSettings, VoiceOption } from '@/types'
+import type { ApiProfile, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 /** 配音渠道配置 */
@@ -81,6 +81,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const selectedVoice = customVoice.trim() || voice
   const supportsMiniMaxAdvanced = activeProvider === 'minimax_tts'
   const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts'
+
+  const selectedVoiceLabel = voices.find((item) => item.id === selectedVoice)?.name || selectedVoice
 
   /** 加载配音配置列表 */
   const loadProfiles = async () => {
@@ -241,9 +243,68 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  /** 试听指定说话人的声音 */
+  const handleSpeakerPreview = async (speaker: VoiceSpeakerProfile) => {
+    if (!selectedProfileId) {
+      addLog('warn', '请先保存并选择配音 API 配置')
+      return
+    }
+
+    setIsGenerating(true)
+    setAudioUrl('')
+    try {
+      const result = await voiceApi.generate({
+        text: speaker.sample_text || `${speaker.label} 的配音试听。`,
+        profile_id: selectedProfileId,
+        voice: speaker.voice,
+        model: profileForm.model,
+        settings,
+      })
+      setAudioUrl(`http://127.0.0.1:8765${result.audio_url}`)
+      addLog('info', `说话人 "${speaker.label}" 试听已生成`)
+    } catch (error) {
+      addLog('error', `说话人试听失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   /** 更新配音参数 */
   const updateSetting = <K extends keyof VoiceGenerateSettings>(key: K, value: VoiceGenerateSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }))
+  }
+
+  /** 更新说话人音色表 */
+  const updateSpeaker = (id: string, patch: Partial<VoiceSpeakerProfile>) => {
+    const nextSpeakers = automationOptions.voice_speakers.map((speaker) => (
+      speaker.id === id ? { ...speaker, ...patch } : speaker
+    ))
+    setAutomationOptions(saveAutomationPreferences({ voice_speakers: nextSpeakers }))
+  }
+
+  /** 新增说话人 */
+  const addSpeaker = () => {
+    const nextIndex = automationOptions.voice_speakers.length + 1
+    const nextSpeaker: VoiceSpeakerProfile = {
+      id: `speaker_${Date.now()}`,
+      label: `角色 ${nextIndex}`,
+      voice: selectedVoice,
+      sample_text: `这是角色 ${nextIndex} 的一句对话试听。`,
+    }
+    setAutomationOptions(saveAutomationPreferences({
+      multi_speaker_enabled: true,
+      voice_speakers: [...automationOptions.voice_speakers, nextSpeaker],
+    }))
+  }
+
+  /** 删除说话人 */
+  const removeSpeaker = (id: string) => {
+    const nextSpeakers = automationOptions.voice_speakers.filter((speaker) => speaker.id !== id)
+    if (nextSpeakers.length === 0) {
+      addLog('warn', '至少保留一个说话人')
+      return
+    }
+    setAutomationOptions(saveAutomationPreferences({ voice_speakers: nextSpeakers }))
   }
 
   return (
@@ -367,6 +428,11 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                   options={[['segmented', '按字幕分段'], ['full', '整段生成']]}
                   onChange={(value) => setAutomationOptions(saveAutomationPreferences({ voice_mode: value as typeof automationOptions.voice_mode }))}
                 />
+                <ToggleField
+                  label="多人对话"
+                  checked={automationOptions.multi_speaker_enabled}
+                  onChange={(value) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: value, voice_mode: value ? 'segmented' : automationOptions.voice_mode }))}
+                />
                 <SelectField
                   label="音频合成"
                   value={automationOptions.audio_mode}
@@ -381,6 +447,42 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                   step={0.05}
                   onChange={(value) => setAutomationOptions(saveAutomationPreferences({ original_volume: value }))}
                 />
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <SectionTitle title="多人说话人音色" description="字幕中出现“旁白：”“角色 A:”等说话人标签时，会自动匹配对应音色。" />
+                <button onClick={addSpeaker} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                  添加说话人
+                </button>
+              </div>
+              <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-3">
+                {automationOptions.voice_speakers.map((speaker) => (
+                  <div key={speaker.id} className="rounded-lg border border-border bg-background-elevated p-3">
+                    <div className="grid grid-cols-[minmax(90px,1fr)_minmax(120px,1fr)] gap-2">
+                      <TextField label="说话人" value={speaker.label} onChange={(value) => updateSpeaker(speaker.id, { label: value })} />
+                      <SelectField
+                        label="音色"
+                        value={speaker.voice}
+                        options={[...voices.map((item) => [item.id, `${item.name} · ${item.style}`]), [speaker.voice, speaker.voice]].filter((item, index, list) => list.findIndex((target) => target[0] === item[0]) === index)}
+                        onChange={(value) => updateSpeaker(speaker.id, { voice: value })}
+                      />
+                    </div>
+                    <TextField label="试听文本" value={speaker.sample_text} onChange={(value) => updateSpeaker(speaker.id, { sample_text: value })} />
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <span className="truncate text-xs text-foreground-muted">当前音色：{speaker.voice}</span>
+                      <div className="flex gap-2">
+                        <button onClick={() => handleSpeakerPreview(speaker)} disabled={isGenerating} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5 disabled:opacity-50">
+                          试听
+                        </button>
+                        <button onClick={() => removeSpeaker(speaker.id)} className="h-8 rounded-md border border-border px-3 text-xs text-destructive hover:bg-white/5">
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </section>
 
@@ -426,7 +528,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <button onClick={handlePreview} disabled={isGenerating || !previewText.trim()} className="h-9 rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                   {isGenerating ? '生成试听中...' : '生成试听'}
                 </button>
-                <span className="text-xs text-foreground-muted">当前音色：{selectedVoice}</span>
+                <span className="text-xs text-foreground-muted">当前音色：{selectedVoiceLabel}</span>
               </div>
               {audioUrl && (
                 <audio className="mt-3 w-full" controls src={audioUrl}>

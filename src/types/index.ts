@@ -239,6 +239,22 @@ export interface AutomationBatchControlResponse {
 /** 自动化字幕文本处理方式 */
 export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
 
+/** 配音说话人音色配置 */
+export interface VoiceSpeakerProfile {
+  id: string
+  label: string
+  voice: string
+  sample_text: string
+}
+
+/** 专业术语字库条目 */
+export interface GlossaryTerm {
+  id: string
+  source: string
+  replacement: string
+  note: string
+}
+
 /** 一键自动化偏好 */
 export interface AutomationPreferences {
   output_format: 'mp4' | 'mkv' | 'mov' | 'webm'
@@ -253,6 +269,11 @@ export interface AutomationPreferences {
   voice_mode: 'full' | 'segmented'
   audio_mode: 'replace' | 'mix'
   original_volume: number
+  multi_speaker_enabled: boolean
+  voice_speakers: VoiceSpeakerProfile[]
+  glossary_terms: GlossaryTerm[]
+  banned_words: string[]
+  banned_word_action: 'warn' | 'block'
 }
 
 /** 配音音色 */

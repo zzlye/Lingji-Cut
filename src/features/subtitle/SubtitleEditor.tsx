@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { SubtitlePreset } from '@/types'
+import type { GlossaryTerm, SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 /** 字幕位置类型 */
@@ -267,6 +267,41 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     setForm((current) => ({ ...current, ...patch }))
   }
 
+  /** 添加专业术语 */
+  const addGlossaryTerm = () => {
+    const nextTerm: GlossaryTerm = {
+      id: `term_${Date.now()}`,
+      source: '',
+      replacement: '',
+      note: '',
+    }
+    setAutomationOptions(saveAutomationPreferences({
+      glossary_terms: [...automationOptions.glossary_terms, nextTerm],
+    }))
+  }
+
+  /** 更新专业术语 */
+  const updateGlossaryTerm = (id: string, patch: Partial<GlossaryTerm>) => {
+    const nextTerms = automationOptions.glossary_terms.map((term) => (
+      term.id === id ? { ...term, ...patch } : term
+    ))
+    setAutomationOptions(saveAutomationPreferences({ glossary_terms: nextTerms }))
+  }
+
+  /** 删除专业术语 */
+  const removeGlossaryTerm = (id: string) => {
+    setAutomationOptions(saveAutomationPreferences({
+      glossary_terms: automationOptions.glossary_terms.filter((term) => term.id !== id),
+    }))
+  }
+
+  /** 更新禁词表，按行保存 */
+  const updateBannedWords = (value: string) => {
+    setAutomationOptions(saveAutomationPreferences({
+      banned_words: value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+    }))
+  }
+
   /** 保存当前预设 */
   const handleSave = async () => {
     const name = form.name.trim()
@@ -390,6 +425,59 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                 checked={automationOptions.burn_subtitles}
                 onChange={(value) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: value }))}
               />
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-border bg-background p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <SectionTitle title="术语字库和禁词提醒" description="游戏、品牌、人名等专业词会传给文本 API；禁词会在自动流程里提醒或拦截。" />
+              <button onClick={addGlossaryTerm} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                添加术语
+              </button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(240px,320px)] gap-4 max-xl:grid-cols-1">
+              <div className="space-y-2">
+                {automationOptions.glossary_terms.length === 0 && (
+                  <div className="rounded-md border border-dashed border-border bg-background-elevated p-4 text-xs text-foreground-muted">
+                    暂无术语。添加后可把“LOL”固定成“英雄联盟”、把游戏角色名固定成指定译名。
+                  </div>
+                )}
+                {automationOptions.glossary_terms.map((term) => (
+                  <div key={term.id} className="rounded-lg border border-border bg-background-elevated p-3">
+                    <div className="grid grid-cols-[minmax(110px,1fr)_minmax(110px,1fr)_minmax(120px,1.2fr)_auto] items-end gap-2 max-lg:grid-cols-1">
+                      <TextField label="原词" value={term.source} placeholder="例如 DPS" onChange={(value) => updateGlossaryTerm(term.id, { source: value })} />
+                      <TextField label="固定写法" value={term.replacement} placeholder="例如 输出位" onChange={(value) => updateGlossaryTerm(term.id, { replacement: value })} />
+                      <TextField label="备注" value={term.note} placeholder="发音、场景或不要翻译" onChange={(value) => updateGlossaryTerm(term.id, { note: value })} />
+                      <button onClick={() => removeGlossaryTerm(term.id)} className="h-9 rounded-md border border-border px-3 text-xs text-destructive hover:bg-white/5">
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="rounded-lg border border-border bg-background-elevated p-3">
+                <div className="grid grid-cols-[1fr_120px] gap-2">
+                  <SelectField
+                    label="命中策略"
+                    value={automationOptions.banned_word_action}
+                    options={[['warn', '提醒继续'], ['block', '命中停止']]}
+                    onChange={(value) => setAutomationOptions(saveAutomationPreferences({ banned_word_action: value as typeof automationOptions.banned_word_action }))}
+                  />
+                  <Metric label="禁词" value={String(automationOptions.banned_words.length)} />
+                </div>
+                <label className="mt-3 block">
+                  <span className="mb-1 block text-xs text-foreground-muted">禁词表（每行一个）</span>
+                  <textarea
+                    value={automationOptions.banned_words.join('\n')}
+                    onChange={(event) => updateBannedWords(event.target.value)}
+                    rows={8}
+                    placeholder="输入需要提醒的词..."
+                    className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                  />
+                </label>
+              </div>
             </div>
           </section>
 
@@ -707,6 +795,16 @@ function PreviewStat({ label, value }: { label: string; value: string }) {
     <div className="min-w-0 rounded-md border border-border bg-background-elevated p-2">
       <div className="text-[10px] text-foreground-muted">{label}</div>
       <div className="truncate text-xs text-foreground">{value}</div>
+    </div>
+  )
+}
+
+/** 小指标块 */
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-background p-2">
+      <div className="text-[10px] text-foreground-muted">{label}</div>
+      <div className="mt-0.5 text-sm font-medium">{value}</div>
     </div>
   )
 }
