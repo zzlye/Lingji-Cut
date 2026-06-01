@@ -44,6 +44,7 @@ class Downloader:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=60
             )
 
@@ -192,6 +193,7 @@ class Downloader:
                 stderr=subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1
             )
 
@@ -281,6 +283,7 @@ class Downloader:
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 timeout=60
             )
 

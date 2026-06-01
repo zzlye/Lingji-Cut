@@ -29,6 +29,21 @@ class FakeDownloadProcess:
         return self.returncode
 
 
+class FakeBinaryOutputProcess:
+    """测试用异常字符输出进程，模拟 Windows 下容错解码后的文本"""
+
+    def __init__(self, output_path: str):
+        self.stdout = [
+            "[download]  50.0% of 10.00MiB\n",
+            f'[Merger] Merging formats into "{output_path}" �\n',
+        ]
+        self.returncode = 0
+
+    def wait(self):
+        """模拟进程正常结束"""
+        return self.returncode
+
+
 class ToolingTests(unittest.TestCase):
     """外部工具检测测试"""
 
@@ -88,6 +103,29 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(result, output_path)
         self.assertIn("--ffmpeg-location", captured_cmd)
         self.assertIn("D:/tools/ffmpeg", captured_cmd)
+
+    def test_download_video_replaces_invalid_utf8_output(self):
+        """下载器输出包含非 UTF-8 字节时不会中断任务"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "中文视频.mp4")
+            open(output_path, "wb").close()
+
+            def fake_popen(*_, **kwargs):
+                """断言子进程输出使用容错解码"""
+                self.assertEqual(kwargs.get("encoding"), "utf-8")
+                self.assertEqual(kwargs.get("errors"), "replace")
+                return FakeBinaryOutputProcess(output_path)
+
+            with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                result = downloader.download_video(
+                    url="https://youtube.com/watch?v=test",
+                    output_dir=temp_dir,
+                )
+
+        self.assertEqual(result, output_path)
 
 
 if __name__ == "__main__":
