@@ -18,7 +18,7 @@ class TaskControlRequested(Exception):
 
     def __init__(self, action: str):
         self.action = action
-        message = "任务已暂停" if action == "pause" else "任务已取消"
+        message = {"pause": "任务已暂停", "skip": "任务已跳过"}.get(action, "任务已取消")
         super().__init__(message)
 
 
@@ -105,7 +105,7 @@ def unregister_process(process: subprocess.Popen) -> None:
 
 def request_control(key: str, action: str) -> int:
     """请求暂停或取消，并终止当前登记和持久化记录里的子进程"""
-    if action not in {"pause", "cancel"}:
+    if action not in {"pause", "cancel", "skip"}:
         raise ValueError(f"不支持的任务控制动作: {action}")
     with _lock:
         _requested_actions[key] = action
@@ -334,7 +334,7 @@ def _persistent_requested_action(keys: list[str]) -> Optional[str]:
         ).fetchall()
     for row in rows:
         action = row[0]
-        if action in {"pause", "cancel"}:
+        if action in {"pause", "cancel", "skip"}:
             return str(action)
     return None
 

@@ -348,6 +348,7 @@ export const exportApi = {
 /** 一键自动化 API */
 export type AutomationStartParams = {
   url: string
+  enable_effects?: boolean
   processing_preset: import('@/types').ProcessingConfig
   format_id?: string
   output_format?: string
@@ -423,6 +424,10 @@ export const automationApi = {
   /** 取消后台一键流程，并停止当前外部进程 */
   cancel: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/cancel`, { method: 'POST' }),
+
+  /** 跳过当前自动化阶段，先支持耗时画面处理阶段 */
+  skipCurrentStage: (id: string) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/skip-current-stage`, { method: 'POST' }),
 
   /** 后台一键流程事件流地址 */
   eventsUrl: (id: string) =>

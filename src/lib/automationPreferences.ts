@@ -12,6 +12,7 @@ const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
 /** 默认一键自动化偏好 */
 export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   output_format: 'mp4',
+  enable_effects: true,
   subtitle_preset_id: null,
   subtitle_language: 'auto',
   text_profile_id: null,
@@ -101,6 +102,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     return {
       ...DEFAULT_AUTOMATION_PREFERENCES,
       ...parsed,
+      enable_effects: parsed.enable_effects !== false,
       subtitle_preset_id: normalizeId(parsed.subtitle_preset_id),
       text_profile_id: normalizeId(parsed.text_profile_id),
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),

@@ -20,6 +20,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
 
   return {
     url,
+    enable_effects: preferences.enable_effects,
     processing_preset: loadAutomationConfig(),
     output_format: preferences.output_format,
     subtitle_preset_id: preferences.subtitle_preset_id || undefined,

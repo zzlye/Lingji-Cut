@@ -18,22 +18,26 @@ const range = (min: number, max: number, value: number | null = null, random = t
 /** 自动化参数本地缓存键 */
 export const AUTOMATION_CONFIG_STORAGE_KEY = 'youtube-video-processor:auto-config'
 
+/** 画面处理配置版本，用于把旧的重 CPU 默认参数迁移成快速方案 */
+const PROCESSING_CONFIG_VERSION = 2
+
 /** 默认画面处理配置 */
 export const createDefaultProcessingConfig = (): ProcessingConfig => ({
+  version: PROCESSING_CONFIG_VERSION,
   adjustments: {
     enabled: true,
     brightness: range(0, 0.1),
     contrast: range(1, 1.2),
     saturation: range(1, 1.1),
-    sharpness: range(0.9, 1.4),
-    denoise: range(1, 2),
+    sharpness: { ...range(0, 0, 0, false), enabled: false },
+    denoise: { ...range(0, 0, 0, false), enabled: false },
   },
   canvas: {
     enabled: true,
-    resolution: '720p',
+    resolution: '1080p',
     mode: 'keep',
-    width: 1280,
-    height: 720,
+    width: 1920,
+    height: 1080,
     background_enabled: false,
     reflection_enabled: false,
     grid_enabled: false,
@@ -43,12 +47,12 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
     rotate_mode: 'none',
     flip_horizontal: true,
     flip_vertical: false,
-    random_rotate: range(-1, 1),
+    random_rotate: { ...range(0, 0, 0, false), enabled: false },
     remove_black_bars: false,
     show_full_frame: true,
   },
   timing: {
-    enabled: true,
+    enabled: false,
     fps: range(30, 30, 30, false),
     drop_frame: {
       enabled: false,
@@ -62,7 +66,7 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
   bitrate: {
     enabled: true,
     mode: 'fixed',
-    fixed_kbps: range(2000, 2000, 2000, false),
+    fixed_kbps: range(3000, 3000, 3000, false),
     multiplier: range(1.05, 1.95),
     quality_mode: 'balanced',
   },
@@ -83,7 +87,7 @@ function createLightProcessingConfig(): ProcessingConfig {
   config.adjustments.denoise = range(0, 1)
   config.transform.flip_horizontal = false
   config.transform.random_rotate.enabled = false
-  config.bitrate.fixed_kbps = range(1800, 1800, 1800, false)
+  config.bitrate.fixed_kbps = range(3500, 3500, 3500, false)
   return config
 }
 
@@ -137,9 +141,61 @@ export function loadAutomationConfig(): ProcessingConfig {
 
   try {
     const saved = localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY)
-    return saved ? JSON.parse(saved) : createDefaultProcessingConfig()
+    if (!saved) return createDefaultProcessingConfig()
+    return normalizeProcessingConfig(JSON.parse(saved))
   } catch {
     return createDefaultProcessingConfig()
+  }
+}
+
+/** 迁移旧缓存，避免继续使用锐化、降噪、随机旋转和强制 fps 这类重 CPU 默认项 */
+function normalizeProcessingConfig(value: ProcessingConfig): ProcessingConfig {
+  if (value.version === PROCESSING_CONFIG_VERSION) {
+    return value
+  }
+  const next = createDefaultProcessingConfig()
+  return {
+    ...next,
+    ...value,
+    version: PROCESSING_CONFIG_VERSION,
+    adjustments: {
+      ...next.adjustments,
+      ...(value.adjustments || {}),
+      sharpness: next.adjustments.sharpness,
+      denoise: next.adjustments.denoise,
+    },
+    transform: {
+      ...next.transform,
+      ...(value.transform || {}),
+      random_rotate: next.transform.random_rotate,
+    },
+    canvas: {
+      ...next.canvas,
+      ...(value.canvas || {}),
+      resolution: '1080p',
+      width: 1920,
+      height: 1080,
+    },
+    bitrate: {
+      ...next.bitrate,
+      ...(value.bitrate || {}),
+      mode: 'fixed',
+      fixed_kbps: next.bitrate.fixed_kbps,
+    },
+    timing: {
+      ...next.timing,
+      ...(value.timing || {}),
+      enabled: false,
+      drop_frame: value.timing?.drop_frame || next.timing.drop_frame,
+      dynamic_zoom: value.timing?.dynamic_zoom || next.timing.dynamic_zoom,
+    },
+    acceleration: {
+      ...next.acceleration,
+      ...(value.acceleration || {}),
+      enabled: true,
+      mode: value.acceleration?.mode || 'auto',
+      quality: 'size',
+    },
   }
 }
 

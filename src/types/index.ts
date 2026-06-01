@@ -278,6 +278,7 @@ export interface GlossaryTerm {
 /** 一键自动化偏好 */
 export interface AutomationPreferences {
   output_format: 'mp4' | 'mkv' | 'mov' | 'webm'
+  enable_effects: boolean
   subtitle_preset_id: number | null
   subtitle_language: string
   text_profile_id: number | null
@@ -333,6 +334,7 @@ export interface RandomRange {
 
 /** 画面处理配置 */
 export interface ProcessingConfig {
+  version?: number
   adjustments: {
     enabled: boolean
     brightness: RandomRange

@@ -38,7 +38,8 @@ def mark_job_child_tasks_controlled(db: Session, job: AutomationJobRecord, statu
     """把自动化任务下仍在执行的底层任务同步成暂停或取消"""
     updated = 0
     for task in _tasks_for_job(db, job):
-        if task.status not in {"pending", "processing", "downloading", "paused"}:
+        active_statuses = {"processing", "downloading"} if status == "skipped" else {"pending", "processing", "downloading", "paused"}
+        if task.status not in active_statuses:
             continue
         task.status = status
         task.error_message = message

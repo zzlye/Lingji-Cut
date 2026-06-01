@@ -10,7 +10,7 @@ import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { GlossaryPanel } from './GlossaryPanel'
 import { BannedWordsPanel } from './BannedWordsPanel'
 import { settingsApi } from '@/lib/api'
-import { loadAutomationPreferences } from '@/lib/automationPreferences'
+import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationPreferences, ProjectPaths, ToolStatusMap } from '@/types'
 
@@ -131,8 +131,14 @@ function AutomationConfirmPanel({
   onOpenTab: (tab: SettingsTab) => void
 }) {
   const preferences = loadAutomationPreferences()
+  const [, setPreferenceVersion] = useState(0)
   const checks = buildAutomationChecks(preferences)
   const canStart = Boolean(currentUrl.trim()) && checks.every((check) => check.level !== 'block')
+
+  const updatePreferences = (updates: Partial<AutomationPreferences>) => {
+    saveAutomationPreferences(updates)
+    setPreferenceVersion((value) => value + 1)
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -168,12 +174,35 @@ function AutomationConfirmPanel({
             </section>
 
             <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
-              <AutoSummaryCard title="画面处理" value="使用当前画面模板" action="调整画面" onClick={() => onOpenTab('effects')} />
+              <AutoSummaryCard title="画面处理" value={preferences.enable_effects ? '1080p 快速处理' : '跳过，使用原视频'} action="调整画面" onClick={() => onOpenTab('effects')} />
               <AutoSummaryCard title="字幕策略" value={`${subtitleOperationLabel(preferences.subtitle_operation)} · ${preferences.burn_subtitles ? '硬字幕' : '保留字幕文件'}`} action="调整字幕" onClick={() => onOpenTab('subtitle')} />
               <AutoSummaryCard title="字幕校对" value="可先手动修正字幕并保存 SRT/ASS" action="打开校对" onClick={() => onOpenTab('subtitle_correction')} />
               <AutoSummaryCard title="文本 API" value={preferences.text_profile_id ? `配置 #${preferences.text_profile_id}` : '未指定则使用首个保存配置'} action="API 设置" onClick={() => onOpenTab('api')} />
               <AutoSummaryCard title="可选配音" value={preferences.enable_voice ? `${voiceModeLabel(preferences.voice_mode)} · ${preferences.multi_speaker_enabled ? '多人音色' : '单音色'}` : '关闭，流程跳过'} action="配音配置" onClick={() => onOpenTab('voice')} />
             </div>
+
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">画面处理开关</h4>
+                  <p className="mt-1 text-xs text-foreground-muted">
+                    {preferences.enable_effects ? '启用时会输出 1080p 快速处理视频，默认关闭锐化、降噪和随机旋转以提高速度。' : '关闭时一键流程会跳过画面处理，直接用下载原视频进入字幕和导出。'}
+                  </p>
+                </div>
+                <label className="flex h-8 items-center gap-2 rounded-md border border-border px-3 text-xs text-foreground-muted">
+                  <input
+                    type="checkbox"
+                    checked={preferences.enable_effects}
+                    onChange={(event) => updatePreferences({ enable_effects: event.target.checked })}
+                    className="accent-primary"
+                  />
+                  启用画面处理
+                </label>
+              </div>
+              <button onClick={() => onOpenTab('effects')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                调整画面参数
+              </button>
+            </section>
 
             <section className="rounded-lg border border-border bg-background p-4">
               <div className="mb-3 flex items-center justify-between gap-3">

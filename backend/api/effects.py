@@ -32,17 +32,17 @@ class AdjustmentConfig(BaseModel):
     brightness: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=0.0, max=0.1))
     contrast: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.0, max=1.2))
     saturation: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.0, max=1.1))
-    sharpness: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=0.9, max=1.4))
-    denoise: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.0, max=2.0))
+    sharpness: RandomRange = Field(default_factory=lambda: RandomRange(enabled=False, random=False, value=0, min=0, max=0))
+    denoise: RandomRange = Field(default_factory=lambda: RandomRange(enabled=False, random=False, value=0, min=0, max=0))
 
 
 class CanvasConfig(BaseModel):
     """分辨率和画布配置"""
     enabled: bool = True
-    resolution: Literal["720p", "1080p", "original", "custom"] = "720p"
+    resolution: Literal["720p", "1080p", "original", "custom"] = "1080p"
     mode: Literal["keep", "stretch", "crop", "blur_background"] = "keep"
-    width: int = 1280
-    height: int = 720
+    width: int = 1920
+    height: int = 1080
     background_enabled: bool = False
     reflection_enabled: bool = False
     grid_enabled: bool = False
@@ -54,7 +54,7 @@ class TransformConfig(BaseModel):
     rotate_mode: Literal["none", "left90", "right90"] = "none"
     flip_horizontal: bool = True
     flip_vertical: bool = False
-    random_rotate: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=-1.0, max=1.0))
+    random_rotate: RandomRange = Field(default_factory=lambda: RandomRange(enabled=False, random=False, value=0, min=0, max=0))
     remove_black_bars: bool = False
     show_full_frame: bool = True
 
@@ -67,7 +67,7 @@ class DropFrameConfig(BaseModel):
 
 class TimingConfig(BaseModel):
     """帧率与动态变化配置"""
-    enabled: bool = True
+    enabled: bool = False
     fps: RandomRange = Field(default_factory=lambda: RandomRange(random=False, value=30, min=30, max=30))
     drop_frame: DropFrameConfig = Field(default_factory=DropFrameConfig)
     dynamic_zoom: RandomRange = Field(default_factory=lambda: RandomRange(enabled=False, random=True, min=0.01, max=0.02))
@@ -77,7 +77,7 @@ class BitrateConfig(BaseModel):
     """码率与清晰度配置"""
     enabled: bool = True
     mode: Literal["fixed", "multiplier"] = "fixed"
-    fixed_kbps: RandomRange = Field(default_factory=lambda: RandomRange(random=False, value=2000, min=2000, max=2000))
+    fixed_kbps: RandomRange = Field(default_factory=lambda: RandomRange(random=False, value=3000, min=3000, max=3000))
     multiplier: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.05, max=1.95))
     quality_mode: Literal["balanced", "quality", "size"] = "balanced"
 
@@ -86,7 +86,7 @@ class AccelerationConfig(BaseModel):
     """硬件加速配置"""
     enabled: bool = True
     mode: Literal["auto", "cpu", "nvidia", "intel", "amd"] = "auto"
-    quality: Literal["balanced", "quality", "size"] = "balanced"
+    quality: Literal["balanced", "quality", "size"] = "size"
 
 
 class ProcessingConfig(BaseModel):

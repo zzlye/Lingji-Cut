@@ -18,6 +18,7 @@ if PROJECT_ROOT not in sys.path:
 from backend.core.ffmpeg_processor import FFmpegProcessor
 from backend.core.subtitle_engine import SubtitleEngine
 from backend.core.voice_engine import VoiceEngine
+from backend.api.effects import ProcessingConfig
 
 
 class LocalMediaPipelineTest(unittest.TestCase):
@@ -164,6 +165,18 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("-c:v") + 1], "h264_nvenc")
         self.assertIn("-cq", calls[0])
         self.assertNotIn("-crf", calls[0])
+
+    def test_default_processing_config_is_fast_1080p(self):
+        """默认画面处理保持 1080p 输出，同时关闭重 CPU 滤镜"""
+        preset = ProcessingConfig().model_dump()
+        filter_graph = self.processor.build_effect_filter_graph(preset)
+
+        self.assertIn("scale=1920:1080", filter_graph)
+        self.assertNotIn("unsharp", filter_graph)
+        self.assertNotIn("hqdn3d", filter_graph)
+        self.assertNotIn("rotate=", filter_graph)
+        self.assertNotIn("fps=", filter_graph)
+        self.assertEqual(preset["acceleration"]["quality"], "size")
 
     def test_effects_reports_progress_during_ffmpeg_run(self):
         """画面处理会从 ffmpeg 进度输出同步百分比"""

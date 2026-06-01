@@ -89,6 +89,7 @@ def _check_control(db: Session, job: Optional[AutomationJobRecord] = None, task:
 class AutomationRunRequest(BaseModel):
     """一键自动流程请求"""
     url: str
+    enable_effects: bool = True
     processing_preset: dict[str, Any] = Field(default_factory=dict)
     format_id: Optional[str] = None
     output_format: str = "mp4"
@@ -745,7 +746,12 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             raise
 
     reusable_effects_path = _stage_output_if_reusable(job, "effects") if resume_from_checkpoint else None
-    if reusable_effects_path:
+    if not request.enable_effects:
+        effects_path = downloaded_path
+        stages.append(AutomationStageResult(key="effects", status="skipped", progress=100, output_path=effects_path, error_message="已按设置跳过画面处理"))
+        if job:
+            _update_job_stage(db, job, "effects", "skipped", output_path=effects_path, error_message="已按设置跳过画面处理")
+    elif reusable_effects_path:
         effects_path = reusable_effects_path
         _mark_stage_reused(db, job, "effects", effects_path)
         stages.append(AutomationStageResult(key="effects", status="completed", progress=100, output_path=effects_path))
@@ -777,8 +783,25 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             if job:
                 _update_job_stage(db, job, "effects", "completed", task_id=effects_task.id, output_path=effects_path)
         except TaskControlRequested as exc:
-            _handle_task_control(db, effects_task, exc)
-            raise
+            if exc.action == "skip":
+                effects_path = downloaded_path
+                effects_task.status = "completed"
+                effects_task.progress = 100
+                effects_task.output_path = effects_path
+                effects_task.error_message = "用户跳过画面处理"
+                db.commit()
+                stages.append(AutomationStageResult(key="effects", status="skipped", task_id=effects_task.id, progress=100, output_path=effects_path, error_message=effects_task.error_message))
+                if job:
+                    params = _get_job_params(job)
+                    params["enable_effects"] = False
+                    params["skip_effects_requested"] = True
+                    _set_job_params(job, params)
+                    clear_control_request(_job_control_key(job.id))
+                    clear_control_request(_task_control_key(effects_task.id))
+                    _update_job_stage(db, job, "effects", "skipped", task_id=effects_task.id, output_path=effects_path, error_message=effects_task.error_message)
+            else:
+                _handle_task_control(db, effects_task, exc)
+                raise
         except Exception as exc:
             _fail_task(db, effects_task, exc)
             if job:
@@ -1269,6 +1292,31 @@ def _get_batch_concurrency_from_job(job: Optional[AutomationJobRecord]) -> int:
         return 2
 
 
+def _current_running_stage(job: AutomationJobRecord) -> Optional[dict[str, Any]]:
+    """读取当前正在运行的自动化阶段"""
+    for stage in _load_job_stages(job):
+        if stage.get("status") == "running":
+            return stage
+    return None
+
+
+def _skip_current_effects_stage(db: Session, job: AutomationJobRecord) -> int:
+    """请求跳过当前画面处理阶段，并终止正在跑的 ffmpeg"""
+    stage = _current_running_stage(job)
+    if not stage or stage.get("key") != "effects":
+        raise HTTPException(status_code=400, detail="当前只有画面处理阶段支持跳过")
+
+    killed_count = request_job_control(db, job, "skip")
+    mark_job_child_tasks_controlled(db, job, "skipped", "用户跳过画面处理")
+    params = _get_job_params(job)
+    params["enable_effects"] = False
+    params["skip_effects_requested"] = True
+    _set_job_params(job, params)
+    job.current_step = "正在跳过画面处理"
+    db.commit()
+    return killed_count
+
+
 def _get_job_params(job: AutomationJobRecord) -> dict[str, Any]:
     """安全读取自动化任务参数"""
     if not job.params:
@@ -1610,6 +1658,19 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
     db.commit()
     _submit_automation_job(job_id, True)
     return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/skip-current-stage", response_model=AutomationStartResponse)
+def skip_current_stage(job_id: str, db: Session = Depends(get_db)):
+    """跳过当前自动化阶段，当前支持画面处理阶段"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status != "running":
+        raise HTTPException(status_code=400, detail="只有执行中的任务可以跳过当前阶段")
+
+    killed_count = _skip_current_effects_stage(db, job)
+    return AutomationStartResponse(message=f"已跳过画面处理并停止 {killed_count} 个运行进程", job_id=job_id)
 
 
 @router.post("/jobs/{job_id}/pause", response_model=AutomationStartResponse)

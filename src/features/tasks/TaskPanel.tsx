@@ -21,6 +21,7 @@ export function TaskPanel() {
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
   const [controllingJob, setControllingJob] = useState<string | null>(null)
+  const [skippingJobId, setSkippingJobId] = useState<string | null>(null)
   const [controllingTask, setControllingTask] = useState<string | null>(null)
   const [batchUrls, setBatchUrls] = useState('')
   const [batchConcurrency, setBatchConcurrency] = useState(2)
@@ -113,6 +114,22 @@ export function TaskPanel() {
       addLog('error', `${action === 'pause' ? '暂停' : '取消'}自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setControllingJob(null)
+    }
+  }
+
+  /** 跳过当前画面处理阶段，并停止正在跑的 ffmpeg */
+  const skipAutomationStage = async (job: AutomationJob) => {
+    if (!window.confirm(`确认跳过「${job.title}」当前画面处理？正在运行的 ffmpeg 会被停止，后续会直接使用下载原视频。`)) return
+
+    setSkippingJobId(job.id)
+    try {
+      const result = await automationApi.skipCurrentStage(job.id)
+      addLog('warn', result.message)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `跳过当前阶段失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setSkippingJobId(null)
     }
   }
 
@@ -322,10 +339,12 @@ export function TaskPanel() {
                   isRetrying={retryingJobId === job.id}
                   isResuming={resumingJobId === job.id}
                   controllingAction={controllingJob?.endsWith(`:${job.id}`) ? controllingJob.split(':')[0] as 'pause' | 'cancel' : null}
+                  isSkipping={skippingJobId === job.id}
                   onRetry={() => retryAutomationJob(job.id)}
                   onResume={() => resumeAutomationJob(job.id)}
                   onPause={() => controlAutomationJob(job, 'pause')}
                   onCancel={() => controlAutomationJob(job, 'cancel')}
+                  onSkip={() => skipAutomationStage(job)}
                 />
               ))}
             </div>
@@ -584,24 +603,29 @@ function AutomationJobCard({
   isRetrying,
   isResuming,
   controllingAction,
+  isSkipping,
   onRetry,
   onResume,
   onPause,
   onCancel,
+  onSkip,
 }: {
   job: AutomationJob
   isRetrying: boolean
   isResuming: boolean
   controllingAction: 'pause' | 'cancel' | null
+  isSkipping: boolean
   onRetry: () => void
   onResume: () => void
   onPause: () => void
   onCancel: () => void
+  onSkip: () => void
 }) {
   const canPause = job.can_pause ?? (job.status === 'pending' || job.status === 'running')
   const canCancel = job.can_cancel ?? (job.status === 'pending' || job.status === 'running' || job.status === 'paused')
   const canResume = job.can_resume ?? (job.status === 'paused' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'completed')
   const canRetry = job.can_retry ?? (job.status === 'failed' || job.status === 'cancelled' || job.status === 'completed')
+  const canSkipEffects = job.status === 'running' && job.steps.some((step) => step.key === 'effects' && step.status === 'running')
 
   return (
     <article className="rounded-lg border border-border bg-background p-4">
@@ -635,6 +659,15 @@ function AutomationJobCard({
                 className="h-9 min-w-16 rounded-md border border-destructive/40 px-3 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
               >
                 {controllingAction === 'cancel' ? '取消中...' : '取消'}
+              </button>
+            )}
+            {canSkipEffects && (
+              <button
+                onClick={onSkip}
+                disabled={isSkipping || controllingAction !== null}
+                className="h-9 min-w-20 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
+              >
+                {isSkipping ? '跳过中...' : '跳过画面'}
               </button>
             )}
             {canResume && (

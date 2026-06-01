@@ -84,6 +84,20 @@ class ProcessControlTests(unittest.TestCase):
         clear_control_request("task:15")
         self.assertIsNone(requested_action(["task:15"]))
 
+    def test_request_control_accepts_skip_action(self):
+        """跳过阶段会像暂停取消一样终止进程并持久化控制请求"""
+        with sqlite3.connect(process_control.DB_PATH) as connection:
+            connection.execute(
+                "INSERT INTO runtime_processes (pid, parent_pid, keys_json, command_line) VALUES (?, ?, ?, ?)",
+                (56789, 1, '["job:auto-skip"]', "ffmpeg -i old.mp4 out.mp4"),
+            )
+
+        with patch("backend.core.process_control.terminate_process_tree", return_value=True):
+            killed_count = request_control("job:auto-skip", "skip")
+
+        self.assertEqual(killed_count, 1)
+        self.assertEqual(requested_action(["job:auto-skip"]), "skip")
+
     def test_terminate_matching_tool_processes_matches_command_line_fragment(self):
         """旧任务没有 PID 记录时，可按输入输出路径兜底杀进程"""
         processes = [
