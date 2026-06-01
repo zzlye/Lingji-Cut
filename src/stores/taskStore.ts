@@ -46,6 +46,10 @@ interface TaskState {
   addTask: (task: DownloadTask) => void
   /** 更新任务状态 */
   updateTask: (id: number, updates: Partial<DownloadTask>) => void
+  /** 删除本地任务缓存 */
+  removeTask: (id: number) => void
+  /** 按条件清理本地任务缓存 */
+  clearTasks: (status?: DownloadTask['status']) => void
   /** 创建一键自动处理流程 */
   startAutomationJob: (sourceUrl: string) => string
   /** 写入后端返回的一键自动处理流程 */
@@ -85,6 +89,18 @@ export const useTaskStore = create<TaskState>((set) => ({
       tasks: state.tasks.map((t) =>
         t.id === id ? { ...t, ...updates } : t
       ),
+    })),
+
+  removeTask: (id) =>
+    set((state) => ({
+      tasks: state.tasks.filter((task) => task.id !== id),
+    })),
+
+  clearTasks: (status) =>
+    set((state) => ({
+      tasks: status
+        ? state.tasks.filter((task) => task.status !== status)
+        : state.tasks.filter((task) => task.status === 'processing' || task.status === 'downloading'),
     })),
 
   startAutomationJob: (sourceUrl) => {

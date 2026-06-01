@@ -66,6 +66,11 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
     multiplier: range(1.05, 1.95),
     quality_mode: 'balanced',
   },
+  acceleration: {
+    enabled: true,
+    mode: 'auto',
+    quality: 'balanced',
+  },
 })
 
 /** 轻度处理模板 */
@@ -608,8 +613,36 @@ function MotionSection({ config, updateValue, updateRange }: SectionProps) {
 
 /** 输出配置 */
 function OutputSection({ config, filterGraph, updateValue, updateRange }: SectionProps & { filterGraph: string }) {
+  const acceleration = config.acceleration || { enabled: true, mode: 'auto', quality: 'balanced' }
   return (
     <div className="space-y-4">
+      <TogglePanel
+        title="硬件加速"
+        description="自动检测 NVIDIA、Intel 或 AMD 编码器；不可用时回退 CPU，避免画面处理长时间占满处理器。"
+        enabled={acceleration.enabled}
+        onToggle={(value) => updateValue(['acceleration', 'enabled'], value)}
+      >
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3">
+          <SelectField
+            label="编码方式"
+            value={acceleration.enabled ? acceleration.mode : 'cpu'}
+            options={[
+              ['auto', '自动选择 GPU'],
+              ['cpu', 'CPU 稳定模式'],
+              ['nvidia', 'NVIDIA NVENC'],
+              ['intel', 'Intel QSV'],
+              ['amd', 'AMD AMF'],
+            ]}
+            onChange={(value) => updateValue(['acceleration', 'mode'], value)}
+          />
+          <SelectField
+            label="GPU 质量"
+            value={acceleration.quality}
+            options={[['balanced', '均衡'], ['quality', '清晰优先'], ['size', '速度/体积优先']]}
+            onChange={(value) => updateValue(['acceleration', 'quality'], value)}
+          />
+        </div>
+      </TogglePanel>
       <TogglePanel
         title="码率与清晰度"
         description="固定码率更便于控制导出体积，倍率适合批量随机化。"
@@ -645,6 +678,7 @@ function SummaryPanel({ config, filterGraph }: { config: ProcessingConfig; filte
         <SummaryMetric label="画布" value={canvasModeLabel(config.canvas.mode)} />
         <SummaryMetric label="码率" value={config.bitrate.mode === 'fixed' ? `${rangeText(config.bitrate.fixed_kbps)} kb/s` : `${rangeText(config.bitrate.multiplier)}x`} />
         <SummaryMetric label="帧率" value={`${rangeText(config.timing.fps)} fps`} />
+        <SummaryMetric label="编码" value={accelerationLabel(config.acceleration?.enabled === false ? 'cpu' : config.acceleration?.mode || 'auto')} />
       </div>
       <div className="mt-4 space-y-2 text-xs text-foreground-muted">
         <SummaryRow label="画面微调" value={config.adjustments.enabled ? '启用' : '关闭'} />
@@ -654,6 +688,17 @@ function SummaryPanel({ config, filterGraph }: { config: ProcessingConfig; filte
       </div>
     </section>
   )
+}
+
+/** 硬件加速标签 */
+function accelerationLabel(value: 'auto' | 'cpu' | 'nvidia' | 'intel' | 'amd') {
+  return {
+    auto: '自动 GPU',
+    cpu: 'CPU',
+    nvidia: 'NVENC',
+    intel: 'QSV',
+    amd: 'AMF',
+  }[String(value)] || '自动 GPU'
 }
 
 /** 面板容器 */

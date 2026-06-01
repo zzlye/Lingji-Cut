@@ -364,6 +364,11 @@ export interface ProcessingConfig {
     multiplier: RandomRange
     quality_mode: 'balanced' | 'quality' | 'size'
   }
+  acceleration?: {
+    enabled: boolean
+    mode: 'auto' | 'cpu' | 'nvidia' | 'intel' | 'amd'
+    quality: 'balanced' | 'quality' | 'size'
+  }
 }
 
 /** 画面处理预设 */

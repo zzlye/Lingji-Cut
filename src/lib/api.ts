@@ -113,6 +113,18 @@ export const taskApi = {
   /** 重试任务 */
   retry: (id: number) =>
     request<{ message: string }>(`/tasks/${id}/retry`, { method: 'POST' }),
+
+  /** 删除单条底层任务记录 */
+  delete: (id: number, force = false) =>
+    request<{ message: string; task_id: number }>(`/tasks/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+
+  /** 批量清理底层任务记录 */
+  clear: (status?: import('@/types').DownloadTask['status']) =>
+    request<{ message: string; deleted_count: number }>(`/tasks${status ? `?status=${status}` : ''}`, { method: 'DELETE' }),
+
+  /** 将卡住的执行中任务标记失败，随后可删除或重试 */
+  cleanupInterrupted: () =>
+    request<{ message: string; updated_count: number }>('/tasks/cleanup-interrupted', { method: 'POST' }),
 }
 
 /** 字幕 API */

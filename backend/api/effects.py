@@ -81,6 +81,13 @@ class BitrateConfig(BaseModel):
     quality_mode: Literal["balanced", "quality", "size"] = "balanced"
 
 
+class AccelerationConfig(BaseModel):
+    """硬件加速配置"""
+    enabled: bool = True
+    mode: Literal["auto", "cpu", "nvidia", "intel", "amd"] = "auto"
+    quality: Literal["balanced", "quality", "size"] = "balanced"
+
+
 class ProcessingConfig(BaseModel):
     """完整画面处理配置"""
     adjustments: AdjustmentConfig = Field(default_factory=AdjustmentConfig)
@@ -88,6 +95,7 @@ class ProcessingConfig(BaseModel):
     transform: TransformConfig = Field(default_factory=TransformConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     bitrate: BitrateConfig = Field(default_factory=BitrateConfig)
+    acceleration: AccelerationConfig = Field(default_factory=AccelerationConfig)
 
 
 class ProcessingPresetCreate(BaseModel):

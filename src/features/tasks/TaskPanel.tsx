@@ -13,9 +13,11 @@ import { VideoInfoCard } from './VideoInfoCard'
  * 显示当前解析的视频信息、一键自动处理流程和底层任务记录。
  */
 export function TaskPanel() {
-  const { currentVideo, tasks, automationJobs, addLog, upsertAutomationJob } = useTaskStore()
+  const { currentVideo, tasks, automationJobs, addLog, upsertAutomationJob, removeTask, clearTasks } = useTaskStore()
   const [serverTasks, setServerTasks] = useState<DownloadTask[]>([])
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
+  const [deletingTaskId, setDeletingTaskId] = useState<number | null>(null)
+  const [isClearingTasks, setIsClearingTasks] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
   const [batchUrls, setBatchUrls] = useState('')
@@ -131,6 +133,57 @@ export function TaskPanel() {
     }
   }
 
+  /** 删除单条底层任务记录 */
+  const deleteTaskRecord = async (task: DownloadTask) => {
+    const isRunning = task.status === 'processing' || task.status === 'downloading'
+    if (isRunning) {
+      const confirmed = window.confirm(`任务 #${task.id} 仍显示执行中。确认它已经卡住后，可以强制清理记录；这不会停止系统里仍在运行的外部进程。`)
+      if (!confirmed) return
+    }
+    setDeletingTaskId(task.id)
+    try {
+      await taskApi.delete(task.id, isRunning)
+      setServerTasks((current) => current.filter((item) => item.id !== task.id))
+      removeTask(task.id)
+      addLog('info', `任务记录已删除: #${task.id}`)
+    } catch (error) {
+      addLog('error', `删除任务记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setDeletingTaskId(null)
+    }
+  }
+
+  /** 批量清理已结束底层任务 */
+  const clearTaskRecords = async (status?: DownloadTask['status']) => {
+    setIsClearingTasks(true)
+    try {
+      const result = await taskApi.clear(status)
+      clearTasks(status)
+      addLog('info', `已清理 ${result.deleted_count} 条任务记录`)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `清理任务记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsClearingTasks(false)
+    }
+  }
+
+  /** 把异常遗留的执行中任务标记失败，便于用户删除或重试 */
+  const cleanupInterruptedTasks = async () => {
+    const confirmed = window.confirm('确认将所有显示为下载中/处理中的底层任务标记为失败？这适合清理已经卡住的记录，正常运行中的任务不要使用。')
+    if (!confirmed) return
+    setIsClearingTasks(true)
+    try {
+      const result = await taskApi.cleanupInterrupted()
+      addLog('warn', `已处理 ${result.updated_count} 条卡住的执行中任务`)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `清理卡住任务失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsClearingTasks(false)
+    }
+  }
+
   useEffect(() => {
     if (!activeJobIds) return
 
@@ -237,13 +290,36 @@ export function TaskPanel() {
               <h3 className="text-sm font-medium">底层任务记录</h3>
               <p className="mt-1 text-xs text-foreground-muted">显示下载、画面处理、字幕、配音和导出任务的实际执行记录。</p>
             </div>
-            <button
-              onClick={loadTasks}
-              disabled={isLoadingTasks}
-              className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5 disabled:opacity-50"
-            >
-              {isLoadingTasks ? '刷新中...' : '刷新'}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={loadTasks}
+                disabled={isLoadingTasks}
+                className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5 disabled:opacity-50"
+              >
+                {isLoadingTasks ? '刷新中...' : '刷新'}
+              </button>
+              <button
+                onClick={() => clearTaskRecords('failed')}
+                disabled={isClearingTasks}
+                className="h-9 rounded-md border border-destructive/40 px-4 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
+              >
+                清理失败
+              </button>
+              <button
+                onClick={cleanupInterruptedTasks}
+                disabled={isClearingTasks}
+                className="h-9 rounded-md border border-warning/40 px-4 text-sm text-warning hover:bg-warning/10 disabled:opacity-50"
+              >
+                清理卡住
+              </button>
+              <button
+                onClick={() => clearTaskRecords()}
+                disabled={isClearingTasks}
+                className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5 disabled:opacity-50"
+              >
+                清理已结束
+              </button>
+            </div>
           </div>
 
           {mergedTasks.length === 0 ? (
@@ -251,7 +327,12 @@ export function TaskPanel() {
           ) : (
             <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-3">
               {mergedTasks.map((task) => (
-                <TaskItem key={task.id} task={task} />
+                <TaskItem
+                  key={task.id}
+                  task={task}
+                  isDeleting={deletingTaskId === task.id}
+                  onDelete={() => deleteTaskRecord(task)}
+                />
               ))}
             </div>
           )}
@@ -533,7 +614,8 @@ function EmptyTaskList() {
 }
 
 /** 任务项 */
-function TaskItem({ task }: { task: DownloadTask }) {
+function TaskItem({ task, isDeleting, onDelete }: { task: DownloadTask; isDeleting: boolean; onDelete: () => void }) {
+  const isRunning = task.status === 'processing' || task.status === 'downloading'
   return (
     <div className="rounded-lg border border-border bg-background p-3">
       <div className="mb-2 flex items-center justify-between gap-3">
@@ -541,7 +623,18 @@ function TaskItem({ task }: { task: DownloadTask }) {
           <p className="truncate text-sm font-medium">{taskTypeText(task.task_type)}</p>
           <p className="text-xs text-foreground-muted">任务 #{task.id}</p>
         </div>
-        <TaskStatus status={task.status} />
+        <div className="flex shrink-0 items-center gap-2">
+          <TaskStatus status={task.status} />
+          <button
+            onClick={onDelete}
+            disabled={isDeleting}
+            className="h-7 rounded-md border border-border px-2 text-xs text-foreground-muted hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+            title={isRunning ? '强制清理卡住记录' : '删除任务记录'}
+            aria-label={`删除任务 ${task.id}`}
+          >
+            {isDeleting ? '...' : isRunning ? '强制' : '删'}
+          </button>
+        </div>
       </div>
 
       <div className="h-1.5 overflow-hidden rounded-full bg-background-elevated">

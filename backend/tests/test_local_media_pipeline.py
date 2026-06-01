@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 # 嵌入式 Python 默认可能不读取 PYTHONPATH，测试文件直接运行时手动加入项目根目录。
@@ -79,6 +80,50 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertTrue(os.path.exists(result_path))
         self.assertGreater(os.path.getsize(result_path), 0)
 
+    def test_auto_acceleration_prefers_available_gpu_encoder(self):
+        """自动硬件加速会优先选择可用 GPU 编码器"""
+        with patch("backend.core.ffmpeg_processor.available_ffmpeg_encoders", return_value={"h264_qsv", "libx264"}):
+            encoder = self.processor._resolve_video_encoder({
+                "acceleration": {"enabled": True, "mode": "auto", "quality": "balanced"},
+            })
+
+        self.assertEqual(encoder, "h264_qsv")
+
+    def test_unavailable_gpu_encoder_falls_back_to_cpu(self):
+        """指定的 GPU 编码器不可用时回退 CPU，避免画面处理直接失败"""
+        with patch("backend.core.ffmpeg_processor.available_ffmpeg_encoders", return_value={"libx264"}):
+            encoder = self.processor._resolve_video_encoder({
+                "acceleration": {"enabled": True, "mode": "nvidia", "quality": "balanced"},
+            })
+
+        self.assertEqual(encoder, "libx264")
+
+    def test_gpu_runtime_failure_retries_with_cpu_encoder(self):
+        """GPU 编码器运行失败时自动重试 CPU 编码"""
+        output_path = os.path.join(self.temp_dir, "fallback.mp4")
+        gpu_cmd = [self.processor.ffmpeg_cmd, "-i", self.input_video, "-c:v", "h264_nvenc", "-preset", "p4", "-y", output_path]
+        calls: list[list[str]] = []
+
+        def fake_run_ffmpeg(cmd, action_name, timeout=600):
+            calls.append(cmd)
+            if "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "h264_nvenc":
+                raise RuntimeError(f"{action_name}失败: Cannot load nvcuda.dll")
+            return output_path
+
+        with patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run_ffmpeg):
+            result = self.processor._run_ffmpeg_with_cpu_fallback(
+                gpu_cmd,
+                "画面处理",
+                timeout=30,
+                encoder="h264_nvenc",
+                preset={"acceleration": {"enabled": True, "mode": "nvidia", "quality": "balanced"}},
+                for_subtitles=False,
+            )
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(calls[0][calls[0].index("-c:v") + 1], "h264_nvenc")
+        self.assertEqual(calls[1][calls[1].index("-c:v") + 1], "libx264")
+
     def _create_test_video(self):
         """用 ffmpeg 生成短测试视频"""
         cmd = [
@@ -120,6 +165,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
             "transform": {"enabled": False},
             "timing": {"enabled": False},
             "bitrate": {"enabled": False},
+            "acceleration": {"enabled": False, "mode": "cpu", "quality": "balanced"},
         }
 
 

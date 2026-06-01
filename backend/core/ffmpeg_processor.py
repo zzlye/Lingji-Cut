@@ -4,6 +4,7 @@
 import os
 import random
 import subprocess
+from functools import lru_cache
 from typing import Any, Optional
 from ..utils import get_logger
 from .paths import ensure_project_dirs
@@ -11,6 +12,39 @@ from .tooling import get_ffmpeg_command
 
 # 日志记录器
 logger = get_logger("ffmpeg")
+
+GPU_ENCODER_ORDER = ["h264_nvenc", "h264_qsv", "h264_amf"]
+VIDEO_ENCODER_OPTION_FLAGS = {
+    "-c:v",
+    "-preset",
+    "-pix_fmt",
+    "-crf",
+    "-cq",
+    "-global_quality",
+    "-quality",
+    "-qp_i",
+    "-qp_p",
+}
+
+
+@lru_cache(maxsize=1)
+def available_ffmpeg_encoders(ffmpeg_cmd: str) -> set[str]:
+    """读取当前 ffmpeg 支持的编码器列表，用于自动选择 GPU 编码"""
+    try:
+        result = subprocess.run(
+            [ffmpeg_cmd, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+        )
+    except Exception:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return set(result.stdout.split())
+
 
 class FFmpegProcessor:
     """FFmpeg 视频处理封装类"""
@@ -55,11 +89,8 @@ class FFmpegProcessor:
         if filter_graph:
             cmd.extend(["-vf", filter_graph])
 
-        cmd.extend([
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-pix_fmt", "yuv420p",
-        ])
+        encoder = self._resolve_video_encoder(preset)
+        cmd.extend(self._video_encoder_args(preset, for_subtitles=False, encoder=encoder))
 
         if bitrate:
             cmd.extend(["-b:v", bitrate])
@@ -71,8 +102,16 @@ class FFmpegProcessor:
 
         logger.info(f"应用画面处理: {video_path} -> {output_path}")
         logger.info(f"ffmpeg 滤镜: {filter_graph or '无'}")
+        logger.info(f"视频编码器: {encoder}")
 
-        return self._run_ffmpeg(cmd, "画面处理", timeout=900)
+        return self._run_ffmpeg_with_cpu_fallback(
+            cmd,
+            "画面处理",
+            timeout=900,
+            encoder=encoder,
+            preset=preset,
+            for_subtitles=False,
+        )
 
     def build_effect_filter_graph(self, preset: dict[str, Any]) -> str:
         """将画面处理预设转换为 ffmpeg filter graph"""
@@ -192,38 +231,28 @@ class FFmpegProcessor:
         subtitle_filter = self._build_subtitle_filter(subtitle_path, preset)
 
         # 构建 ffmpeg 命令
+        preset_dict = preset or {}
+        encoder = self._resolve_video_encoder(preset_dict)
         cmd = [
             self.ffmpeg_cmd,
             "-i", video_path,           # 输入视频
             "-vf", subtitle_filter,     # 字幕滤镜
             "-c:a", "copy",             # 音频直接复制
-            "-c:v", "libx264",          # 视频编码
-            "-preset", "medium",        # 编码预设
-            "-crf", "23",              # 质量因子
-            "-y",                       # 覆盖输出文件
-            output_path
         ]
+        cmd.extend(self._video_encoder_args(preset_dict, for_subtitles=True, encoder=encoder))
+        cmd.extend(["-y", output_path])
 
         logger.info(f"烧录字幕: {video_path} -> {output_path}")
+        logger.info(f"视频编码器: {encoder}")
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600  # 10 分钟超时
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(f"字幕烧录失败: {result.stderr}")
-
-            logger.info(f"字幕烧录完成: {output_path}")
-            return output_path
-
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("字幕烧录超时")
+        return self._run_ffmpeg_with_cpu_fallback(
+            cmd,
+            "字幕烧录",
+            timeout=600,
+            encoder=encoder,
+            preset=preset_dict,
+            for_subtitles=True,
+        )
 
     def _build_subtitle_filter(self, subtitle_path: str, preset: Optional[dict] = None) -> str:
         """构建字幕滤镜字符串"""
@@ -419,6 +448,44 @@ class FFmpegProcessor:
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"{action_name}超时")
 
+    def _run_ffmpeg_with_cpu_fallback(
+        self,
+        cmd: list[str],
+        action_name: str,
+        timeout: int,
+        encoder: str,
+        preset: dict[str, Any],
+        for_subtitles: bool,
+    ) -> str:
+        """GPU 编码失败时自动重试 CPU，避免驱动或设备不可用导致任务卡死"""
+        try:
+            return self._run_ffmpeg(cmd, action_name, timeout=timeout)
+        except RuntimeError as exc:
+            if encoder == "libx264":
+                raise
+            logger.warning(f"{action_name}使用 {encoder} 失败，自动回退 CPU 编码: {exc}")
+            cpu_args = self._video_encoder_args(preset, for_subtitles=for_subtitles, encoder="libx264")
+            cpu_cmd = self._replace_video_encoder_args(cmd, cpu_args)
+            return self._run_ffmpeg(cpu_cmd, f"{action_name}CPU回退", timeout=timeout)
+
+    def _replace_video_encoder_args(self, cmd: list[str], replacement_args: list[str]) -> list[str]:
+        """把命令中的视频编码器参数替换为新的编码器参数"""
+        cleaned: list[str] = []
+        index = 0
+        while index < len(cmd):
+            item = cmd[index]
+            if item in VIDEO_ENCODER_OPTION_FLAGS and index + 1 < len(cmd):
+                index += 2
+                continue
+            cleaned.append(item)
+            index += 1
+
+        try:
+            insert_index = len(cleaned) - 1 - list(reversed(cleaned)).index("-y")
+        except ValueError:
+            insert_index = max(len(cleaned) - 1, 0)
+        return cleaned[:insert_index] + replacement_args + cleaned[insert_index:]
+
     def _value(self, config: Any) -> Optional[float]:
         """解析固定值或随机范围配置"""
         if config is None:
@@ -461,3 +528,49 @@ class FFmpegProcessor:
             kbps = int(self._value(bitrate.get("fixed_kbps")) or 0)
             return f"{kbps}k" if kbps > 0 else None
         return None
+
+    def _resolve_video_encoder(self, preset: dict[str, Any]) -> str:
+        """根据用户配置和本机能力选择视频编码器"""
+        acceleration = preset.get("acceleration", {}) if isinstance(preset, dict) else {}
+        if acceleration.get("enabled") is False:
+            return "libx264"
+        mode = str(acceleration.get("mode") or "auto")
+        encoder_map = {
+            "cpu": "libx264",
+            "nvidia": "h264_nvenc",
+            "intel": "h264_qsv",
+            "amd": "h264_amf",
+        }
+        if mode in encoder_map:
+            encoder = encoder_map[mode]
+            if encoder == "libx264" or encoder in available_ffmpeg_encoders(self.ffmpeg_cmd):
+                return encoder
+            return "libx264"
+
+        encoders = available_ffmpeg_encoders(self.ffmpeg_cmd)
+        for encoder in GPU_ENCODER_ORDER:
+            if encoder in encoders:
+                return encoder
+        return "libx264"
+
+    def _video_encoder_args(self, preset: dict[str, Any], for_subtitles: bool, encoder: Optional[str] = None) -> list[str]:
+        """生成视频编码参数，GPU 不可用时回退 CPU"""
+        encoder = encoder or self._resolve_video_encoder(preset)
+        if encoder == "libx264":
+            args = ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+            if for_subtitles:
+                args.extend(["-crf", "23"])
+            return args
+
+        quality = str((preset.get("acceleration") or {}).get("quality") or "balanced")
+        nvenc_preset = {"quality": "p6", "balanced": "p4", "size": "p2"}.get(quality, "p4")
+        cq_value = "19" if quality == "quality" else "24" if quality == "size" else "22"
+        args = ["-c:v", encoder, "-pix_fmt", "yuv420p"]
+        if encoder == "h264_nvenc":
+            args.extend(["-preset", nvenc_preset, "-cq", cq_value])
+        elif encoder == "h264_qsv":
+            args.extend(["-global_quality", cq_value])
+        elif encoder == "h264_amf":
+            amf_quality = {"quality": "quality", "balanced": "balanced", "size": "speed"}.get(quality, "balanced")
+            args.extend(["-quality", amf_quality, "-qp_i", cq_value, "-qp_p", cq_value])
+        return args
