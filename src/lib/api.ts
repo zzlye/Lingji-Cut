@@ -213,6 +213,28 @@ export const profileApi = {
       body: JSON.stringify(profile),
     }),
 
+  /** 获取配音模型列表 */
+  listVoiceModels: (params: { provider_type: string; base_url: string; api_key?: string; profile_id?: number | null }) =>
+    request<{ models: import('@/types').TextModelOption[]; source: string; message: string }>('/profiles/voice/models', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 测试当前配音表单，支持未保存配置 */
+  testVoiceForm: (params: {
+    name: string
+    provider_type: string
+    base_url: string
+    api_key?: string
+    model?: string
+    extra_params?: string
+    profile_id?: number | null
+  }) =>
+    request<{ message: string; status: string }>('/profiles/voice/test', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
   /** 测试配置连接 */
   test: (type: string, id: number) =>
     request<{ message: string; status: string }>(`/profiles/test/${type}/${id}`, { method: 'POST' }),
@@ -237,6 +259,22 @@ export const voiceApi = {
     output_path?: string
   }) =>
     request<{ message: string; output_path: string; audio_url: string }>('/voice/generate', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 当前表单直接试听，支持未保存配置 */
+  preview: (params: {
+    text: string
+    profile_id?: number | null
+    provider_type: string
+    base_url: string
+    api_key?: string
+    voice?: string
+    model?: string
+    settings?: Partial<import('@/types').VoiceGenerateSettings>
+  }) =>
+    request<{ message: string; output_path: string; audio_url: string }>('/voice/preview', {
       method: 'POST',
       body: JSON.stringify(params),
     }),

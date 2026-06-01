@@ -2,6 +2,7 @@
 # 配音引擎 - 调用多家 TTS API 生成配音音频
 
 import base64
+import wave
 import os
 import shutil
 import subprocess
@@ -291,9 +292,7 @@ class VoiceEngine:
             data = response.json()
             inline_data = data["candidates"][0]["content"]["parts"][0]["inlineData"]
             audio_bytes = base64.b64decode(inline_data["data"])
-
-            with open(output_path, "wb") as file:
-                file.write(audio_bytes)
+            self._write_gemini_audio(output_path, audio_bytes, inline_data.get("mimeType"))
 
         logger.info(f"Gemini TTS 生成完成: {output_path}")
         return output_path
@@ -476,10 +475,26 @@ class VoiceEngine:
 
     def _provider_audio_format(self, provider_type: str, settings: dict[str, Any]) -> str:
         """按渠道读取音频格式"""
+        if provider_type == "gemini_tts":
+            return "wav"
         if provider_type == "xiaomi_mimo_tts":
             value = str(settings.get("format") or "wav").lower()
             return value if value in {"wav", "pcm16"} else "wav"
         return self._audio_format(settings)
+
+    def _write_gemini_audio(self, output_path: str, audio_bytes: bytes, mime_type: Optional[str]) -> None:
+        """写入 Gemini TTS 音频，裸 PCM 自动封装为 WAV 方便浏览器播放"""
+        normalized = (mime_type or "").lower()
+        if "pcm" not in normalized and not output_path.lower().endswith(".wav"):
+            with open(output_path, "wb") as file:
+                file.write(audio_bytes)
+            return
+
+        with wave.open(output_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24000)
+            wav_file.writeframes(audio_bytes)
 
     def _normalize_timed_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """清理字幕分段，过滤空文本和非法时间"""

@@ -1,10 +1,10 @@
 // src/features/voice/VoiceConfigPanel.tsx
 // 配音配置面板 - 管理配音 API、音色、试听和生成参数
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { ApiProfile, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
+import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
 /** 配音渠道配置 */
@@ -12,7 +12,7 @@ const VOICE_PROVIDERS = [
   { id: 'openai_tts', name: 'OpenAI TTS', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini-tts' },
   { id: 'gemini_tts', name: 'Gemini TTS', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash-preview-tts' },
   { id: 'minimax_tts', name: 'MiniMax T2A', baseUrl: 'https://api.minimax.io/v1', model: 'speech-2.8-hd' },
-  { id: 'xiaomi_mimo_tts', name: '小米 MiMo TTS', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2-tts' },
+  { id: 'xiaomi_mimo_tts', name: '小米 MiMo TTS', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts' },
   { id: 'custom_tts', name: '自定义 OpenAI 兼容', baseUrl: '', model: '' },
 ]
 
@@ -48,8 +48,15 @@ function createProfileForm() {
     base_url: provider.baseUrl,
     api_key: '',
     model: provider.model,
+    custom_model: '',
   }
 }
+
+/** 面板内操作反馈 */
+type PanelNotice = {
+  type: 'info' | 'success' | 'warning' | 'error'
+  message: string
+} | null
 
 /**
  * 配音配置面板
@@ -59,6 +66,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [profiles, setProfiles] = useState<ApiProfile[]>([])
   const [selectedProfileId, setSelectedProfileId] = useState<number | null>(null)
   const [voices, setVoices] = useState<VoiceOption[]>([])
+  const [modelOptions, setModelOptions] = useState<TextModelOption[]>([])
   const [profileForm, setProfileForm] = useState(createProfileForm)
   const [settings, setSettings] = useState<VoiceGenerateSettings>(() => createDefaultSettings())
   const [voice, setVoice] = useState('alloy')
@@ -67,18 +75,17 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [previewText, setPreviewText] = useState(DEFAULT_PREVIEW_TEXT)
   const [audioUrl, setAudioUrl] = useState('')
   const [isSaving, setIsSaving] = useState(false)
+  const [isTesting, setIsTesting] = useState(false)
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isLoadingVoices, setIsLoadingVoices] = useState(false)
+  const [notice, setNotice] = useState<PanelNotice>(null)
   const { addLog } = useTaskStore()
 
-  const selectedProfile = useMemo(
-    () => profiles.find((profile) => profile.id === selectedProfileId) || null,
-    [profiles, selectedProfileId],
-  )
-
-  const activeProvider = selectedProfile?.provider_type || profileForm.provider_type
+  const activeProvider = profileForm.provider_type
   const activeProviderMeta = VOICE_PROVIDERS.find((provider) => provider.id === activeProvider) || VOICE_PROVIDERS[0]
   const selectedVoice = customVoice.trim() || voice
+  const activeModel = profileForm.custom_model.trim() || profileForm.model
   const supportsMiniMaxAdvanced = activeProvider === 'minimax_tts'
   const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts'
 
@@ -115,6 +122,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       base_url: profile.base_url,
       api_key: '',
       model: profile.model || '',
+      custom_model: '',
     })
 
     if (profile.extra_params) {
@@ -125,7 +133,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       } catch {
         setSettings(createDefaultSettings())
       }
+    } else {
+      setSettings(createDefaultSettings())
     }
+    setCustomVoice('')
+    setModelOptions(profile.model ? [{ id: profile.model, label: profile.model, owned_by: profile.provider_type }] : [])
+    setNotice({ type: 'info', message: `已选择配音配置：${profile.name}` })
   }
 
   /** 新建配音 API 配置 */
@@ -135,6 +148,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setSettings(createDefaultSettings())
     setVoice('alloy')
     setCustomVoice('')
+    setModelOptions([])
+    setNotice({ type: 'info', message: '已进入新建配音配置模式' })
   }
 
   /** 切换渠道并带出默认地址和模型 */
@@ -145,21 +160,60 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       provider_type: provider.id,
       base_url: provider.baseUrl || current.base_url,
       model: provider.model || current.model,
+      custom_model: '',
       name: current.name || provider.name,
     }))
+    setModelOptions(provider.model ? [{ id: provider.model, label: provider.model, owned_by: provider.id }] : [])
+    setNotice({ type: 'info', message: `已切换到 ${provider.name}，请确认模型、音色和密钥。` })
+  }
+
+  /** 获取配音模型列表 */
+  const handleLoadModels = async () => {
+    if (!profileForm.base_url.trim()) {
+      setNotice({ type: 'warning', message: '请先填写 Base URL' })
+      addLog('warn', '请先填写 Base URL')
+      return
+    }
+
+    setIsLoadingModels(true)
+    setNotice({ type: 'info', message: '正在获取配音模型列表...' })
+    try {
+      const result = await profileApi.listVoiceModels({
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
+        profile_id: selectedProfileId,
+      })
+      setModelOptions(result.models)
+      if (!profileForm.model && result.models.length > 0) {
+        setProfileForm((current) => ({ ...current, model: result.models[0].id }))
+      }
+      setNotice({ type: result.source === 'remote' ? 'success' : 'warning', message: result.message })
+      addLog(result.source === 'remote' ? 'info' : 'warn', result.message)
+    } catch (error) {
+      const message = `获取配音模型失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsLoadingModels(false)
+    }
   }
 
   /** 获取音色目录 */
   const loadVoices = async (providerType: string) => {
     setIsLoadingVoices(true)
+    setNotice({ type: 'info', message: '正在获取音色目录...' })
     try {
       const result = await voiceApi.voices(providerType)
       setVoices(result.voices)
       if (result.voices.length > 0) {
         setVoice(result.voices[0].id)
       }
+      setNotice({ type: 'success', message: `已获取 ${result.voices.length} 个音色` })
     } catch (error) {
-      addLog('error', `获取音色失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `获取音色失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
     } finally {
       setIsLoadingVoices(false)
     }
@@ -168,31 +222,46 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 保存配音 API 配置 */
   const handleSaveProfile = async () => {
     if (!profileForm.name.trim() || !profileForm.base_url.trim()) {
+      setNotice({ type: 'warning', message: '请填写配音配置名称和 Base URL' })
       addLog('warn', '请填写配音配置名称和 Base URL')
       return
     }
+    if (!activeModel.trim()) {
+      setNotice({ type: 'warning', message: '请选择或填写配音模型' })
+      addLog('warn', '请选择或填写配音模型')
+      return
+    }
     if (!selectedProfileId && !profileForm.api_key.trim()) {
+      setNotice({ type: 'warning', message: '新建配音配置需要填写 API Key' })
       addLog('warn', '新建配音配置需要填写 API Key')
       return
     }
 
     setIsSaving(true)
+    setNotice({ type: 'info', message: '正在保存配音配置...' })
     try {
       const payload = {
-        ...profileForm,
-        model: profileForm.model || selectedVoice,
+        name: profileForm.name,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
+        model: activeModel,
         extra_params: JSON.stringify({ ...settings, voice: selectedVoice }),
       }
       const saved = selectedProfileId
         ? await profileApi.updateVoice(selectedProfileId, payload)
-        : await profileApi.createVoice(payload)
+        : await profileApi.createVoice({ ...payload, api_key: profileForm.api_key })
 
       setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id, enable_voice: true }))
+      setNotice({ type: 'success', message: `配音配置 "${saved.name}" 已保存` })
       addLog('info', `配音配置 "${saved.name}" 已保存`)
       await loadProfiles()
       setSelectedProfileId(saved.id)
+      setProfileForm((current) => ({ ...current, api_key: '' }))
     } catch (error) {
-      addLog('error', `保存配音配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `保存配音配置失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
     } finally {
       setIsSaving(false)
     }
@@ -200,44 +269,79 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
   /** 测试连接 */
   const handleTestProfile = async () => {
-    if (!selectedProfileId) {
-      addLog('warn', '请先保存配音 API 配置')
+    if (!profileForm.base_url.trim()) {
+      setNotice({ type: 'warning', message: '请先填写 Base URL' })
+      addLog('warn', '请先填写 Base URL')
+      return
+    }
+    if (!activeModel.trim()) {
+      setNotice({ type: 'warning', message: '请选择或填写配音模型' })
+      addLog('warn', '请选择或填写配音模型')
       return
     }
 
+    setIsTesting(true)
+    setNotice({ type: 'info', message: '正在生成短试听并测试连接...' })
     try {
-      const result = await profileApi.test('voice', selectedProfileId)
+      const result = await profileApi.testVoiceForm({
+        name: profileForm.name,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
+        model: activeModel,
+        extra_params: JSON.stringify({ ...settings, voice: selectedVoice }),
+        profile_id: selectedProfileId,
+      })
+      setNotice({ type: 'success', message: result.message })
       addLog('info', result.message)
     } catch (error) {
-      addLog('error', `测试配音 API 失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `测试配音 API 失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsTesting(false)
     }
   }
 
   /** 试听配音 */
   const handlePreview = async () => {
-    if (!selectedProfileId) {
-      addLog('warn', '请先保存并选择配音 API 配置')
+    if (!profileForm.base_url.trim()) {
+      setNotice({ type: 'warning', message: '请先填写 Base URL' })
+      addLog('warn', '请先填写 Base URL')
+      return
+    }
+    if (!activeModel.trim()) {
+      setNotice({ type: 'warning', message: '请选择或填写配音模型' })
+      addLog('warn', '请选择或填写配音模型')
       return
     }
     if (!previewText.trim()) {
+      setNotice({ type: 'warning', message: '请输入试听文本' })
       addLog('warn', '请输入试听文本')
       return
     }
 
     setIsGenerating(true)
     setAudioUrl('')
+    setNotice({ type: 'info', message: '正在生成试听音频...' })
     try {
-      const result = await voiceApi.generate({
+      const result = await voiceApi.preview({
         text: previewText,
         profile_id: selectedProfileId,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
         voice: selectedVoice,
-        model: profileForm.model,
+        model: activeModel,
         settings,
       })
       setAudioUrl(`http://127.0.0.1:8765${result.audio_url}`)
+      setNotice({ type: 'success', message: '试听音频已生成，可直接播放。' })
       addLog('info', `试听音频已生成: ${result.output_path}`)
     } catch (error) {
-      addLog('error', `试听失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `试听失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
     } finally {
       setIsGenerating(false)
     }
@@ -245,25 +349,38 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
   /** 试听指定说话人的声音 */
   const handleSpeakerPreview = async (speaker: VoiceSpeakerProfile) => {
-    if (!selectedProfileId) {
-      addLog('warn', '请先保存并选择配音 API 配置')
+    if (!profileForm.base_url.trim()) {
+      setNotice({ type: 'warning', message: '请先填写 Base URL' })
+      addLog('warn', '请先填写 Base URL')
+      return
+    }
+    if (!activeModel.trim()) {
+      setNotice({ type: 'warning', message: '请选择或填写配音模型' })
+      addLog('warn', '请选择或填写配音模型')
       return
     }
 
     setIsGenerating(true)
     setAudioUrl('')
+    setNotice({ type: 'info', message: `正在生成 ${speaker.label} 的试听...` })
     try {
-      const result = await voiceApi.generate({
+      const result = await voiceApi.preview({
         text: speaker.sample_text || `${speaker.label} 的配音试听。`,
         profile_id: selectedProfileId,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
         voice: speaker.voice,
-        model: profileForm.model,
+        model: activeModel,
         settings,
       })
       setAudioUrl(`http://127.0.0.1:8765${result.audio_url}`)
+      setNotice({ type: 'success', message: `说话人 "${speaker.label}" 试听已生成。` })
       addLog('info', `说话人 "${speaker.label}" 试听已生成`)
     } catch (error) {
-      addLog('error', `说话人试听失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `说话人试听失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
     } finally {
       setIsGenerating(false)
     }
@@ -354,7 +471,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
           <main className="min-w-0 space-y-4">
             <section className="rounded-lg border border-border bg-background p-4">
-              <SectionTitle title="渠道和密钥" description="保存 API 后可测试连接、获取音色并生成试听。" />
+              <SectionTitle title="渠道和密钥" description="当前表单可直接测试、获取模型、获取音色并生成试听。" />
+              <NoticeBox notice={notice} />
               <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
                 <TextField label="配置名称" value={profileForm.name} onChange={(value) => setProfileForm({ ...profileForm, name: value })} />
                 <SelectField
@@ -364,23 +482,40 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                   onChange={updateProvider}
                 />
                 <TextField label="Base URL" value={profileForm.base_url} onChange={(value) => setProfileForm({ ...profileForm, base_url: value })} />
-                <TextField label="模型" value={profileForm.model} onChange={(value) => setProfileForm({ ...profileForm, model: value })} />
                 <PasswordField
                   label={selectedProfileId ? 'API Key（留空则保留已保存密钥）' : 'API Key'}
                   value={profileForm.api_key}
                   onChange={(value) => setProfileForm({ ...profileForm, api_key: value })}
                 />
               </div>
+              <div className="mt-4 grid grid-cols-[minmax(220px,1fr)_minmax(220px,320px)] gap-3 max-xl:grid-cols-1">
+                <SelectField
+                  label="模型列表"
+                  value={profileForm.model}
+                  options={modelSelectOptions(modelOptions, profileForm.model)}
+                  onChange={(value) => setProfileForm({ ...profileForm, model: value, custom_model: '' })}
+                />
+                <TextField
+                  label="自定义模型"
+                  value={profileForm.custom_model}
+                  placeholder={profileForm.model || activeProviderMeta.model || '例如 gpt-4o-mini-tts'}
+                  onChange={(value) => setProfileForm({ ...profileForm, custom_model: value })}
+                />
+              </div>
               <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
                 <button onClick={handleSaveProfile} disabled={isSaving} className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                   {isSaving ? '保存中...' : '保存 API 配置'}
                 </button>
-                <button onClick={handleTestProfile} className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5">
-                  测试连接
+                <button onClick={handleLoadModels} disabled={isLoadingModels} className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5 disabled:opacity-50">
+                  {isLoadingModels ? '获取中...' : '获取模型'}
+                </button>
+                <button onClick={handleTestProfile} disabled={isTesting} className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5 disabled:opacity-50">
+                  {isTesting ? '测试中...' : '测试连接'}
                 </button>
                 <button onClick={() => loadVoices(activeProvider)} className="h-9 rounded-md border border-border px-4 text-sm hover:bg-white/5">
                   {isLoadingVoices ? '获取中...' : '获取音色'}
                 </button>
+                <span className="self-center text-xs text-foreground-muted">当前模型：{activeModel || '未选择'}</span>
               </div>
             </section>
 
@@ -517,7 +652,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             </section>
 
             <section className="rounded-lg border border-border bg-background p-4">
-              <SectionTitle title="试听" description="保存 API 配置后生成短音频试听，确认音色和参数。" />
+              <SectionTitle title="试听" description="直接使用当前表单参数生成短音频，确认音色和参数。" />
               <textarea
                 value={previewText}
                 onChange={(event) => setPreviewText(event.target.value)}
@@ -546,6 +681,34 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 /** 渠道展示名称 */
 function providerLabel(providerType: string) {
   return VOICE_PROVIDERS.find((provider) => provider.id === providerType)?.name || providerType
+}
+
+/** 模型下拉选项，保证当前模型即使不在远程列表里也能显示 */
+function modelSelectOptions(models: TextModelOption[], currentModel: string) {
+  const options = models.map((model) => [model.id, model.label === model.id ? model.id : `${model.label} · ${model.id}`])
+  if (currentModel && !options.some(([value]) => value === currentModel)) {
+    options.unshift([currentModel, currentModel])
+  }
+  if (options.length === 0) {
+    options.push(['', '请先获取模型或填写自定义模型'])
+  }
+  return options
+}
+
+/** 面板内反馈提示 */
+function NoticeBox({ notice }: { notice: PanelNotice }) {
+  if (!notice) return null
+  const classes = {
+    info: 'border-accent/30 bg-accent/10 text-accent',
+    success: 'border-success/30 bg-success/10 text-success',
+    warning: 'border-warning/30 bg-warning/10 text-warning',
+    error: 'border-destructive/30 bg-destructive/10 text-destructive',
+  }[notice.type]
+  return (
+    <div className={`mt-3 rounded-md border px-3 py-2 text-xs ${classes}`} role={notice.type === 'error' ? 'alert' : 'status'}>
+      {notice.message}
+    </div>
+  )
 }
 
 /** 分组标题 */

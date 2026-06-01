@@ -29,6 +29,18 @@ class VoiceGenerateRequest(BaseModel):
     output_path: Optional[str] = None
 
 
+class VoicePreviewRequest(BaseModel):
+    """未保存配音表单试听请求"""
+    text: str
+    profile_id: Optional[int] = None
+    provider_type: str = "openai_tts"
+    base_url: str = ""
+    api_key: Optional[str] = None
+    voice: Optional[str] = None
+    model: Optional[str] = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
 class VoiceCatalogRequest(BaseModel):
     """获取音色目录请求"""
     provider_type: str
@@ -76,6 +88,61 @@ VOICE_CATALOGS = {
 }
 
 
+def _audio_format_for_preview(provider_type: str, settings: dict[str, Any]) -> str:
+    """读取试听文件格式，保持和配音引擎一致"""
+    if provider_type == "gemini_tts":
+        return "wav"
+    if provider_type == "xiaomi_mimo_tts":
+        value = str(settings.get("format") or "wav").lower()
+        return value if value in {"wav", "pcm16"} else "wav"
+    value = str(settings.get("format") or "mp3").lower()
+    return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
+
+
+def _preview_output_path(provider_type: str, settings: dict[str, Any]) -> str:
+    """生成不会互相覆盖的试听输出路径"""
+    import uuid
+    import tempfile
+
+    audio_format = _audio_format_for_preview(provider_type, settings)
+    return os.path.join(tempfile.gettempdir(), f"youtube_voice_preview_{uuid.uuid4().hex}.{audio_format}")
+
+
+def _requires_voice_api_key(provider_type: str) -> bool:
+    """判断试听时是否必须有 API Key"""
+    return provider_type in {"openai_tts", "gemini_tts", "minimax_tts", "xiaomi_mimo_tts"}
+
+
+def _load_profile_settings(profile: VoiceProviderProfile) -> dict[str, Any]:
+    """读取已保存配音配置中的高级参数"""
+    if not profile.extra_params:
+        return {}
+    try:
+        return json.loads(profile.extra_params)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _get_voice_profile(profile_id: Optional[int], db: Session) -> Optional[VoiceProviderProfile]:
+    """按需读取已保存的配音配置"""
+    if not profile_id:
+        return None
+    profile = db.query(VoiceProviderProfile).filter(VoiceProviderProfile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="配音配置不存在")
+    return profile
+
+
+def _resolve_preview_api_key(request_key: Optional[str], profile: Optional[VoiceProviderProfile]) -> str:
+    """优先使用当前表单密钥，留空时使用已保存密钥"""
+    api_key = request_key or ""
+    if api_key.strip():
+        return api_key
+    if profile:
+        return decrypt_api_key(profile.api_key_encrypted)
+    return ""
+
+
 @router.post("/voices")
 async def get_voice_catalog(request: VoiceCatalogRequest):
     """获取内置音色目录"""
@@ -117,6 +184,43 @@ async def generate_voice(request: VoiceGenerateRequest, db: Session = Depends(ge
         return {"message": "配音生成成功", "output_path": output_path, "audio_url": f"/voice/audio?path={quote(output_path)}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview")
+async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_db)):
+    """使用当前表单生成试听音频，配置未保存也可以试听"""
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="请输入试听文本")
+
+    profile = _get_voice_profile(request.profile_id, db)
+    provider_type = request.provider_type or (profile.provider_type if profile else "openai_tts")
+    base_url = request.base_url or (profile.base_url if profile else "")
+    if not base_url.strip():
+        raise HTTPException(status_code=400, detail="请填写 Base URL")
+
+    api_key = _resolve_preview_api_key(request.api_key, profile)
+    if _requires_voice_api_key(provider_type) and not api_key.strip():
+        raise HTTPException(status_code=400, detail="请填写 API Key，或选择已保存配音配置")
+
+    profile_settings = _load_profile_settings(profile) if profile else {}
+    settings = {**profile_settings, **request.settings}
+    output_path = _preview_output_path(provider_type, settings)
+    engine = VoiceEngine()
+
+    try:
+        output_path = await engine.generate_voice(
+            text=request.text,
+            output_path=output_path,
+            provider_type=provider_type,
+            voice=request.voice or settings.get("voice") or "alloy",
+            api_key=api_key,
+            base_url=base_url,
+            model=request.model or (profile.voice if profile else ""),
+            settings=settings,
+        )
+        return {"message": "试听音频已生成", "output_path": output_path, "audio_url": f"/voice/audio?path={quote(output_path)}"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"试听生成失败: {e}")
 
 
 @router.get("/audio")

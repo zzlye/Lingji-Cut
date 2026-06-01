@@ -1,6 +1,9 @@
 # backend/api/profiles.py
 # API 配置路由 - 提供 API 配置管理接口
 
+import json
+import os
+import tempfile
 from typing import Optional
 
 import httpx
@@ -8,8 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..core import VoiceEngine
 from ..models import get_db, TextProviderProfile, VoiceProviderProfile
 from ..utils import encrypt_api_key, decrypt_api_key
+from .voice import VOICE_CATALOGS
 
 # 创建路由器
 router = APIRouter(prefix="/profiles", tags=["profiles"])
@@ -70,6 +75,32 @@ class TextModelListResponse(BaseModel):
     message: str
 
 
+class VoiceModelListRequest(BaseModel):
+    """配音模型列表请求"""
+    provider_type: str
+    base_url: str
+    api_key: Optional[str] = None
+    profile_id: Optional[int] = None
+
+
+class VoiceModelListResponse(BaseModel):
+    """配音模型列表响应"""
+    models: list[TextModelOption]
+    source: str
+    message: str
+
+
+class VoiceProfileTestRequest(BaseModel):
+    """配音配置测试请求，支持未保存表单直接测试"""
+    name: str = "临时配音配置"
+    provider_type: str
+    base_url: str
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    extra_params: Optional[str] = None
+    profile_id: Optional[int] = None
+
+
 def _join_url(base_url: str, path: str) -> str:
     """拼接 API 地址，保留用户配置的版本前缀"""
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
@@ -97,6 +128,11 @@ def _auth_headers(provider_type: str, api_key: str) -> dict[str, str]:
 def _requires_api_key(provider_type: str) -> bool:
     """判断渠道是否必须填写 API Key 才能拉取模型"""
     return provider_type in {"openai", "gemini", "gemini_compatible", "anthropic", "minimax", "xiaomi_mimo"}
+
+
+def _voice_requires_api_key(provider_type: str) -> bool:
+    """判断配音渠道拉取模型时是否必须填写 API Key"""
+    return provider_type in {"openai_tts", "gemini_tts", "minimax_tts", "xiaomi_mimo_tts"}
 
 
 def _parse_openai_models(payload: dict) -> list[TextModelOption]:
@@ -183,6 +219,165 @@ async def _fetch_text_models(provider_type: str, base_url: str, api_key: str) ->
         raise HTTPException(status_code=502, detail=f"模型列表获取失败: {exc.__class__.__name__}") from exc
 
 
+def _default_voice_models(provider_type: str) -> list[TextModelOption]:
+    """返回配音渠道内置模型，远程列表不可用时兜底展示"""
+    defaults = {
+        "openai_tts": [
+            ("gpt-4o-mini-tts", "gpt-4o-mini-tts"),
+            ("tts-1", "tts-1"),
+            ("tts-1-hd", "tts-1-hd"),
+        ],
+        "gemini_tts": [
+            ("gemini-2.5-flash-preview-tts", "gemini-2.5-flash-preview-tts"),
+            ("gemini-2.5-pro-preview-tts", "gemini-2.5-pro-preview-tts"),
+        ],
+        "minimax_tts": [
+            ("speech-2.8-hd", "speech-2.8-hd"),
+            ("speech-2.8-turbo", "speech-2.8-turbo"),
+            ("speech-2.6-hd", "speech-2.6-hd"),
+            ("speech-2.6-turbo", "speech-2.6-turbo"),
+            ("speech-02-hd", "speech-02-hd"),
+            ("speech-02-turbo", "speech-02-turbo"),
+        ],
+        "xiaomi_mimo_tts": [
+            ("mimo-v2.5-tts", "mimo-v2.5-tts"),
+            ("mimo-v2.5-tts-voiceclone", "mimo-v2.5-tts-voiceclone"),
+            ("mimo-v2.5-tts-voicedesign", "mimo-v2.5-tts-voicedesign"),
+            ("mimo-v2-tts", "mimo-v2-tts"),
+        ],
+        "custom_tts": [],
+    }
+    return [TextModelOption(id=model_id, label=label, owned_by=provider_type) for model_id, label in defaults.get(provider_type, [])]
+
+
+def _filter_voice_models(provider_type: str, models: list[TextModelOption]) -> list[TextModelOption]:
+    """从通用模型列表中过滤出更可能用于 TTS 的模型"""
+    if provider_type == "custom_tts":
+        return models
+    keywords = {
+        "openai_tts": ["tts", "audio", "speech"],
+        "gemini_tts": ["tts", "speech", "preview-tts"],
+        "minimax_tts": ["speech", "tts", "voice"],
+        "xiaomi_mimo_tts": ["tts", "audio", "speech", "mimo"],
+    }.get(provider_type, [])
+    if not keywords:
+        return models
+    filtered = [
+        model for model in models
+        if any(keyword in model.id.lower() or keyword in model.label.lower() for keyword in keywords)
+    ]
+    return filtered or models
+
+
+async def _fetch_voice_models(provider_type: str, base_url: str, api_key: str) -> tuple[list[TextModelOption], str]:
+    """获取配音模型列表，优先远程读取，失败时返回内置模型"""
+    if not base_url.strip():
+        raise HTTPException(status_code=400, detail="请填写 Base URL")
+
+    defaults = _default_voice_models(provider_type)
+    if _voice_requires_api_key(provider_type) and not api_key.strip():
+        if defaults:
+            return defaults, "local"
+        raise HTTPException(status_code=400, detail="请先填写 API Key 或选择已保存配置")
+
+    if provider_type == "custom_tts" and not api_key.strip():
+        return defaults, "local"
+
+    # MiniMax 和小米 TTS 官方文档直接公布固定模型表，未提供稳定的 /models 拉取接口。
+    if provider_type in {"minimax_tts", "xiaomi_mimo_tts"}:
+        return defaults, "local"
+
+    try:
+        if provider_type == "gemini_tts":
+            models = await _fetch_text_models("gemini", base_url, api_key)
+        elif provider_type in {"openai_tts", "minimax_tts", "xiaomi_mimo_tts", "custom_tts"}:
+            models = await _fetch_text_models("openai_compatible", base_url, api_key)
+        else:
+            models = []
+        filtered = _filter_voice_models(provider_type, models)
+        return (filtered or defaults), "remote" if filtered else "local"
+    except Exception:
+        if defaults:
+            return defaults, "local"
+        raise
+
+
+async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> None:
+    """通过生成极短试听音频真实测试配音配置"""
+    if not profile.base_url.strip():
+        raise HTTPException(status_code=400, detail="请填写 Base URL")
+    if _voice_requires_api_key(profile.provider_type) and not api_key.strip():
+        raise HTTPException(status_code=400, detail="请填写 API Key，或选择已保存配音配置")
+
+    settings = {}
+    if profile.extra_params:
+        try:
+            settings = json.loads(profile.extra_params)
+        except json.JSONDecodeError:
+            settings = {}
+    voice = settings.get("voice") or _default_voice_id(profile.provider_type)
+    model = profile.voice or _default_voice_model(profile.provider_type)
+    audio_format = "wav" if profile.provider_type == "xiaomi_mimo_tts" else str(settings.get("format") or "mp3")
+    output_path = os.path.join(tempfile.gettempdir(), f"youtube_voice_test_{profile.id}.{audio_format}")
+    engine = VoiceEngine()
+    await engine.generate_voice(
+        text="配音连接测试。",
+        output_path=output_path,
+        provider_type=profile.provider_type,
+        voice=voice,
+        api_key=api_key,
+        base_url=profile.base_url,
+        model=model,
+        settings=settings,
+    )
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+
+def _default_voice_id(provider_type: str) -> str:
+    """按渠道返回默认音色 ID"""
+    voices = VOICE_CATALOGS.get(provider_type) or VOICE_CATALOGS["custom_tts"]
+    return str(voices[0]["id"]) if voices else "alloy"
+
+
+def _default_voice_model(provider_type: str) -> str:
+    """按渠道返回默认配音模型"""
+    models = _default_voice_models(provider_type)
+    return models[0].id if models else ""
+
+
+def _transient_voice_profile(request: VoiceProfileTestRequest, saved_profile: Optional[VoiceProviderProfile]) -> VoiceProviderProfile:
+    """把未保存表单转换成可复用的临时配音配置对象"""
+    return VoiceProviderProfile(
+        id=saved_profile.id if saved_profile else 0,
+        name=request.name or (saved_profile.name if saved_profile else "临时配音配置"),
+        provider_type=request.provider_type or (saved_profile.provider_type if saved_profile else "openai_tts"),
+        base_url=request.base_url or (saved_profile.base_url if saved_profile else ""),
+        voice=request.model or (saved_profile.voice if saved_profile else ""),
+        extra_params=request.extra_params or (saved_profile.extra_params if saved_profile else None),
+    )
+
+
+def _resolve_saved_voice_profile(profile_id: Optional[int], db: Session) -> Optional[VoiceProviderProfile]:
+    """按需读取已保存的配音配置"""
+    if not profile_id:
+        return None
+    profile = db.query(VoiceProviderProfile).filter(VoiceProviderProfile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="配音配置不存在")
+    return profile
+
+
+def _resolve_voice_api_key(request_key: Optional[str], saved_profile: Optional[VoiceProviderProfile]) -> str:
+    """优先使用表单密钥，留空时回退到已保存密钥"""
+    api_key = request_key or ""
+    if api_key.strip():
+        return api_key
+    if saved_profile:
+        return decrypt_api_key(saved_profile.api_key_encrypted)
+    return ""
+
+
 def _voice_profile_to_response(profile: VoiceProviderProfile) -> ProfileResponse:
     """将配音配置模型转换为前端响应"""
     return ProfileResponse(
@@ -260,6 +455,49 @@ async def list_text_models(request: TextModelListRequest, db: Session = Depends(
     )
 
 
+@router.post("/voice/models", response_model=VoiceModelListResponse)
+async def list_voice_models(request: VoiceModelListRequest, db: Session = Depends(get_db)):
+    """获取配音 API 模型列表"""
+    api_key = request.api_key or ""
+    if request.profile_id and not api_key.strip():
+        profile = _resolve_saved_voice_profile(request.profile_id, db)
+        api_key = decrypt_api_key(profile.api_key_encrypted) if profile else ""
+
+    models, source = await _fetch_voice_models(
+        provider_type=request.provider_type,
+        base_url=request.base_url,
+        api_key=api_key,
+    )
+    source_label = "远程" if source == "remote" else "内置"
+    if source == "local" and _voice_requires_api_key(request.provider_type) and not api_key.strip():
+        message = f"未填写 API Key，已显示 {len(models)} 个内置配音模型；填写密钥后可读取远程模型"
+    elif source == "local" and len(models) == 0:
+        message = "当前渠道没有内置模型，请手动填写模型名称"
+    else:
+        message = f"已获取 {len(models)} 个{source_label}配音模型"
+    return VoiceModelListResponse(
+        models=models,
+        source=source,
+        message=message,
+    )
+
+
+@router.post("/voice/test")
+async def test_voice_profile_from_form(request: VoiceProfileTestRequest, db: Session = Depends(get_db)):
+    """测试当前配音表单，未保存配置也可以直接测试"""
+    saved_profile = _resolve_saved_voice_profile(request.profile_id, db)
+    api_key = _resolve_voice_api_key(request.api_key, saved_profile)
+    profile = _transient_voice_profile(request, saved_profile)
+
+    try:
+        await _test_voice_profile(profile, api_key)
+        return {"message": "连接测试成功，已生成短试听音频", "status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"配音连接测试失败: {exc}") from exc
+
+
 @router.get("/voice", response_model=list[ProfileResponse])
 async def get_voice_profiles(db: Session = Depends(get_db)):
     """获取所有配音 API 配置"""
@@ -322,4 +560,5 @@ async def test_profile(profile_type: str, profile_id: int, db: Session = Depends
         models = await _fetch_text_models(profile.provider_type, profile.base_url, api_key)
         return {"message": f"连接测试成功，已读取 {len(models)} 个模型", "status": "ok"}
 
-    return {"message": "连接测试成功", "status": "ok"}
+    await _test_voice_profile(profile, api_key)
+    return {"message": "连接测试成功，已生成试听音频", "status": "ok"}
