@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, TextEngine, VoiceEngine
 from ..core.paths import ensure_project_dirs
+from ..core.tooling import assert_required_tools_available
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
 from ..utils import decrypt_api_key
 from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plain_text
@@ -513,6 +514,7 @@ def _seconds_to_srt_time(total_seconds: int) -> str:
 
 def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Optional[AutomationJobRecord] = None, resume_from_checkpoint: bool = False) -> AutomationRunResponse:
     """同步执行完整一键自动流程，供直接调用和后台任务复用"""
+    assert_required_tools_available()
     downloader = Downloader()
     processor = FFmpegProcessor()
     stages: list[AutomationStageResult] = []
@@ -1180,6 +1182,11 @@ def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
 
     try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
         return _run_automation_sync(request, db)
     except HTTPException:
         raise
@@ -1193,6 +1200,11 @@ def start_automation(request: AutomationRunRequest, db: Session = Depends(get_db
     if not request.url.strip():
         raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
 
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     job = _create_automation_job(db, request)
     _submit_automation_job(job.id)
     return AutomationStartResponse(message="自动化任务已启动", job_id=job.id)
@@ -1204,6 +1216,11 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
     normalized_urls = _normalize_batch_urls(request.urls)
     if not normalized_urls:
         raise HTTPException(status_code=400, detail="请至少填写一个有效链接")
+
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     batch_id = f"batch-{uuid.uuid4().hex[:12]}"
     _register_batch_semaphore(batch_id, request.concurrency)
@@ -1250,6 +1267,11 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
 
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     _reset_job_for_retry(job)
     db.commit()
     _submit_automation_job(job_id)
@@ -1266,6 +1288,11 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="只有失败或已完成的自动化任务可以继续处理")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
+
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _prepare_job_for_resume(job)
     db.commit()
@@ -1287,6 +1314,11 @@ def pause_batch_automation(batch_id: str, db: Session = Depends(get_db)):
 @router.post("/batch/{batch_id}/resume", response_model=AutomationBatchControlResponse)
 def resume_batch_automation(batch_id: str, db: Session = Depends(get_db)):
     """恢复一个批次中暂停的自动化任务"""
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     with BATCH_SEMAPHORE_LOCK:
         BATCH_PAUSED.discard(batch_id)
     job_ids = _resume_batch_jobs(db, batch_id)

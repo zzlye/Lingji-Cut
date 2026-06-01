@@ -346,4 +346,8 @@ export const settingsApi = {
   /** 恢复默认项目文件夹 */
   resetPaths: () =>
     request<import('@/types').ProjectPaths>('/settings/paths/reset', { method: 'POST' }),
+
+  /** 获取自动化依赖工具状态 */
+  tools: () =>
+    request<import('@/types').ToolStatusMap>('/settings/tools'),
 }

@@ -7,23 +7,17 @@ import subprocess
 from typing import Any, Optional
 from ..utils import get_logger
 from .paths import ensure_project_dirs
+from .tooling import get_ffmpeg_command
 
 # 日志记录器
 logger = get_logger("ffmpeg")
-
-# 工具路径配置
-TOOLS_DIR = r"D:\tools"
-FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
 
 class FFmpegProcessor:
     """FFmpeg 视频处理封装类"""
 
     def __init__(self):
         """初始化处理器，检查 ffmpeg 是否可用"""
-        if os.path.exists(FFMPEG_PATH):
-            self.ffmpeg_cmd = FFMPEG_PATH
-        else:
-            self.ffmpeg_cmd = "ffmpeg"
+        self.ffmpeg_cmd = get_ffmpeg_command()
         logger.info(f"ffmpeg 路径: {self.ffmpeg_cmd}")
 
     def apply_effects(

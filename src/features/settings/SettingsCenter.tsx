@@ -8,7 +8,7 @@ import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { settingsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
-import type { ProjectPaths } from '@/types'
+import type { ProjectPaths, ToolStatusMap } from '@/types'
 
 /** 设置页签类型 */
 type SettingsTab = 'effects' | 'api' | 'subtitle' | 'voice' | 'paths'
@@ -106,8 +106,10 @@ function SettingsTabButton({ id, active, onClick, label }: { id: SettingsTab; ac
 /** 文件位置面板 */
 function FileLocationPanel() {
   const [paths, setPaths] = useState<ProjectPaths | null>(null)
+  const [tools, setTools] = useState<ToolStatusMap | null>(null)
   const [projectRoot, setProjectRoot] = useState('')
   const [isSaving, setIsSaving] = useState(false)
+  const [isLoadingTools, setIsLoadingTools] = useState(false)
   const { addLog } = useTaskStore()
 
   const subDirectories = useMemo(() => {
@@ -131,8 +133,21 @@ function FileLocationPanel() {
     }
   }
 
+  /** 加载自动化依赖工具状态 */
+  const loadTools = async () => {
+    setIsLoadingTools(true)
+    try {
+      setTools(await settingsApi.tools())
+    } catch (error) {
+      addLog('error', `加载工具状态失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsLoadingTools(false)
+    }
+  }
+
   useEffect(() => {
     loadPaths()
+    loadTools()
   }, [])
 
   /** 使用 Electron 原生目录选择器 */
@@ -243,30 +258,76 @@ function FileLocationPanel() {
             </div>
           </section>
 
-          <section className="rounded-lg border border-border bg-background p-4">
-            <h4 className="text-sm font-medium">自动子目录</h4>
-            <p className="mt-1 text-xs text-foreground-muted">保存时创建，后续任务会直接使用。</p>
-            <div className="mt-4 space-y-2">
-              {subDirectories.map(([label, info]) => (
-                <div key={label} className="rounded-md border border-border bg-background-elevated p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium">{label}</span>
-                    <span className={`text-[10px] ${info.exists ? 'text-success' : 'text-warning'}`}>
-                      {info.exists ? '已创建' : '保存后创建'}
-                    </span>
+          <div className="space-y-4">
+            <section className="rounded-lg border border-border bg-background p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h4 className="text-sm font-medium">自动化工具</h4>
+                  <p className="mt-1 text-xs text-foreground-muted">优先读取 D:\tools，找不到时回退 PATH。</p>
+                </div>
+                <button
+                  onClick={loadTools}
+                  disabled={isLoadingTools}
+                  className="h-8 shrink-0 rounded-md border border-border px-3 text-xs hover:bg-white/5 disabled:opacity-50"
+                >
+                  {isLoadingTools ? '检测中...' : '检测'}
+                </button>
+              </div>
+              <div className="mt-4 space-y-2">
+                {tools ? (
+                  Object.entries(tools).map(([key, info]) => (
+                    <ToolStatusCard key={key} label={key === 'yt_dlp' ? 'yt-dlp' : 'ffmpeg'} info={info} />
+                  ))
+                ) : (
+                  <div className="rounded-md border border-dashed border-border p-3 text-xs text-foreground-muted">
+                    正在检测 yt-dlp 和 ffmpeg...
                   </div>
-                  <p className="mt-1 break-all text-xs text-foreground-muted select-text">{info.path}</p>
-                </div>
-              ))}
-              {!paths && (
-                <div className="rounded-md border border-dashed border-border p-3 text-xs text-foreground-muted">
-                  正在读取项目目录...
-                </div>
-              )}
-            </div>
-          </section>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-background p-4">
+              <h4 className="text-sm font-medium">自动子目录</h4>
+              <p className="mt-1 text-xs text-foreground-muted">保存时创建，后续任务会直接使用。</p>
+              <div className="mt-4 space-y-2">
+                {subDirectories.map(([label, info]) => (
+                  <div key={label} className="rounded-md border border-border bg-background-elevated p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium">{label}</span>
+                      <span className={`text-[10px] ${info.exists ? 'text-success' : 'text-warning'}`}>
+                        {info.exists ? '已创建' : '保存后创建'}
+                      </span>
+                    </div>
+                    <p className="mt-1 break-all text-xs text-foreground-muted select-text">{info.path}</p>
+                  </div>
+                ))}
+                {!paths && (
+                  <div className="rounded-md border border-dashed border-border p-3 text-xs text-foreground-muted">
+                    正在读取项目目录...
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/** 工具状态卡片 */
+function ToolStatusCard({ label, info }: { label: string; info: ToolStatusMap[keyof ToolStatusMap] }) {
+  return (
+    <div className="rounded-md border border-border bg-background-elevated p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium">{label}</span>
+        <span className={`text-[10px] ${info.available ? 'text-success' : 'text-destructive'}`}>
+          {info.available ? `可用 · ${info.source}` : '不可用'}
+        </span>
+      </div>
+      <p className="mt-1 break-all text-xs text-foreground-muted select-text">{info.command}</p>
+      {info.version && <p className="mt-1 line-clamp-2 text-[10px] text-foreground-muted">{info.version}</p>}
+      {info.error_message && <p className="mt-1 text-[10px] text-destructive">{info.error_message}</p>}
     </div>
   )
 }

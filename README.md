@@ -33,6 +33,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 ## 已实现能力
 
 - YouTube URL 解析和下载任务接口。
+- `/settings/tools` 可检测 `yt-dlp` 和 `ffmpeg` 的可用状态、实际路径、来源和版本；一键自动化启动前会先做环境预检。
 - 一键自动流程已由后端自动化任务编排：`解析 -> 下载 -> 画面处理 -> 字幕渲染 -> 可选配音 -> 导出`。
   - `/automation/start` 会创建后台任务并立即返回 `job_id`，前端优先通过 `/automation/jobs/{id}/events` 接收 SSE 实时进度，异常时降级为 `/automation/jobs/{id}` 查询。
   - `/automation/batch/start` 支持一次提交多个 YouTube 链接，按用户设置的批次并发数排队执行。
@@ -119,6 +120,7 @@ D:\tools\python-3.12.10-embed\python.exe backend\tests\test_subtitle_mapping.py 
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_text_engine.py -v
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_local_media_pipeline.py -v
 D:\tools\python-3.12.10-embed\python.exe backend\tests\test_automation_jobs.py -v
+D:\tools\python-3.12.10-embed\python.exe backend\tests\test_tooling.py -v
 ```
 
 `test_local_media_pipeline.py` 会用本地 ffmpeg 验证画面处理、字幕烧录、导出和分段配音混合，不依赖外部 YouTube 或真实 TTS API。

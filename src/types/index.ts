@@ -99,6 +99,22 @@ export interface ProjectPaths {
   exports_dir: PathInfo
 }
 
+/** 外部工具状态 */
+export interface ToolStatus {
+  name: string
+  command: string
+  available: boolean
+  version: string | null
+  source: string
+  error_message: string | null
+}
+
+/** 自动化依赖工具状态 */
+export interface ToolStatusMap {
+  yt_dlp: ToolStatus
+  ffmpeg: ToolStatus
+}
+
 /** API 配置 */
 export interface ApiProfile {
   id: number

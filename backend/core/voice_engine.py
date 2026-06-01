@@ -10,13 +10,10 @@ from typing import Any, Callable, List, Optional
 
 from ..utils import get_logger
 from .paths import ensure_project_dirs
+from .tooling import get_ffmpeg_command
 
 # 日志记录器
 logger = get_logger("voice")
-
-# 工具路径配置，配音分段对齐时需要用 ffmpeg 混合音轨。
-TOOLS_DIR = r"D:\tools"
-FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
 
 
 class VoiceEngine:
@@ -526,7 +523,7 @@ class VoiceEngine:
 
     def _ffmpeg_cmd(self) -> str:
         """获取 ffmpeg 可执行文件路径"""
-        return FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else "ffmpeg"
+        return get_ffmpeg_command()
 
     def _float(self, value: Any, default: float) -> float:
         """安全读取浮点数"""

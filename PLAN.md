@@ -13,6 +13,7 @@
   - `Electron main` 启动本地 Python FastAPI 服务。
   - 前端通过 HTTP/WebSocket 和 Python 后端通信。
   - 工具优先使用 `D:\tools\yt-dlp`、`D:\tools\ffmpeg`。
+  - `/settings/tools` 检测 `yt-dlp` 和 `ffmpeg` 可用性、路径、来源和版本；自动化任务启动前会先做工具预检。
 
 - 下载流水线：
   - 输入 YouTube URL 后调用 Python 后端解析视频信息。
@@ -141,6 +142,7 @@
   - 前端能实时显示任务进度和日志。
   - 打包后的 Windows 软件能在无开发环境下运行。
   - `D:\tools` 下已有工具时优先使用；不存在时提示安装或引导下载。
+  - 文件位置设置页能显示 `yt-dlp`、`ffmpeg` 的可用状态和实际路径。
 
 ## Assumptions / Defaults
 - 默认桌面壳使用 `Electron`。

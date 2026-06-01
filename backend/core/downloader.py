@@ -8,26 +8,17 @@ import subprocess
 from typing import Optional, Callable
 from ..utils import get_logger
 from .paths import ensure_project_dirs
+from .tooling import get_ffmpeg_command, get_yt_dlp_command
 
 # 日志记录器
 logger = get_logger("downloader")
-
-# 工具路径配置 - 优先使用 D:\tools 下的工具
-TOOLS_DIR = r"D:\tools"
-YT_DLP_PATH = os.path.join(TOOLS_DIR, "yt-dlp", "yt-dlp.exe")
-FFMPEG_PATH = os.path.join(TOOLS_DIR, "ffmpeg", "ffmpeg.exe")
 
 class Downloader:
     """yt-dlp 下载封装类"""
 
     def __init__(self):
         """初始化下载器，检查 yt-dlp 是否可用"""
-        # 检查 yt-dlp 路径
-        if os.path.exists(YT_DLP_PATH):
-            self.yt_dlp_cmd = YT_DLP_PATH
-        else:
-            # 尝试从 PATH 中获取
-            self.yt_dlp_cmd = "yt-dlp"
+        self.yt_dlp_cmd = get_yt_dlp_command()
         logger.info(f"yt-dlp 路径: {self.yt_dlp_cmd}")
 
     def parse_video(self, url: str) -> dict:
@@ -184,9 +175,10 @@ class Downloader:
             # 默认选择最佳质量
             cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
 
-        # 添加 ffmpeg 路径
-        if os.path.exists(FFMPEG_PATH):
-            cmd.extend(["--ffmpeg-location", os.path.dirname(FFMPEG_PATH)])
+        # 添加 ffmpeg 路径，确保指定格式和默认格式都能使用本地合并工具。
+        ffmpeg_command = get_ffmpeg_command()
+        if os.path.isabs(ffmpeg_command):
+            cmd.extend(["--ffmpeg-location", os.path.dirname(ffmpeg_command)])
 
         cmd.append(url)
 
