@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 
 # 嵌入式 Python 直接运行测试时手动加入项目根目录。
@@ -12,7 +13,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.api.tasks import cleanup_interrupted_tasks, clear_tasks, delete_task, get_tasks  # noqa: E402
+from backend.api.tasks import cleanup_interrupted_tasks, clear_tasks, delete_task, get_tasks, pause_task, cancel_task, _task_to_response  # noqa: E402
 from backend.models import DownloadTask  # noqa: E402
 
 
@@ -130,7 +131,7 @@ class TasksApiTests(unittest.TestCase):
         self.assertEqual(db.commit_count, 1)
 
     def test_delete_task_force_removes_running_record(self):
-        """确认卡住后可以强制删除执行中的底层任务记录"""
+        """保留强制删除入口，兼容确认为中断的历史记录"""
         task = DownloadTask(id=4, video_id=8, task_type="effects", status="processing", progress=40)
         db = FakeSingleDb([task], 4)
 
@@ -139,6 +140,53 @@ class TasksApiTests(unittest.TestCase):
         self.assertEqual(result["task_id"], 4)
         self.assertEqual(db.tasks, [])
         self.assertEqual(db.commit_count, 1)
+
+    def test_task_response_exposes_real_controls(self):
+        """任务响应会告诉前端哪些操作可以真实执行"""
+        running = DownloadTask(id=9, video_id=8, task_type="effects", status="processing", progress=40)
+        paused_child = DownloadTask(id=10, video_id=8, task_type="effects", status="paused", progress=40, parent_job_id="auto-1")
+        completed = DownloadTask(id=11, video_id=8, task_type="export", status="completed", progress=100)
+
+        running_response = _task_to_response(running)
+        paused_response = _task_to_response(paused_child)
+        completed_response = _task_to_response(completed)
+
+        self.assertTrue(running_response.can_pause)
+        self.assertTrue(running_response.can_cancel)
+        self.assertFalse(running_response.can_delete)
+        self.assertTrue(paused_response.can_retry)
+        self.assertTrue(paused_response.can_delete)
+        self.assertFalse(completed_response.can_pause)
+        self.assertTrue(completed_response.can_delete)
+
+    def test_pause_task_marks_record_paused(self):
+        """暂停任务会更新状态，前端随后可以继续或删除"""
+        task = DownloadTask(id=12, video_id=8, task_type="effects", status="processing", progress=35)
+        db = FakeSingleDb([task], 12)
+
+        with patch("backend.api.tasks.request_task_control", return_value=2) as control_mock:
+            result = asyncio.run(pause_task(12, db=db))
+
+        self.assertEqual(result["task_id"], 12)
+        self.assertEqual(result["killed_count"], 2)
+        self.assertEqual(task.status, "paused")
+        self.assertEqual(db.commit_count, 1)
+        control_mock.assert_called_once_with(db, task, "pause")
+
+    def test_cancel_task_marks_record_cancelled(self):
+        """取消任务会更新状态并写入完成时间"""
+        task = DownloadTask(id=13, video_id=8, task_type="effects", status="processing", progress=35)
+        db = FakeSingleDb([task], 13)
+
+        with patch("backend.api.tasks.request_task_control", return_value=3) as control_mock:
+            result = asyncio.run(cancel_task(13, db=db))
+
+        self.assertEqual(result["task_id"], 13)
+        self.assertEqual(result["killed_count"], 3)
+        self.assertEqual(task.status, "cancelled")
+        self.assertIsNotNone(task.completed_at)
+        self.assertEqual(db.commit_count, 1)
+        control_mock.assert_called_once_with(db, task, "cancel")
 
     def test_clear_tasks_keeps_running_by_default(self):
         """批量清理默认保留执行中的任务"""
@@ -159,9 +207,11 @@ class TasksApiTests(unittest.TestCase):
         completed = DownloadTask(id=5, video_id=8, task_type="export", status="completed", progress=100)
         db = FakeRunningDb([running, downloading, completed])
 
-        result = asyncio.run(cleanup_interrupted_tasks(db=db))
+        with patch("backend.api.tasks.terminate_task_external_processes", return_value=0) as cleanup_mock:
+            result = asyncio.run(cleanup_interrupted_tasks(db=db))
 
         self.assertEqual(result["updated_count"], 2)
+        self.assertEqual(cleanup_mock.call_count, 2)
         self.assertEqual(running.status, "failed")
         self.assertEqual(downloading.status, "failed")
         self.assertEqual(completed.status, "completed")

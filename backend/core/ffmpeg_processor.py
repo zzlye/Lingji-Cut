@@ -8,6 +8,7 @@ from functools import lru_cache
 from typing import Any, Optional
 from ..utils import get_logger
 from .paths import ensure_project_dirs
+from .process_control import normalize_control_keys, raise_if_control_requested, register_process, subprocess_creation_flags, terminate_process, unregister_process
 from .tooling import get_ffmpeg_command
 
 # 日志记录器
@@ -62,6 +63,7 @@ class FFmpegProcessor:
         preview: bool = False,
         start_time: float = 0,
         duration: float = 8,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """
         应用画面处理预设
@@ -107,10 +109,11 @@ class FFmpegProcessor:
         return self._run_ffmpeg_with_cpu_fallback(
             cmd,
             "画面处理",
-            timeout=900,
+            timeout=120 if preview else 21600,
             encoder=encoder,
             preset=preset,
             for_subtitles=False,
+            control_keys=control_keys,
         )
 
     def build_effect_filter_graph(self, preset: dict[str, Any]) -> str:
@@ -211,7 +214,8 @@ class FFmpegProcessor:
         video_path: str,
         subtitle_path: str,
         output_path: Optional[str] = None,
-        preset: Optional[dict] = None
+        preset: Optional[dict] = None,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """
         将字幕烧录到视频（硬字幕）
@@ -248,10 +252,11 @@ class FFmpegProcessor:
         return self._run_ffmpeg_with_cpu_fallback(
             cmd,
             "字幕烧录",
-            timeout=600,
+            timeout=21600,
             encoder=encoder,
             preset=preset_dict,
             for_subtitles=True,
+            control_keys=control_keys,
         )
 
     def _build_subtitle_filter(self, subtitle_path: str, preset: Optional[dict] = None) -> str:
@@ -317,7 +322,8 @@ class FFmpegProcessor:
         audio_path: str,
         output_path: Optional[str] = None,
         mode: str = "replace",
-        volume_ratio: float = 1.0
+        volume_ratio: float = 1.0,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """
         合并音频和视频
@@ -365,31 +371,14 @@ class FFmpegProcessor:
             raise ValueError(f"不支持的合并模式: {mode}")
 
         logger.info(f"合并音视频: {video_path} + {audio_path} -> {output_path}")
-
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(f"音视频合并失败: {result.stderr}")
-
-            logger.info(f"音视频合并完成: {output_path}")
-            return output_path
-
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("音视频合并超时")
+        return self._run_ffmpeg(cmd, "音视频合并", timeout=21600, control_keys=control_keys)
 
     def convert_format(
         self,
         input_path: str,
         output_format: str = "mp4",
-        output_path: Optional[str] = None
+        output_path: Optional[str] = None,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """转换视频格式"""
         if not os.path.exists(input_path):
@@ -409,44 +398,40 @@ class FFmpegProcessor:
 
         logger.info(f"转换格式: {input_path} -> {output_path}")
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=300
-            )
+        return self._run_ffmpeg(cmd, "格式转换", timeout=7200, control_keys=control_keys)
 
-            if result.returncode != 0:
-                raise RuntimeError(f"格式转换失败: {result.stderr}")
-
-            return output_path
-
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("格式转换超时")
-
-    def _run_ffmpeg(self, cmd: list[str], action_name: str, timeout: int = 600) -> str:
+    def _run_ffmpeg(self, cmd: list[str], action_name: str, timeout: int = 600, control_keys: Optional[list[str]] = None) -> str:
         """执行 ffmpeg 命令并统一处理错误"""
         output_path = cmd[-1]
+        control_keys = normalize_control_keys(control_keys)
+        process = None
         try:
-            result = subprocess.run(
+            raise_if_control_requested(control_keys)
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                creationflags=subprocess_creation_flags(),
             )
+            register_process(control_keys, process, cmd)
+            stdout, stderr = process.communicate(timeout=timeout)
+            raise_if_control_requested(control_keys)
 
-            if result.returncode != 0:
-                raise RuntimeError(f"{action_name}失败: {result.stderr}")
+            if process.returncode != 0:
+                raise RuntimeError(f"{action_name}失败: {stderr or stdout}")
 
             logger.info(f"{action_name}完成: {output_path}")
             return output_path
         except subprocess.TimeoutExpired:
+            if process:
+                terminate_process(process)
             raise RuntimeError(f"{action_name}超时")
+        finally:
+            if process:
+                unregister_process(process)
 
     def _run_ffmpeg_with_cpu_fallback(
         self,
@@ -456,17 +441,18 @@ class FFmpegProcessor:
         encoder: str,
         preset: dict[str, Any],
         for_subtitles: bool,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """GPU 编码失败时自动重试 CPU，避免驱动或设备不可用导致任务卡死"""
         try:
-            return self._run_ffmpeg(cmd, action_name, timeout=timeout)
+            return self._run_ffmpeg(cmd, action_name, timeout=timeout, control_keys=control_keys)
         except RuntimeError as exc:
             if encoder == "libx264":
                 raise
             logger.warning(f"{action_name}使用 {encoder} 失败，自动回退 CPU 编码: {exc}")
             cpu_args = self._video_encoder_args(preset, for_subtitles=for_subtitles, encoder="libx264")
             cpu_cmd = self._replace_video_encoder_args(cmd, cpu_args)
-            return self._run_ffmpeg(cpu_cmd, f"{action_name}CPU回退", timeout=timeout)
+            return self._run_ffmpeg(cpu_cmd, f"{action_name}CPU回退", timeout=timeout, control_keys=control_keys)
 
     def _replace_video_encoder_args(self, cmd: list[str], replacement_args: list[str]) -> list[str]:
         """把命令中的视频编码器参数替换为新的编码器参数"""

@@ -12,7 +12,7 @@ export function HistoryPanel() {
 
   // 筛选已完成或失败的任务
   const historyTasks = tasks.filter(
-    (t) => t.status === 'completed' || t.status === 'failed'
+    (t) => t.status === 'completed' || t.status === 'failed' || t.status === 'cancelled'
   )
 
   return (
@@ -40,7 +40,7 @@ export function HistoryPanel() {
                 <div className="flex items-center gap-2">
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      task.status === 'completed' ? 'bg-success' : 'bg-destructive'
+                      task.status === 'completed' ? 'bg-success' : task.status === 'cancelled' ? 'bg-warning' : 'bg-destructive'
                     }`}
                   />
                   <span className="text-sm font-medium">

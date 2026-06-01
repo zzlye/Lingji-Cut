@@ -18,7 +18,7 @@ class DownloadTask(Base):
     video_id = Column(Integer, nullable=False, index=True)
     # 任务类型（download、subtitle、voice、export）
     task_type = Column(String(50), nullable=False)
-    # 任务状态（pending、downloading、processing、completed、failed）
+    # 任务状态（pending、downloading、processing、paused、cancelled、completed、failed）
     status = Column(String(50), nullable=False, default="pending")
     # 下载进度（0-100）
     progress = Column(Float, default=0.0)

@@ -44,6 +44,7 @@ def init_db():
     _migrate_subtitle_presets()
     _migrate_voice_profiles()
     _migrate_download_tasks()
+    _migrate_runtime_processes()
 
 
 def _migrate_text_profiles():
@@ -117,3 +118,30 @@ def _migrate_download_tasks():
         for column_name, column_sql in required_columns.items():
             if column_name not in existing_columns:
                 connection.execute(text(f"ALTER TABLE download_tasks ADD COLUMN {column_name} {column_sql}"))
+
+
+def _migrate_runtime_processes():
+    """创建运行时进程表，支持重启后继续取消 ffmpeg/yt-dlp"""
+    with engine.begin() as connection:
+        connection.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_processes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pid INTEGER NOT NULL,
+                parent_pid INTEGER,
+                keys_json TEXT NOT NULL,
+                command_line TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))
+        connection.execute(text(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_control_requests (
+                key TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        ))

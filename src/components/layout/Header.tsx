@@ -179,6 +179,12 @@ export function Header() {
         source.close()
         reject(new Error(job.error_message || '自动化任务失败'))
       }
+      if (job.status === 'paused' || job.status === 'cancelled') {
+        settled = true
+        window.clearTimeout(fallbackTimer)
+        source.close()
+        reject(new Error(job.error_message || (job.status === 'paused' ? '自动化任务已暂停' : '自动化任务已取消')))
+      }
     })
 
     source.addEventListener('error', () => {
@@ -197,6 +203,7 @@ export function Header() {
       syncBackendAutomationJob(job)
       if (job.status === 'completed') return job
       if (job.status === 'failed') throw new Error(job.error_message || '自动化任务失败')
+      if (job.status === 'paused' || job.status === 'cancelled') throw new Error(job.error_message || (job.status === 'paused' ? '自动化任务已暂停' : '自动化任务已取消'))
       await new Promise((resolve) => window.setTimeout(resolve, 1200))
     }
   }
@@ -223,7 +230,7 @@ export function Header() {
           voice: '按配置生成或跳过配音',
           export: '合成视频、字幕、配音并导出成品',
         }[key],
-        status: stage?.status === 'failed' ? 'failed' : stage?.status === 'skipped' ? 'skipped' : stage?.status === 'completed' ? 'completed' : job.status === 'running' && job.current_step?.includes({
+        status: stage?.status === 'failed' ? 'failed' : stage?.status === 'cancelled' ? 'cancelled' : stage?.status === 'paused' ? 'paused' : stage?.status === 'skipped' ? 'skipped' : stage?.status === 'completed' ? 'completed' : job.status === 'running' && job.current_step?.includes({
           parse: '解析',
           download: '下载',
           effects: '画面',
@@ -249,6 +256,10 @@ export function Header() {
       created_at: job.created_at || new Date().toISOString(),
       completed_at: job.completed_at,
       steps,
+      can_pause: job.can_pause,
+      can_cancel: job.can_cancel,
+      can_resume: job.can_resume,
+      can_retry: job.can_retry,
     })
 
     job.stages.forEach((stage) => {
@@ -257,12 +268,12 @@ export function Header() {
         id: stage.task_id,
         video_id: job.video_id,
         task_type: stage.key,
-        status: stage.status === 'failed' ? 'failed' : stage.status === 'completed' || stage.status === 'skipped' ? 'completed' : 'processing',
+        status: stage.status === 'failed' ? 'failed' : stage.status === 'cancelled' ? 'cancelled' : stage.status === 'paused' ? 'paused' : stage.status === 'completed' || stage.status === 'skipped' ? 'completed' : 'processing',
         progress: stage.status === 'completed' || stage.status === 'skipped' ? 100 : Math.round(stage.progress || 0),
         output_path: stage.output_path || null,
         error_message: stage.error_message || null,
         created_at: job.created_at || new Date().toISOString(),
-        completed_at: stage.status === 'completed' || stage.status === 'skipped' ? new Date().toISOString() : null,
+        completed_at: stage.status === 'completed' || stage.status === 'skipped' || stage.status === 'cancelled' ? new Date().toISOString() : null,
       })
     })
   }

@@ -100,7 +100,7 @@ export const useTaskStore = create<TaskState>((set) => ({
     set((state) => ({
       tasks: status
         ? state.tasks.filter((task) => task.status !== status)
-        : state.tasks.filter((task) => task.status === 'processing' || task.status === 'downloading'),
+        : state.tasks.filter((task) => task.status === 'pending' || task.status === 'processing' || task.status === 'downloading' || task.status === 'paused'),
     })),
 
   startAutomationJob: (sourceUrl) => {

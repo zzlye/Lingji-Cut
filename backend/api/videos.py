@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ..core import DedupChecker, Downloader
+from ..core.process_control import TaskControlRequested
 from ..models import get_db, VideoSource, DownloadTask
 
 # 创建路由器
@@ -83,8 +84,19 @@ async def parse_video(request: ParseRequest, db: Session = Depends(get_db)):
     )
 
 
+def _task_control_key(task_id: int) -> str:
+    """生成底层任务控制 key"""
+    return f"task:{task_id}"
+
+
+def _mark_task_controlled(task: DownloadTask, exc: TaskControlRequested) -> None:
+    """根据用户控制动作更新下载任务状态"""
+    task.status = "paused" if exc.action == "pause" else "cancelled"
+    task.error_message = "用户暂停，等待继续" if exc.action == "pause" else "用户取消"
+
+
 @router.post("/download")
-async def download_video(request: DownloadRequest, db: Session = Depends(get_db)):
+def download_video(request: DownloadRequest, db: Session = Depends(get_db)):
     """
     创建视频下载任务
     将下载任务添加到任务队列
@@ -120,12 +132,17 @@ async def download_video(request: DownloadRequest, db: Session = Depends(get_db)
             format_id=request.format_id,
             output_format=request.output_format,
             progress_callback=on_progress,
+            control_keys=[_task_control_key(task.id)],
         )
         task.status = "completed"
         task.progress = 100
         task.output_path = output_path
         db.commit()
         return {"message": "下载完成", "task_id": task.id, "output_path": output_path}
+    except TaskControlRequested as exc:
+        _mark_task_controlled(task, exc)
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)

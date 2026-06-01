@@ -114,6 +114,14 @@ export const taskApi = {
   retry: (id: number) =>
     request<{ message: string }>(`/tasks/${id}/retry`, { method: 'POST' }),
 
+  /** 暂停底层任务并停止当前外部进程 */
+  pause: (id: number) =>
+    request<{ message: string; task_id: number; killed_count: number }>(`/tasks/${id}/pause`, { method: 'POST' }),
+
+  /** 取消底层任务并停止当前外部进程 */
+  cancel: (id: number) =>
+    request<{ message: string; task_id: number; killed_count: number }>(`/tasks/${id}/cancel`, { method: 'POST' }),
+
   /** 删除单条底层任务记录 */
   delete: (id: number, force = false) =>
     request<{ message: string; task_id: number }>(`/tasks/${id}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
@@ -407,6 +415,14 @@ export const automationApi = {
   /** 从已有阶段继续后台一键流程 */
   resume: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/resume`, { method: 'POST' }),
+
+  /** 暂停后台一键流程，并停止当前外部进程 */
+  pause: (id: string) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/pause`, { method: 'POST' }),
+
+  /** 取消后台一键流程，并停止当前外部进程 */
+  cancel: (id: string) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/cancel`, { method: 'POST' }),
 
   /** 后台一键流程事件流地址 */
   eventsUrl: (id: string) =>

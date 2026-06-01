@@ -3,10 +3,11 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _cancel_job, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.models import AutomationJobRecord, TextProviderProfile  # noqa: E402
 
 
@@ -71,6 +72,8 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.stages[1].progress, 42)
         self.assertEqual(response.stages[1].task_id, 7)
         self.assertEqual(response.batch_id, "batch-test")
+        self.assertTrue(response.can_pause)
+        self.assertTrue(response.can_cancel)
 
     def test_default_stages_include_full_automation_flow(self):
         keys = [stage["key"] for stage in _default_stages()]
@@ -104,7 +107,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIsNone(job.error_message)
         self.assertEqual([stage["key"] for stage in json.loads(job.stages)], ["parse", "download", "effects", "subtitle", "voice", "export"])
 
-    def test_resume_keeps_completed_stages_and_clears_failed_stage(self):
+    def test_resume_keeps_completed_stages_and_clears_failed_paused_cancelled_stage(self):
         job = AutomationJobRecord(
             id="auto-resume",
             source_url="https://youtube.com/watch?v=test",
@@ -116,6 +119,8 @@ class AutomationJobTests(unittest.TestCase):
                 {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
                 {"key": "effects", "status": "completed", "progress": 100, "task_id": 2, "output_path": "D:/effects.mp4", "error_message": None},
                 {"key": "export", "status": "failed", "progress": 35, "task_id": 3, "output_path": None, "error_message": "导出失败"},
+                {"key": "voice", "status": "paused", "progress": 20, "task_id": 4, "output_path": None, "error_message": "暂停"},
+                {"key": "subtitle", "status": "cancelled", "progress": 10, "task_id": 5, "output_path": None, "error_message": "取消"},
             ], ensure_ascii=False),
         )
 
@@ -130,6 +135,34 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(stages["export"]["status"], "pending")
         self.assertIsNone(stages["export"]["task_id"])
         self.assertIsNone(stages["export"]["error_message"])
+        self.assertEqual(stages["voice"]["status"], "pending")
+        self.assertEqual(stages["subtitle"]["status"], "pending")
+
+    def test_pause_and_cancel_job_update_controls_and_stages(self):
+        """单任务暂停/取消会影响自动化任务状态和阶段状态"""
+        stages = [
+            {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+            {"key": "effects", "status": "running", "progress": 40, "task_id": 2, "output_path": None, "error_message": None},
+            {"key": "export", "status": "pending", "progress": 0, "task_id": None, "output_path": None, "error_message": None},
+        ]
+        job = AutomationJobRecord(id="auto-control", source_url="https://youtube.com/watch?v=test", status="running", stages=json.dumps(stages, ensure_ascii=False))
+        db = FakeDb([job])
+
+        _pause_running_job(db, job)
+        paused_response = _job_to_response(job)
+
+        self.assertEqual(job.status, "paused")
+        self.assertTrue(paused_response.can_resume)
+        self.assertTrue(paused_response.can_cancel)
+        self.assertEqual(json.loads(job.stages)[1]["status"], "paused")
+
+        _cancel_job(db, job)
+        cancelled_response = _job_to_response(job)
+
+        self.assertEqual(job.status, "cancelled")
+        self.assertTrue(cancelled_response.can_resume)
+        self.assertTrue(cancelled_response.can_retry)
+        self.assertIsNotNone(job.completed_at)
 
     def test_prepare_interrupted_job_for_startup_clears_running_stage(self):
         job = AutomationJobRecord(
@@ -198,19 +231,21 @@ class AutomationJobTests(unittest.TestCase):
         ]
         db = FakeDb(jobs)
 
-        paused_count = _pause_batch_jobs(db, "batch-a")
+        with patch("backend.api.automation.request_job_control", return_value=1) as control_mock:
+            paused_count = _pause_batch_jobs(db, "batch-a")
 
         self.assertEqual(paused_count, 2)
+        control_mock.assert_called_once_with(db, jobs[1], "pause")
         self.assertEqual(jobs[0].status, "paused")
         self.assertEqual(jobs[0].current_step, "批次暂停")
-        self.assertEqual(jobs[1].status, "running")
+        self.assertEqual(jobs[1].status, "paused")
         self.assertTrue(json.loads(jobs[0].params)["batch_paused"])
         self.assertTrue(json.loads(jobs[1].params)["batch_paused"])
         self.assertEqual(jobs[3].status, "pending")
 
         resumed_ids = _resume_batch_jobs(db, "batch-a")
 
-        self.assertEqual(resumed_ids, ["auto-1"])
+        self.assertEqual(resumed_ids, ["auto-1", "auto-2"])
         self.assertEqual(jobs[0].status, "pending")
         self.assertEqual(jobs[0].current_step, "等待批次调度")
         self.assertFalse(json.loads(jobs[0].params)["batch_paused"])

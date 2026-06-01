@@ -20,6 +20,8 @@ export function TaskPanel() {
   const [isClearingTasks, setIsClearingTasks] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
+  const [controllingJob, setControllingJob] = useState<string | null>(null)
+  const [controllingTask, setControllingTask] = useState<string | null>(null)
   const [batchUrls, setBatchUrls] = useState('')
   const [batchConcurrency, setBatchConcurrency] = useState(2)
   const [isStartingBatch, setIsStartingBatch] = useState(false)
@@ -27,14 +29,14 @@ export function TaskPanel() {
 
   const mergedTasks = useMemo(() => {
     const taskMap = new Map<number, DownloadTask>()
-    for (const task of serverTasks) taskMap.set(task.id, task)
     for (const task of tasks) taskMap.set(task.id, task)
+    for (const task of serverTasks) taskMap.set(task.id, task)
     return Array.from(taskMap.values()).sort((a, b) => b.id - a.id)
   }, [serverTasks, tasks])
 
   const activeJobIds = useMemo(
     () => automationJobs
-      .filter((job) => job.status === 'running' || job.status === 'pending' || job.status === 'paused')
+      .filter((job) => job.status === 'running' || job.status === 'pending')
       .map((job) => job.id)
       .sort()
       .join('|'),
@@ -92,6 +94,24 @@ export function TaskPanel() {
     }
   }
 
+  /** 暂停或取消单个自动化任务 */
+  const controlAutomationJob = async (job: AutomationJob, action: 'pause' | 'cancel') => {
+    if (action === 'cancel' && !window.confirm(`确认取消自动处理任务「${job.title}」？正在运行的下载或画面处理进程会被停止。`)) return
+
+    setControllingJob(`${action}:${job.id}`)
+    try {
+      const result = action === 'pause'
+        ? await automationApi.pause(job.id)
+        : await automationApi.cancel(job.id)
+      addLog(action === 'pause' ? 'warn' : 'error', result.message)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `${action === 'pause' ? '暂停' : '取消'}自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setControllingJob(null)
+    }
+  }
+
   /** 按行批量提交自动化任务 */
   const startBatchAutomation = async () => {
     const urls = batchUrls
@@ -135,14 +155,9 @@ export function TaskPanel() {
 
   /** 删除单条底层任务记录 */
   const deleteTaskRecord = async (task: DownloadTask) => {
-    const isRunning = task.status === 'processing' || task.status === 'downloading'
-    if (isRunning) {
-      const confirmed = window.confirm(`任务 #${task.id} 仍显示执行中。确认它已经卡住后，可以强制清理记录；这不会停止系统里仍在运行的外部进程。`)
-      if (!confirmed) return
-    }
     setDeletingTaskId(task.id)
     try {
-      await taskApi.delete(task.id, isRunning)
+      await taskApi.delete(task.id)
       setServerTasks((current) => current.filter((item) => item.id !== task.id))
       removeTask(task.id)
       addLog('info', `任务记录已删除: #${task.id}`)
@@ -150,6 +165,31 @@ export function TaskPanel() {
       addLog('error', `删除任务记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setDeletingTaskId(null)
+    }
+  }
+
+  /** 控制单条底层任务，优先停止真实外部进程 */
+  const controlTaskRecord = async (task: DownloadTask, action: 'pause' | 'cancel' | 'retry') => {
+    if (action === 'cancel' && !window.confirm(`确认取消任务 #${task.id}？正在运行的外部进程会被停止。`)) return
+
+    setControllingTask(`${action}:${task.id}`)
+    try {
+      if (action === 'pause') {
+        const result = await taskApi.pause(task.id)
+        addLog('warn', result.message)
+      } else if (action === 'cancel') {
+        const result = await taskApi.cancel(task.id)
+        addLog('error', result.message)
+      } else {
+        const result = await taskApi.retry(task.id)
+        addLog('info', result.message)
+      }
+      await loadTasks()
+    } catch (error) {
+      const actionLabel = action === 'pause' ? '暂停' : action === 'cancel' ? '取消' : '重试'
+      addLog('error', `${actionLabel}任务失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setControllingTask(null)
     }
   }
 
@@ -276,8 +316,11 @@ export function TaskPanel() {
                   job={job}
                   isRetrying={retryingJobId === job.id}
                   isResuming={resumingJobId === job.id}
+                  controllingAction={controllingJob?.endsWith(`:${job.id}`) ? controllingJob.split(':')[0] as 'pause' | 'cancel' : null}
                   onRetry={() => retryAutomationJob(job.id)}
                   onResume={() => resumeAutomationJob(job.id)}
+                  onPause={() => controlAutomationJob(job, 'pause')}
+                  onCancel={() => controlAutomationJob(job, 'cancel')}
                 />
               ))}
             </div>
@@ -310,7 +353,7 @@ export function TaskPanel() {
                 disabled={isClearingTasks}
                 className="h-9 rounded-md border border-warning/40 px-4 text-sm text-warning hover:bg-warning/10 disabled:opacity-50"
               >
-                清理卡住
+                标记中断
               </button>
               <button
                 onClick={() => clearTaskRecords()}
@@ -331,6 +374,10 @@ export function TaskPanel() {
                   key={task.id}
                   task={task}
                   isDeleting={deletingTaskId === task.id}
+                  busyAction={controllingTask?.endsWith(`:${task.id}`) ? controllingTask.split(':')[0] as 'pause' | 'cancel' | 'retry' : null}
+                  onPause={() => controlTaskRecord(task, 'pause')}
+                  onCancel={() => controlTaskRecord(task, 'cancel')}
+                  onRetry={() => controlTaskRecord(task, 'retry')}
                   onDelete={() => deleteTaskRecord(task)}
                 />
               ))}
@@ -376,6 +423,8 @@ function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJob {
       description: stageDescriptions[key],
       status: stage?.status === 'completed' || stage?.status === 'failed' || stage?.status === 'skipped'
         ? stage.status
+        : stage?.status === 'paused' || stage?.status === 'cancelled'
+          ? stage.status
         : isCurrentStep || stage?.status === 'running'
           ? 'running'
           : 'pending',
@@ -397,6 +446,10 @@ function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJob {
     created_at: job.created_at || new Date().toISOString(),
     completed_at: job.completed_at,
     steps,
+    can_pause: job.can_pause,
+    can_cancel: job.can_cancel,
+    can_resume: job.can_resume,
+    can_retry: job.can_retry,
   }
 }
 
@@ -405,6 +458,7 @@ function StatusSummary({ jobs }: { jobs: AutomationJob[] }) {
   const runningCount = jobs.filter((job) => job.status === 'running').length
   const pausedCount = jobs.filter((job) => job.status === 'paused').length
   const failedCount = jobs.filter((job) => job.status === 'failed').length
+  const cancelledCount = jobs.filter((job) => job.status === 'cancelled').length
 
   return (
     <div className="flex flex-wrap gap-2 text-xs">
@@ -412,6 +466,7 @@ function StatusSummary({ jobs }: { jobs: AutomationJob[] }) {
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-accent">执行中 {runningCount}</span>
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-warning">暂停 {pausedCount}</span>
       <span className="rounded-md border border-border bg-background px-2.5 py-1 text-destructive">失败 {failedCount}</span>
+      <span className="rounded-md border border-border bg-background px-2.5 py-1 text-foreground-muted">已取消 {cancelledCount}</span>
     </div>
   )
 }
@@ -422,6 +477,7 @@ type BatchSummary = {
   running: number
   pending: number
   paused: number
+  cancelled: number
   completed: number
   failed: number
   progress: number
@@ -438,6 +494,7 @@ function collectBatchSummaries(jobs: AutomationJob[]): BatchSummary[] {
       running: 0,
       pending: 0,
       paused: 0,
+      cancelled: 0,
       completed: 0,
       failed: 0,
       progress: 0,
@@ -474,7 +531,7 @@ function BatchSummaryCard({
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">批次 {batch.batchId}</p>
           <p className="mt-1 text-xs text-foreground-muted">
-            共 {batch.total} 个，完成 {batch.completed}，执行 {batch.running}，等待 {batch.pending}，暂停 {batch.paused}
+            共 {batch.total} 个，完成 {batch.completed}，执行 {batch.running}，等待 {batch.pending}，暂停 {batch.paused}，取消 {batch.cancelled}
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -521,15 +578,26 @@ function AutomationJobCard({
   job,
   isRetrying,
   isResuming,
+  controllingAction,
   onRetry,
   onResume,
+  onPause,
+  onCancel,
 }: {
   job: AutomationJob
   isRetrying: boolean
   isResuming: boolean
+  controllingAction: 'pause' | 'cancel' | null
   onRetry: () => void
   onResume: () => void
+  onPause: () => void
+  onCancel: () => void
 }) {
+  const canPause = job.can_pause ?? (job.status === 'pending' || job.status === 'running')
+  const canCancel = job.can_cancel ?? (job.status === 'pending' || job.status === 'running' || job.status === 'paused')
+  const canResume = job.can_resume ?? (job.status === 'paused' || job.status === 'failed' || job.status === 'cancelled' || job.status === 'completed')
+  const canRetry = job.can_retry ?? (job.status === 'failed' || job.status === 'cancelled' || job.status === 'completed')
+
   return (
     <article className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -545,24 +613,44 @@ function AutomationJobCard({
             <div>{formatTime(job.created_at)}</div>
             <div className="mt-1">{job.current_step}</div>
           </div>
-          {(job.status === 'failed' || job.status === 'completed') && (
-            <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            {canPause && (
+              <button
+                onClick={onPause}
+                disabled={controllingAction !== null}
+                className="h-9 min-w-16 rounded-md border border-warning/40 px-3 text-xs text-warning hover:bg-warning/10 disabled:opacity-50"
+              >
+                {controllingAction === 'pause' ? '暂停中...' : '暂停'}
+              </button>
+            )}
+            {canCancel && (
+              <button
+                onClick={onCancel}
+                disabled={controllingAction !== null}
+                className="h-9 min-w-16 rounded-md border border-destructive/40 px-3 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
+              >
+                {controllingAction === 'cancel' ? '取消中...' : '取消'}
+              </button>
+            )}
+            {canResume && (
               <button
                 onClick={onResume}
                 disabled={isResuming}
-                className="h-8 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
+                className="h-9 min-w-16 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
               >
                 {isResuming ? '继续中...' : '继续'}
               </button>
+            )}
+            {canRetry && (
               <button
                 onClick={onRetry}
                 disabled={isRetrying}
-                className="h-8 rounded-md border border-border px-3 text-xs text-foreground hover:bg-white/5 disabled:opacity-50"
+                className="h-9 min-w-16 rounded-md border border-border px-3 text-xs text-foreground hover:bg-white/5 disabled:opacity-50"
               >
                 {isRetrying ? '重试中...' : '重试'}
               </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 
@@ -595,7 +683,7 @@ function AutomationStepItem({ step }: { step: AutomationStep }) {
       </div>
       <p className="mt-1 line-clamp-2 text-[11px] text-foreground-muted">{step.error_message || step.description}</p>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
-        <div className={`h-full rounded-full transition-all duration-300 ${step.status === 'failed' ? 'bg-destructive' : 'bg-accent'}`} style={{ width: `${step.progress}%` }} />
+        <div className={`h-full rounded-full transition-all duration-300 ${progressColor(step.status)}`} style={{ width: `${step.progress}%` }} />
       </div>
     </div>
   )
@@ -614,32 +702,43 @@ function EmptyTaskList() {
 }
 
 /** 任务项 */
-function TaskItem({ task, isDeleting, onDelete }: { task: DownloadTask; isDeleting: boolean; onDelete: () => void }) {
-  const isRunning = task.status === 'processing' || task.status === 'downloading'
+function TaskItem({
+  task,
+  isDeleting,
+  busyAction,
+  onPause,
+  onCancel,
+  onRetry,
+  onDelete,
+}: {
+  task: DownloadTask
+  isDeleting: boolean
+  busyAction: 'pause' | 'cancel' | 'retry' | null
+  onPause: () => void
+  onCancel: () => void
+  onRetry: () => void
+  onDelete: () => void
+}) {
+  const canPause = task.can_pause ?? (task.status === 'pending' || task.status === 'processing' || task.status === 'downloading')
+  const canCancel = task.can_cancel ?? (task.status === 'pending' || task.status === 'processing' || task.status === 'downloading' || task.status === 'paused')
+  const canRetry = task.can_retry ?? (task.status === 'failed' || task.status === 'cancelled' || task.status === 'paused')
+  const canDelete = task.can_delete ?? !(task.status === 'processing' || task.status === 'downloading')
+
   return (
     <div className="rounded-lg border border-border bg-background p-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
+      <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium">{taskTypeText(task.task_type)}</p>
-          <p className="text-xs text-foreground-muted">任务 #{task.id}</p>
+          <p className="mt-1 text-xs text-foreground-muted">任务 #{task.id}</p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="shrink-0">
           <TaskStatus status={task.status} />
-          <button
-            onClick={onDelete}
-            disabled={isDeleting}
-            className="h-7 rounded-md border border-border px-2 text-xs text-foreground-muted hover:border-destructive/40 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
-            title={isRunning ? '强制清理卡住记录' : '删除任务记录'}
-            aria-label={`删除任务 ${task.id}`}
-          >
-            {isDeleting ? '...' : isRunning ? '强制' : '删'}
-          </button>
         </div>
       </div>
 
       <div className="h-1.5 overflow-hidden rounded-full bg-background-elevated">
         <div
-          className={`h-full transition-all duration-300 ${task.status === 'failed' ? 'bg-destructive' : 'bg-accent'}`}
+          className={`h-full transition-all duration-300 ${taskProgressColor(task.status)}`}
           style={{ width: `${Math.min(100, Math.max(0, task.progress || 0))}%` }}
         />
       </div>
@@ -649,6 +748,44 @@ function TaskItem({ task, isDeleting, onDelete }: { task: DownloadTask; isDeleti
         {task.output_path && <span className="max-w-[180px] truncate select-text">{task.output_path}</span>}
       </div>
       {task.error_message && <p className="mt-2 text-xs text-destructive">{task.error_message}</p>}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {canPause && (
+          <button
+            onClick={onPause}
+            disabled={busyAction !== null}
+            className="h-9 min-w-16 rounded-md border border-warning/40 px-3 text-xs text-warning hover:bg-warning/10 disabled:opacity-50"
+          >
+            {busyAction === 'pause' ? '暂停中...' : '暂停'}
+          </button>
+        )}
+        {canCancel && (
+          <button
+            onClick={onCancel}
+            disabled={busyAction !== null}
+            className="h-9 min-w-16 rounded-md border border-destructive/40 px-3 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
+          >
+            {busyAction === 'cancel' ? '取消中...' : '取消'}
+          </button>
+        )}
+        {canRetry && (
+          <button
+            onClick={onRetry}
+            disabled={busyAction !== null}
+            className="h-9 min-w-16 rounded-md border border-accent/40 px-3 text-xs text-accent hover:bg-accent/10 disabled:opacity-50"
+          >
+            {busyAction === 'retry' ? '重试中...' : '重试'}
+          </button>
+        )}
+        {canDelete && (
+          <button
+            onClick={onDelete}
+            disabled={isDeleting}
+            className="h-9 min-w-16 rounded-md border border-border px-3 text-xs text-foreground-muted hover:border-destructive/40 hover:text-destructive disabled:opacity-50"
+          >
+            {isDeleting ? '删除中...' : '删除'}
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -659,6 +796,7 @@ function StatusBadge({ status }: { status: AutomationJob['status'] }) {
     pending: '等待中',
     running: '执行中',
     paused: '已暂停',
+    cancelled: '已取消',
     completed: '已完成',
     failed: '失败',
   }
@@ -666,6 +804,7 @@ function StatusBadge({ status }: { status: AutomationJob['status'] }) {
     pending: 'border-border text-foreground-muted',
     running: 'border-accent/40 text-accent',
     paused: 'border-warning/40 text-warning',
+    cancelled: 'border-border text-foreground-muted',
     completed: 'border-success/40 text-success',
     failed: 'border-destructive/40 text-destructive',
   }
@@ -677,6 +816,8 @@ function StepStatus({ status }: { status: AutomationStep['status'] }) {
   const labels: Record<AutomationStep['status'], string> = {
     pending: '等待',
     running: '进行中',
+    paused: '暂停',
+    cancelled: '取消',
     completed: '完成',
     failed: '失败',
     skipped: '跳过',
@@ -684,6 +825,8 @@ function StepStatus({ status }: { status: AutomationStep['status'] }) {
   const classes: Record<AutomationStep['status'], string> = {
     pending: 'bg-foreground-muted',
     running: 'bg-accent',
+    paused: 'bg-warning',
+    cancelled: 'bg-foreground-muted',
     completed: 'bg-success',
     failed: 'bg-destructive',
     skipped: 'bg-warning',
@@ -702,6 +845,8 @@ function TaskStatus({ status }: { status: DownloadTask['status'] }) {
     pending: '等待中',
     downloading: '下载中',
     processing: '处理中',
+    paused: '已暂停',
+    cancelled: '已取消',
     completed: '已完成',
     failed: '失败',
   }
@@ -709,10 +854,30 @@ function TaskStatus({ status }: { status: DownloadTask['status'] }) {
     pending: 'text-foreground-muted',
     downloading: 'text-accent',
     processing: 'text-warning',
+    paused: 'text-warning',
+    cancelled: 'text-foreground-muted',
     completed: 'text-success',
     failed: 'text-destructive',
   }
   return <span className={`text-xs ${classes[status]}`}>{labels[status]}</span>
+}
+
+/** 自动流程阶段进度颜色 */
+function progressColor(status: AutomationStep['status']) {
+  if (status === 'failed') return 'bg-destructive'
+  if (status === 'paused' || status === 'skipped') return 'bg-warning'
+  if (status === 'cancelled') return 'bg-foreground-muted'
+  if (status === 'completed') return 'bg-success'
+  return 'bg-accent'
+}
+
+/** 底层任务进度颜色 */
+function taskProgressColor(status: DownloadTask['status']) {
+  if (status === 'failed') return 'bg-destructive'
+  if (status === 'paused') return 'bg-warning'
+  if (status === 'cancelled') return 'bg-foreground-muted'
+  if (status === 'completed') return 'bg-success'
+  return 'bg-accent'
 }
 
 /** 任务类型显示文本 */

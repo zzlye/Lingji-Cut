@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ..core import FFmpegProcessor
+from ..core.process_control import TaskControlRequested
 from ..models import get_db, DownloadTask
 
 # 创建路由器
@@ -35,7 +36,7 @@ class ExportResponse(BaseModel):
 
 
 @router.post("/create", response_model=ExportResponse)
-async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
+def create_export(request: ExportRequest, db: Session = Depends(get_db)):
     """创建并执行导出任务"""
     if not request.video_path or not request.video_path.strip():
         raise HTTPException(status_code=400, detail="请先填写输入视频路径")
@@ -65,6 +66,7 @@ async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
             working_video = processor.burn_subtitles(
                 video_path=working_video,
                 subtitle_path=request.subtitle_path,
+                control_keys=[f"task:{task.id}"],
             )
             task.progress = 35
             db.commit()
@@ -75,6 +77,7 @@ async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
                 audio_path=request.audio_path,
                 mode=request.audio_mode,
                 volume_ratio=request.original_volume,
+                control_keys=[f"task:{task.id}"],
             )
             task.progress = 70
             db.commit()
@@ -82,6 +85,7 @@ async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
         output_path = processor.convert_format(
             input_path=working_video,
             output_format=request.output_format,
+            control_keys=[f"task:{task.id}"],
         )
 
         task.status = "completed"
@@ -89,6 +93,11 @@ async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
         task.output_path = output_path
         db.commit()
         return ExportResponse(message="导出完成", task_id=task.id, output_path=output_path)
+    except TaskControlRequested as exc:
+        task.status = "paused" if exc.action == "pause" else "cancelled"
+        task.error_message = "用户暂停，等待继续" if exc.action == "pause" else "用户取消"
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)

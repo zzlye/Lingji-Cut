@@ -61,12 +61,16 @@ export interface DownloadTask {
   id: number
   video_id: number
   task_type: 'download' | 'effects' | 'subtitle' | 'voice' | 'export'
-  status: 'pending' | 'downloading' | 'processing' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'processing' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number
   output_path: string | null
   error_message: string | null
   created_at: string
   completed_at: string | null
+  can_pause?: boolean
+  can_cancel?: boolean
+  can_retry?: boolean
+  can_delete?: boolean
 }
 
 /** 字幕预设 */
@@ -163,7 +167,7 @@ export interface AutomationStep {
   key: 'parse' | 'download' | 'effects' | 'subtitle' | 'voice' | 'export'
   label: string
   description: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed' | 'skipped'
   progress: number
   output_path?: string | null
   error_message?: string | null
@@ -175,13 +179,17 @@ export interface AutomationJob {
   title: string
   source_url: string
   video_id: number | null
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number
   current_step: string
   batch_id: string | null
   created_at: string
   completed_at: string | null
   steps: AutomationStep[]
+  can_pause?: boolean
+  can_cancel?: boolean
+  can_resume?: boolean
+  can_retry?: boolean
 }
 
 /** 后端持久化自动化任务 */
@@ -190,7 +198,7 @@ export interface BackendAutomationJob {
   source_url: string
   video_id: number | null
   title: string | null
-  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number
   current_step: string | null
   output_path: string | null
@@ -200,12 +208,16 @@ export interface BackendAutomationJob {
   subtitle_text: string
   created_at: string | null
   completed_at: string | null
+  can_pause?: boolean
+  can_cancel?: boolean
+  can_resume?: boolean
+  can_retry?: boolean
 }
 
 /** 后端自动化阶段结果 */
 export interface AutomationStageResult {
   key: AutomationStep['key'] | 'pipeline'
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed' | 'skipped'
   progress?: number
   task_id?: number | null
   output_path?: string | null

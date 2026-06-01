@@ -104,7 +104,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         gpu_cmd = [self.processor.ffmpeg_cmd, "-i", self.input_video, "-c:v", "h264_nvenc", "-preset", "p4", "-y", output_path]
         calls: list[list[str]] = []
 
-        def fake_run_ffmpeg(cmd, action_name, timeout=600):
+        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None):
             calls.append(cmd)
             if "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "h264_nvenc":
                 raise RuntimeError(f"{action_name}失败: Cannot load nvcuda.dll")

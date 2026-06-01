@@ -10,6 +10,7 @@ import os
 
 from ..core import Downloader, FFmpegProcessor, SubtitleEngine, TextEngine
 from ..core.paths import ensure_project_dirs
+from ..core.process_control import TaskControlRequested
 from ..models import DownloadTask, SubtitlePreset, TextProviderProfile, VideoSource, get_db
 from ..utils import decrypt_api_key
 
@@ -431,7 +432,7 @@ async def save_corrected_ass(request: SubtitleCorrectionSaveAssRequest, db: Sess
 
 
 @router.post("/render", response_model=SubtitleRenderResponse)
-async def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_db)):
+def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_db)):
     """下载或读取字幕，生成 ASS，并可烧录成硬字幕视频"""
     video = db.query(VideoSource).filter(VideoSource.id == request.video_id).first()
     if not video:
@@ -464,6 +465,7 @@ async def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends
                 language=language,
                 output_dir=paths["output_dir"],
                 sub_type=request.sub_type,
+                control_keys=[f"task:{task.id}"],
             )
         if not subtitle_path or not os.path.exists(subtitle_path):
             raise FileNotFoundError("字幕文件不存在")
@@ -484,6 +486,7 @@ async def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends
                 subtitle_path=ass_path,
                 output_path=request.output_path,
                 preset=preset_dict,
+                control_keys=[f"task:{task.id}"],
             )
 
         plain_text = entries_to_plain_text(entries)
@@ -499,6 +502,11 @@ async def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends
             output_path=output_path,
             plain_text=plain_text,
         )
+    except TaskControlRequested as exc:
+        task.status = "paused" if exc.action == "pause" else "cancelled"
+        task.error_message = "用户暂停，等待继续" if exc.action == "pause" else "用户取消"
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)

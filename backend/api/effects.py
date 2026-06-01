@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..core import FFmpegProcessor
+from ..core.process_control import TaskControlRequested
 from ..models import DownloadTask, ProcessingPreset, get_db
 
 
@@ -269,7 +270,7 @@ async def preview_effects(request: EffectPreviewRequest):
 
 
 @router.post("/apply", response_model=EffectResult)
-async def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_db)):
+def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_db)):
     """执行完整画面处理任务"""
     processor = FFmpegProcessor()
     preset = request.preset.model_dump()
@@ -295,6 +296,7 @@ async def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_d
             preset=preset,
             output_path=request.output_path,
             preview=False,
+            control_keys=[f"task:{task.id}"],
         )
         task.status = "completed"
         task.progress = 100
@@ -306,6 +308,11 @@ async def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_d
             filter_graph=processor.build_effect_filter_graph(preset),
             task_id=task.id,
         )
+    except TaskControlRequested as exc:
+        task.status = "paused" if exc.action == "pause" else "cancelled"
+        task.error_message = "用户暂停，等待继续" if exc.action == "pause" else "用户取消"
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         task.status = "failed"
         task.error_message = str(exc)

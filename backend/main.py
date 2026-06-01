@@ -10,6 +10,7 @@ from .models import init_db
 from .api import automation_router, videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router
 from .api.automation import recover_automation_jobs_on_startup
 from .api.tasks import mark_interrupted_tasks
+from .core.process_control import cleanup_stale_runtime_processes
 from .models import SessionLocal
 
 # 创建 FastAPI 应用实例
@@ -45,6 +46,7 @@ app.include_router(automation_router)
 async def startup():
     """应用启动时初始化数据库，并恢复未完成的一键任务"""
     init_db()
+    cleanup_stale_runtime_processes()
     db = SessionLocal()
     try:
         mark_interrupted_tasks(db)

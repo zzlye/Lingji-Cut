@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, TextEngine, VoiceEngine
 from ..core.paths import ensure_project_dirs
+from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
+from ..core.task_runtime import mark_job_child_tasks_controlled, request_job_control
 from ..core.tooling import assert_required_tools_available
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
 from ..utils import decrypt_api_key
@@ -35,6 +37,8 @@ BATCH_PAUSED: set[str] = set()
 BATCH_SEMAPHORE_LOCK = Lock()
 SCHEDULED_AUTOMATION_JOBS: set[str] = set()
 SCHEDULED_JOB_LOCK = Lock()
+CANCELLED_STATUS = "cancelled"
+TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -49,6 +53,37 @@ STAGE_WEIGHTS = {
 
 class BannedWordsDetected(RuntimeError):
     """禁词命中异常，用于区分普通字幕失败和策略拦截"""
+
+
+def _job_control_key(job_id: str) -> str:
+    """生成自动化任务控制 key"""
+    return f"job:{job_id}"
+
+
+def _task_control_key(task_id: int) -> str:
+    """生成底层任务控制 key"""
+    return f"task:{task_id}"
+
+
+def _control_keys(job: Optional[AutomationJobRecord] = None, task: Optional[DownloadTask] = None) -> list[str]:
+    """生成当前阶段使用的控制 key 列表"""
+    keys: list[str] = []
+    if job:
+        keys.append(_job_control_key(job.id))
+    if task and task.id:
+        keys.append(_task_control_key(task.id))
+    return keys
+
+
+def _check_control(db: Session, job: Optional[AutomationJobRecord] = None, task: Optional[DownloadTask] = None) -> None:
+    """阶段边界检查暂停/取消请求"""
+    if job:
+        db.refresh(job)
+        if job.status == "paused":
+            raise TaskControlRequested("pause")
+        if job.status == CANCELLED_STATUS:
+            raise TaskControlRequested("cancel")
+    raise_if_control_requested(_control_keys(job, task))
 
 
 class AutomationRunRequest(BaseModel):
@@ -98,6 +133,10 @@ class AutomationJobResponse(BaseModel):
     output_path: Optional[str] = None
     error_message: Optional[str] = None
     batch_id: Optional[str] = None
+    can_pause: bool = False
+    can_cancel: bool = False
+    can_resume: bool = False
+    can_retry: bool = False
     stages: list[AutomationStageResult] = Field(default_factory=list)
     subtitle_text: str = ""
     created_at: Optional[datetime] = None
@@ -227,17 +266,21 @@ def _update_job_stage(
 
 def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
     """把数据库自动化任务转换成 API 响应"""
-    stages = [
-        AutomationStageResult(
+    stages: list[AutomationStageResult] = []
+    for stage in _load_job_stages(job):
+        status = str(stage.get("status"))
+        error_message = stage.get("error_message")
+        if job.status == CANCELLED_STATUS and status in {"pending", "running", "paused"}:
+            status = CANCELLED_STATUS
+            error_message = error_message or "任务已取消"
+        stages.append(AutomationStageResult(
             key=str(stage.get("key")),
-            status=str(stage.get("status")),
+            status=status,
             progress=float(stage.get("progress") or 0),
             task_id=stage.get("task_id"),
             output_path=stage.get("output_path"),
-            error_message=stage.get("error_message"),
-        )
-        for stage in _load_job_stages(job)
-    ]
+            error_message=error_message,
+        ))
     return AutomationJobResponse(
         id=job.id,
         source_url=job.source_url,
@@ -249,6 +292,10 @@ def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
         output_path=job.output_path,
         error_message=job.error_message,
         batch_id=_get_batch_id_from_job(job),
+        can_pause=job.status in {"pending", "running"},
+        can_cancel=job.status in {"pending", "running", "paused"},
+        can_resume=job.status in {"paused", "failed", CANCELLED_STATUS, "completed"},
+        can_retry=job.status in {"failed", CANCELLED_STATUS, "completed"},
         stages=stages,
         subtitle_text=job.subtitle_text or "",
         created_at=job.created_at,
@@ -293,11 +340,34 @@ def _complete_task(db: Session, task: DownloadTask, output_path: Optional[str] =
     db.commit()
 
 
+def _pause_task(db: Session, task: DownloadTask) -> None:
+    """标记底层任务暂停"""
+    task.status = "paused"
+    task.error_message = "用户暂停，等待继续"
+    db.commit()
+
+
+def _cancel_task(db: Session, task: DownloadTask) -> None:
+    """标记底层任务取消"""
+    task.status = CANCELLED_STATUS
+    task.error_message = "用户取消"
+    task.completed_at = datetime.now()
+    db.commit()
+
+
 def _fail_task(db: Session, task: DownloadTask, error: Exception) -> None:
     """标记任务失败并保存错误"""
     task.status = "failed"
     task.error_message = str(error)
     db.commit()
+
+
+def _handle_task_control(db: Session, task: DownloadTask, exc: TaskControlRequested) -> None:
+    """根据用户控制动作更新底层任务状态"""
+    if exc.action == "pause":
+        _pause_task(db, task)
+    else:
+        _cancel_task(db, task)
 
 
 def _create_task(db: Session, video_id: int, task_type: str, params: Optional[dict[str, Any]] = None, parent_job_id: Optional[str] = None) -> DownloadTask:
@@ -617,6 +687,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     warning_messages: list[str] = []
 
     video = _parse_or_update_video(db, request.url, downloader)
+    _check_control(db, job)
     stages.append(AutomationStageResult(key="parse", status="completed"))
     if job:
         job.video_id = video.id
@@ -642,16 +713,22 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "download", "running", progress=progress, task_id=download_task.id)
 
         try:
+            _check_control(db, job, download_task)
             downloaded_path = downloader.download_video(
                 url=video.url,
                 format_id=request.format_id,
                 output_format="mp4",
                 progress_callback=on_progress,
+                control_keys=_control_keys(job, download_task),
             )
+            _check_control(db, job, download_task)
             _complete_task(db, download_task, downloaded_path)
             stages.append(AutomationStageResult(key="download", status="completed", task_id=download_task.id, output_path=downloaded_path))
             if job:
                 _update_job_stage(db, job, "download", "completed", task_id=download_task.id, output_path=downloaded_path)
+        except TaskControlRequested as exc:
+            _handle_task_control(db, download_task, exc)
+            raise
         except Exception as exc:
             _fail_task(db, download_task, exc)
             if job:
@@ -668,14 +745,20 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         if job:
             _update_job_stage(db, job, "effects", "running", progress=15, task_id=effects_task.id)
         try:
+            _check_control(db, job, effects_task)
             effects_path = processor.apply_effects(
                 video_path=downloaded_path,
                 preset=request.processing_preset,
+                control_keys=_control_keys(job, effects_task),
             )
+            _check_control(db, job, effects_task)
             _complete_task(db, effects_task, effects_path)
             stages.append(AutomationStageResult(key="effects", status="completed", task_id=effects_task.id, output_path=effects_path))
             if job:
                 _update_job_stage(db, job, "effects", "completed", task_id=effects_task.id, output_path=effects_path)
+        except TaskControlRequested as exc:
+            _handle_task_control(db, effects_task, exc)
+            raise
         except Exception as exc:
             _fail_task(db, effects_task, exc)
             if job:
@@ -695,6 +778,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         if job:
             _update_job_stage(db, job, "subtitle", "running", progress=10, task_id=subtitle_task.id)
         try:
+            _check_control(db, job, subtitle_task)
             preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
             track = _pick_subtitle_track(video, request.subtitle_language or (preset.language if preset else None))
             if not track and not preset:
@@ -716,7 +800,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     language=language,
                     output_dir=paths["output_dir"],
                     sub_type=(track or {}).get("type", "auto"),
+                    control_keys=_control_keys(job, subtitle_task),
                 )
+                _check_control(db, job, subtitle_task)
                 if job:
                     _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
                 engine = SubtitleEngine()
@@ -736,6 +822,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
 
                         def on_text_progress(progress: float) -> None:
                             """同步文本 API 批处理进度到字幕阶段"""
+                            _check_control(db, job, subtitle_task)
                             subtitle_task.progress = 35 + progress * 0.3
                             db.commit()
                             if job:
@@ -756,6 +843,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             if processed_entries:
                                 entries = processed_entries
                                 subtitle_text = entries_to_plain_text(entries)
+                        except TaskControlRequested:
+                            raise
                         except Exception:
                             processed_text = asyncio.run(text_engine.process_text(
                                 text=subtitle_text,
@@ -771,6 +860,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             if processed_entries:
                                 entries = processed_entries
                                 subtitle_text = processed_text
+                    except TaskControlRequested:
+                        raise
                     except Exception:
                         # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
                         pass
@@ -794,7 +885,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         video_path=effects_path,
                         subtitle_path=subtitle_ass_path,
                         preset=preset_dict,
+                        control_keys=_control_keys(job, subtitle_task),
                     )
+                _check_control(db, job, subtitle_task)
                 _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
                 if warning_messages:
                     subtitle_task.error_message = "；".join(warning_messages)
@@ -802,6 +895,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
                 if job:
                     _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path, error_message="；".join(warning_messages) if warning_messages else None)
+        except TaskControlRequested as exc:
+            _handle_task_control(db, subtitle_task, exc)
+            raise
         except Exception as exc:
             _fail_task(db, subtitle_task, exc)
             if isinstance(exc, BannedWordsDetected):
@@ -823,6 +919,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         if job:
             _update_job_stage(db, job, "voice", "running", progress=15, task_id=voice_task.id)
         try:
+            _check_control(db, job, voice_task)
             settings = _load_profile_settings(voice_profile)
             voice = settings.get("voice") or voice_profile.voice or "alloy"
             voice_text = (request.voice_text or subtitle_text or _fallback_voice_text(video)).strip()
@@ -842,6 +939,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
 
                     def on_voice_progress(progress: float) -> None:
                         """同步分段配音进度到后台任务"""
+                        _check_control(db, job, voice_task)
                         voice_task.progress = progress
                         db.commit()
                         if job:
@@ -859,6 +957,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         settings=settings,
                         progress_callback=on_voice_progress,
                     ))
+                    _check_control(db, job, voice_task)
+                except TaskControlRequested:
+                    raise
                 except Exception as segmented_exc:
                     if job:
                         _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"分段配音失败，回退整段配音: {segmented_exc}")
@@ -873,6 +974,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         model=model,
                         settings=settings,
                     ))
+                    _check_control(db, job, voice_task)
             else:
                 audio_path = asyncio.run(voice_engine.generate_voice(
                     text=voice_text,
@@ -884,10 +986,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     model=model,
                     settings=settings,
                 ))
+                _check_control(db, job, voice_task)
             _complete_task(db, voice_task, audio_path)
             stages.append(AutomationStageResult(key="voice", status="completed", task_id=voice_task.id, output_path=audio_path))
             if job:
                 _update_job_stage(db, job, "voice", "completed", task_id=voice_task.id, output_path=audio_path)
+        except TaskControlRequested as exc:
+            _handle_task_control(db, voice_task, exc)
+            raise
         except Exception as exc:
             _fail_task(db, voice_task, exc)
             if isinstance(exc, BannedWordsDetected):
@@ -907,12 +1013,15 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     if job:
         _update_job_stage(db, job, "export", "running", progress=15, task_id=export_task.id)
     try:
+        _check_control(db, job, export_task)
         working_video = video_for_export
         if subtitle_ass_path and not request.burn_subtitles:
             working_video = processor.burn_subtitles(
                 video_path=working_video,
                 subtitle_path=subtitle_ass_path,
+                control_keys=_control_keys(job, export_task),
             )
+            _check_control(db, job, export_task)
             export_task.progress = 35
             db.commit()
             if job:
@@ -923,7 +1032,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 audio_path=audio_path,
                 mode=request.audio_mode,
                 volume_ratio=request.original_volume,
+                control_keys=_control_keys(job, export_task),
             )
+            _check_control(db, job, export_task)
             export_task.progress = 70
             db.commit()
             if job:
@@ -931,7 +1042,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         output_path = processor.convert_format(
             input_path=working_video,
             output_format=request.output_format,
+            control_keys=_control_keys(job, export_task),
         )
+        _check_control(db, job, export_task)
         _complete_task(db, export_task, output_path)
         stages.append(AutomationStageResult(key="export", status="completed", task_id=export_task.id, output_path=output_path))
         if job:
@@ -942,6 +1055,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path)
             job.progress = 100
             db.commit()
+    except TaskControlRequested as exc:
+        _handle_task_control(db, export_task, exc)
+        raise
     except Exception as exc:
         _fail_task(db, export_task, exc)
         if job:
@@ -966,15 +1082,23 @@ def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> No
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if not job:
             return
-        if job.status == "paused":
-            job.status = "pending"
+        if job.status in {"paused", CANCELLED_STATUS}:
+            return
         job.status = "running"
         job.current_step = "准备自动处理"
+        clear_control_request(_job_control_key(job.id))
         db.commit()
 
         params = json.loads(job.params or "{}")
         request = AutomationRunRequest(**params)
         _run_automation_sync(request, db, job, resume_from_checkpoint=resume_from_checkpoint)
+    except TaskControlRequested as exc:
+        job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+        if job:
+            if exc.action == "pause":
+                _pause_running_job(db, job)
+            else:
+                _cancel_job(db, job)
     except Exception as exc:
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if job:
@@ -997,13 +1121,14 @@ def _reset_job_for_retry(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(_default_stages(), ensure_ascii=False)
+    clear_control_request(_job_control_key(job.id))
 
 
 def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     """准备断点续跑，保留已完成阶段并清理失败阶段"""
     stages = _load_job_stages(job)
     for stage in stages:
-        if stage.get("status") in {"running", "failed"}:
+        if stage.get("status") in {"running", "failed", "paused", CANCELLED_STATUS}:
             stage["status"] = "pending"
             stage["progress"] = 0
             stage["task_id"] = None
@@ -1017,13 +1142,14 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(stages, ensure_ascii=False)
+    clear_control_request(_job_control_key(job.id))
 
 
 def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
     """后端重启后恢复中断任务，尽量从已完成阶段后继续"""
     stages = _load_job_stages(job)
     for stage in stages:
-        if stage.get("status") in {"running", "failed"}:
+        if stage.get("status") in {"running", "failed", "paused", CANCELLED_STATUS}:
             stage["status"] = "pending"
             stage["progress"] = 0
             stage["task_id"] = None
@@ -1036,6 +1162,42 @@ def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(stages, ensure_ascii=False)
+
+
+def _pause_running_job(db: Session, job: AutomationJobRecord, message: str = "用户暂停，等待继续") -> None:
+    """把正在运行的一键流程标记为暂停"""
+    mark_job_child_tasks_controlled(db, job, "paused", message)
+    stages = _load_job_stages(job)
+    for stage in stages:
+        if stage.get("status") in {"running", "pending"}:
+            was_running = stage.get("status") == "running"
+            stage["status"] = "paused" if was_running else "pending"
+            if was_running:
+                stage["error_message"] = message
+            break
+    job.status = "paused"
+    job.current_step = "已暂停"
+    job.error_message = message
+    job.stages = json.dumps(stages, ensure_ascii=False)
+    job.progress = _calculate_job_progress(stages)
+    db.commit()
+
+
+def _cancel_job(db: Session, job: AutomationJobRecord, message: str = "用户取消") -> None:
+    """把一键流程标记为取消"""
+    mark_job_child_tasks_controlled(db, job, CANCELLED_STATUS, message)
+    stages = _load_job_stages(job)
+    for stage in stages:
+        if stage.get("status") in {"running", "pending", "paused"}:
+            stage["status"] = CANCELLED_STATUS
+            stage["error_message"] = message
+    job.status = CANCELLED_STATUS
+    job.current_step = "已取消"
+    job.error_message = message
+    job.completed_at = datetime.now()
+    job.stages = json.dumps(stages, ensure_ascii=False)
+    job.progress = _calculate_job_progress(stages)
+    db.commit()
 
 
 def _create_automation_job(db: Session, request: AutomationRunRequest, batch_id: Optional[str] = None, batch_concurrency: Optional[int] = None, title: str = "一键自动流程") -> AutomationJobRecord:
@@ -1106,11 +1268,14 @@ def _pause_batch_jobs(db: Session, batch_id: str) -> int:
     jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.asc()).all()
     for job in jobs:
         params = _get_job_params(job)
-        if params.get("batch_id") != batch_id or job.status in {"completed", "failed"}:
+        if params.get("batch_id") != batch_id or job.status in TERMINAL_STATUSES:
             continue
         params["batch_paused"] = True
         _set_job_params(job, params)
-        if job.status == "pending":
+        if job.status == "running":
+            request_job_control(db, job, "pause")
+            _pause_running_job(db, job, "批次暂停，等待恢复")
+        elif job.status == "pending":
             job.status = "paused"
             job.current_step = "批次暂停"
         affected += 1
@@ -1266,18 +1431,22 @@ def recover_automation_jobs_on_startup() -> dict[str, int]:
 
         submitted = 0
         paused = 0
+        interrupted = 0
         for job in jobs:
             if job.status == "paused":
                 paused += 1
                 continue
             if job.status == "running":
-                _prepare_interrupted_job_for_startup(job)
+                request_job_control(db, job, "cancel")
+                _cancel_job(db, job, "后端重启前任务已中断，请点击继续重新执行")
+                interrupted += 1
+                continue
             elif job.status == "pending":
                 job.current_step = job.current_step or "等待恢复"
             submitted += 1
             _submit_automation_job(job.id, True)
         db.commit()
-        return {"submitted": submitted, "paused": paused}
+        return {"submitted": submitted, "paused": paused, "interrupted": interrupted}
     finally:
         db.close()
 
@@ -1382,8 +1551,8 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
     job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="自动化任务不存在")
-    if job.status not in {"failed", "completed"}:
-        raise HTTPException(status_code=400, detail="只有失败或已完成的自动化任务可以重试")
+    if job.status not in {"failed", CANCELLED_STATUS, "completed"}:
+        raise HTTPException(status_code=400, detail="只有失败、已取消或已完成的自动化任务可以重试")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
 
@@ -1404,8 +1573,8 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
     job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="自动化任务不存在")
-    if job.status not in {"failed", "completed"}:
-        raise HTTPException(status_code=400, detail="只有失败或已完成的自动化任务可以继续处理")
+    if job.status not in {"paused", "failed", CANCELLED_STATUS, "completed"}:
+        raise HTTPException(status_code=400, detail="只有暂停、失败、已取消或已完成的自动化任务可以继续处理")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
 
@@ -1418,6 +1587,32 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
     db.commit()
     _submit_automation_job(job_id, True)
     return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/pause", response_model=AutomationStartResponse)
+def pause_automation_job(job_id: str, db: Session = Depends(get_db)):
+    """暂停单个一键自动化任务，并终止当前正在跑的外部进程"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status not in {"pending", "running"}:
+        raise HTTPException(status_code=400, detail="只有等待中或执行中的自动化任务可以暂停")
+    killed_count = request_job_control(db, job, "pause")
+    _pause_running_job(db, job)
+    return AutomationStartResponse(message=f"自动化任务已暂停，已停止 {killed_count} 个运行进程", job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=AutomationStartResponse)
+def cancel_automation_job(job_id: str, db: Session = Depends(get_db)):
+    """取消单个一键自动化任务，并终止当前正在跑的外部进程"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status in TERMINAL_STATUSES or job.status == "completed":
+        raise HTTPException(status_code=400, detail="任务已经结束，不能重复取消")
+    killed_count = request_job_control(db, job, "cancel")
+    _cancel_job(db, job)
+    return AutomationStartResponse(message=f"自动化任务已取消，已停止 {killed_count} 个运行进程", job_id=job_id)
 
 
 @router.post("/batch/{batch_id}/pause", response_model=AutomationBatchControlResponse)
@@ -1469,7 +1664,7 @@ async def stream_automation_job_events(job_id: str, request: Request):
                 if payload != last_payload:
                     yield f"event: job\ndata: {payload}\n\n"
                     last_payload = payload
-                if job.status in {"completed", "failed"}:
+                if job.status in {"completed", "failed", CANCELLED_STATUS, "paused"}:
                     break
             finally:
                 db.close()

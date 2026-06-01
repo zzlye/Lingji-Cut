@@ -19,7 +19,7 @@ class AutomationJobRecord(Base):
     source_url = Column(Text, nullable=False)
     # 视频标题或任务标题
     title = Column(String(500), nullable=True)
-    # 总体状态：pending、running、completed、failed
+    # 总体状态：pending、running、paused、cancelled、completed、failed
     status = Column(String(50), nullable=False, default="pending")
     # 总体进度 0-100
     progress = Column(Float, default=0.0)

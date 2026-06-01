@@ -8,6 +8,7 @@ import subprocess
 from typing import Optional, Callable
 from ..utils import get_logger
 from .paths import ensure_project_dirs
+from .process_control import TaskControlRequested, normalize_control_keys, raise_if_control_requested, register_process, subprocess_creation_flags, terminate_process, unregister_process
 from .tooling import get_ffmpeg_command, get_yt_dlp_command
 
 # 日志记录器
@@ -147,7 +148,8 @@ class Downloader:
         output_dir: Optional[str] = None,
         format_id: Optional[str] = None,
         output_format: str = "mp4",
-        progress_callback: Optional[Callable[[float, str], None]] = None
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """
         下载视频
@@ -185,7 +187,10 @@ class Downloader:
 
         logger.info(f"开始下载: {url}")
 
+        control_keys = normalize_control_keys(control_keys)
+        process = None
         try:
+            raise_if_control_requested(control_keys)
             # 执行下载命令
             process = subprocess.Popen(
                 cmd,
@@ -194,12 +199,15 @@ class Downloader:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                bufsize=1
+                bufsize=1,
+                creationflags=subprocess_creation_flags(),
             )
+            register_process(control_keys, process, cmd)
 
             # 读取输出并解析进度
             output_file = None
             for line in process.stdout:
+                raise_if_control_requested(control_keys)
                 line = line.strip()
                 if not line:
                     continue
@@ -220,7 +228,7 @@ class Downloader:
                     output_file = re.search(r'\[download\] (.+) has already been downloaded', line).group(1)
 
             process.wait()
-
+            raise_if_control_requested(control_keys)
             if process.returncode != 0:
                 raise RuntimeError(f"下载失败，退出码: {process.returncode}")
 
@@ -240,15 +248,22 @@ class Downloader:
                 raise RuntimeError("下载完成但未找到输出文件")
 
         except subprocess.TimeoutExpired:
-            process.kill()
+            if process:
+                terminate_process(process)
             raise RuntimeError("下载超时")
+        except TaskControlRequested:
+            raise
+        finally:
+            if process:
+                unregister_process(process)
 
     def download_subtitle(
         self,
         url: str,
         language: str = "en",
         output_dir: Optional[str] = None,
-        sub_type: str = "original"
+        sub_type: str = "original",
+        control_keys: Optional[list[str]] = None,
     ) -> str:
         """下载字幕文件"""
         if output_dir is None:
@@ -277,18 +292,25 @@ class Downloader:
 
         logger.info(f"下载字幕: {url} (语言: {language})")
 
+        control_keys = normalize_control_keys(control_keys)
+        process = None
         try:
-            result = subprocess.run(
+            raise_if_control_requested(control_keys)
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60
+                creationflags=subprocess_creation_flags(),
             )
+            register_process(control_keys, process, cmd)
+            stdout, stderr = process.communicate(timeout=300)
+            raise_if_control_requested(control_keys)
 
-            if result.returncode != 0:
-                raise RuntimeError(f"字幕下载失败: {result.stderr}")
+            if process.returncode != 0:
+                raise RuntimeError(f"字幕下载失败: {stderr or stdout}")
 
             # 查找下载的字幕文件
             files = sorted(
@@ -305,4 +327,11 @@ class Downloader:
             raise RuntimeError("字幕下载完成但未找到文件")
 
         except subprocess.TimeoutExpired:
+            if process:
+                terminate_process(process)
             raise RuntimeError("字幕下载超时")
+        except TaskControlRequested:
+            raise
+        finally:
+            if process:
+                unregister_process(process)
