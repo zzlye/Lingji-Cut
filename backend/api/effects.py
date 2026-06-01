@@ -28,7 +28,7 @@ class RandomRange(BaseModel):
 
 class AdjustmentConfig(BaseModel):
     """画面基础调整配置"""
-    enabled: bool = True
+    enabled: bool = False
     brightness: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=0.0, max=0.1))
     contrast: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.0, max=1.2))
     saturation: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.0, max=1.1))
@@ -77,9 +77,9 @@ class BitrateConfig(BaseModel):
     """码率与清晰度配置"""
     enabled: bool = True
     mode: Literal["fixed", "multiplier"] = "fixed"
-    fixed_kbps: RandomRange = Field(default_factory=lambda: RandomRange(random=False, value=3000, min=3000, max=3000))
+    fixed_kbps: RandomRange = Field(default_factory=lambda: RandomRange(random=False, value=2200, min=2200, max=2200))
     multiplier: RandomRange = Field(default_factory=lambda: RandomRange(random=True, min=1.05, max=1.95))
-    quality_mode: Literal["balanced", "quality", "size"] = "balanced"
+    quality_mode: Literal["balanced", "quality", "size"] = "size"
 
 
 class AccelerationConfig(BaseModel):
@@ -163,6 +163,7 @@ def _default_presets() -> list[ProcessingPresetCreate]:
         intensity="light",
         config=ProcessingConfig(
             adjustments=AdjustmentConfig(
+                enabled=True,
                 brightness=RandomRange(random=True, min=0.0, max=0.04),
                 contrast=RandomRange(random=True, min=1.0, max=1.08),
                 saturation=RandomRange(random=True, min=1.0, max=1.06),
@@ -178,6 +179,7 @@ def _default_presets() -> list[ProcessingPresetCreate]:
         intensity="strong",
         config=ProcessingConfig(
             adjustments=AdjustmentConfig(
+                enabled=True,
                 brightness=RandomRange(random=True, min=0.02, max=0.12),
                 contrast=RandomRange(random=True, min=1.08, max=1.25),
                 saturation=RandomRange(random=True, min=1.08, max=1.22),

@@ -175,8 +175,8 @@ class Downloader:
         if format_id:
             cmd.extend(["-f", format_id])
         else:
-            # 默认选择最佳质量
-            cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"])
+            # 默认只下载 1080p 以内的源，避免后续画面处理先解码 2K/4K 再降采样。
+            cmd.extend(["-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best"])
 
         # 添加 ffmpeg 路径，确保指定格式和默认格式都能使用本地合并工具。
         ffmpeg_command = get_ffmpeg_command()

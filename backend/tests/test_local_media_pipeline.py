@@ -172,11 +172,28 @@ class LocalMediaPipelineTest(unittest.TestCase):
         filter_graph = self.processor.build_effect_filter_graph(preset)
 
         self.assertIn("scale=1920:1080", filter_graph)
+        self.assertIn("flags=fast_bilinear", filter_graph)
+        self.assertNotIn("eq=", filter_graph)
         self.assertNotIn("unsharp", filter_graph)
         self.assertNotIn("hqdn3d", filter_graph)
         self.assertNotIn("rotate=", filter_graph)
         self.assertNotIn("fps=", filter_graph)
+        self.assertEqual(preset["bitrate"]["fixed_kbps"]["value"], 2200)
+        self.assertEqual(preset["bitrate"]["quality_mode"], "size")
         self.assertEqual(preset["acceleration"]["quality"], "size")
+
+    def test_nvenc_speed_quality_uses_low_latency_single_pass_args(self):
+        """速度优先的 NVENC 参数减少额外编码开销"""
+        args = self.processor._video_encoder_args(
+            {"acceleration": {"enabled": True, "mode": "nvidia", "quality": "size"}},
+            for_subtitles=False,
+            encoder="h264_nvenc",
+        )
+
+        self.assertIn("p1", args)
+        self.assertIn("ull", args)
+        self.assertIn("disabled", args)
+        self.assertIn("0", args)
 
     def test_effects_reports_progress_during_ffmpeg_run(self):
         """画面处理会从 ffmpeg 进度输出同步百分比"""

@@ -18,14 +18,14 @@ const range = (min: number, max: number, value: number | null = null, random = t
 /** 自动化参数本地缓存键 */
 export const AUTOMATION_CONFIG_STORAGE_KEY = 'youtube-video-processor:auto-config'
 
-/** 画面处理配置版本，用于把旧的重 CPU 默认参数迁移成快速方案 */
-const PROCESSING_CONFIG_VERSION = 2
+/** 画面处理配置版本，用于把旧的重 CPU 默认参数迁移成极速 1080p 方案 */
+const PROCESSING_CONFIG_VERSION = 3
 
 /** 默认画面处理配置 */
 export const createDefaultProcessingConfig = (): ProcessingConfig => ({
   version: PROCESSING_CONFIG_VERSION,
   adjustments: {
-    enabled: true,
+    enabled: false,
     brightness: range(0, 0.1),
     contrast: range(1, 1.2),
     saturation: range(1, 1.1),
@@ -66,9 +66,9 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
   bitrate: {
     enabled: true,
     mode: 'fixed',
-    fixed_kbps: range(3000, 3000, 3000, false),
+    fixed_kbps: range(2200, 2200, 2200, false),
     multiplier: range(1.05, 1.95),
-    quality_mode: 'balanced',
+    quality_mode: 'size',
   },
   acceleration: {
     enabled: true,
@@ -80,6 +80,7 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
 /** 轻度处理模板 */
 function createLightProcessingConfig(): ProcessingConfig {
   const config = createDefaultProcessingConfig()
+  config.adjustments.enabled = true
   config.adjustments.brightness = range(0, 0.04)
   config.adjustments.contrast = range(1, 1.08)
   config.adjustments.saturation = range(1, 1.06)
@@ -94,6 +95,7 @@ function createLightProcessingConfig(): ProcessingConfig {
 /** 强处理模板 */
 function createStrongProcessingConfig(): ProcessingConfig {
   const config = createDefaultProcessingConfig()
+  config.adjustments.enabled = true
   config.adjustments.brightness = range(0.02, 0.12)
   config.adjustments.contrast = range(1.08, 1.25)
   config.adjustments.saturation = range(1.08, 1.22)
@@ -109,6 +111,7 @@ function createStrongProcessingConfig(): ProcessingConfig {
 /** 清晰优先模板 */
 function createQualityProcessingConfig(): ProcessingConfig {
   const config = createDefaultProcessingConfig()
+  config.adjustments.enabled = true
   config.canvas.resolution = '1080p'
   config.canvas.mode = 'keep'
   config.adjustments.sharpness = range(0.8, 1.2)
@@ -123,7 +126,7 @@ function createQualityProcessingConfig(): ProcessingConfig {
 /** 快速处理模板 */
 const QUICK_TEMPLATES = [
   { id: 'light', name: '轻度', description: '低干扰，保留原片观感', factory: createLightProcessingConfig },
-  { id: 'standard', name: '标准', description: '适合默认一键流程', factory: createDefaultProcessingConfig },
+  { id: 'standard', name: '极速', description: '速度优先，仍输出 1080p', factory: createDefaultProcessingConfig },
   { id: 'strong', name: '强处理', description: '画面差异更明显', factory: createStrongProcessingConfig },
   { id: 'quality', name: '清晰优先', description: '1080p 和较高码率', factory: createQualityProcessingConfig },
 ]
@@ -161,6 +164,7 @@ function normalizeProcessingConfig(value: ProcessingConfig): ProcessingConfig {
     adjustments: {
       ...next.adjustments,
       ...(value.adjustments || {}),
+      enabled: false,
       sharpness: next.adjustments.sharpness,
       denoise: next.adjustments.denoise,
     },
@@ -181,6 +185,7 @@ function normalizeProcessingConfig(value: ProcessingConfig): ProcessingConfig {
       ...(value.bitrate || {}),
       mode: 'fixed',
       fixed_kbps: next.bitrate.fixed_kbps,
+      quality_mode: 'size',
     },
     timing: {
       ...next.timing,

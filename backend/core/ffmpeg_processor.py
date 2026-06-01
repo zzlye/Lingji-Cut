@@ -25,6 +25,7 @@ GPU_ENCODER_LABELS = {
     "h264_qsv": "Intel QSV",
     "h264_amf": "AMD AMF",
 }
+FAST_SCALE_FLAGS = "flags=fast_bilinear"
 VIDEO_ENCODER_OPTION_FLAGS = {
     "-c:v",
     "-preset",
@@ -36,6 +37,13 @@ VIDEO_ENCODER_OPTION_FLAGS = {
     "-qp_i",
     "-qp_p",
     "-rc",
+    "-tune",
+    "-multipass",
+    "-bf",
+    "-rc-lookahead",
+    "-spatial-aq",
+    "-temporal-aq",
+    "-zerolatency",
 }
 
 
@@ -246,24 +254,25 @@ class FFmpegProcessor:
         if canvas.get("enabled", True):
             target_width, target_height = self._target_size(canvas)
             mode = canvas.get("mode", "keep")
+            scale_args = self._scale_args(canvas)
             if target_width and target_height:
                 if mode == "stretch":
-                    filters.append(f"scale={target_width}:{target_height}")
+                    filters.append(f"scale={target_width}:{target_height}:{scale_args}")
                 elif mode == "crop":
                     filters.append(
-                        f"scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                        f"scale={target_width}:{target_height}:{scale_args}:force_original_aspect_ratio=increase,"
                         f"crop={target_width}:{target_height}"
                     )
                 elif mode == "blur_background":
                     filters.append(
-                        f"split[fg][bg];[bg]scale={target_width}:{target_height}:force_original_aspect_ratio=increase,"
+                        f"split[fg][bg];[bg]scale={target_width}:{target_height}:{scale_args}:force_original_aspect_ratio=increase,"
                         f"crop={target_width}:{target_height},boxblur=20:2[bg];"
-                        f"[fg]scale={target_width}:{target_height}:force_original_aspect_ratio=decrease[fg];"
+                        f"[fg]scale={target_width}:{target_height}:{scale_args}:force_original_aspect_ratio=decrease[fg];"
                         f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                     )
                 else:
                     filters.append(
-                        f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                        f"scale={target_width}:{target_height}:{scale_args}:force_original_aspect_ratio=decrease,"
                         f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
                     )
 
@@ -793,6 +802,10 @@ class FFmpegProcessor:
             return int(canvas.get("width") or 1280), int(canvas.get("height") or 720)
         return None, None
 
+    def _scale_args(self, canvas: dict[str, Any]) -> str:
+        """生成缩放参数，默认用最快算法换取更快的 1080p 输出"""
+        return str(canvas.get("scale_flags") or FAST_SCALE_FLAGS)
+
     def _resolve_bitrate(self, preset: dict[str, Any]) -> Optional[str]:
         """解析码率配置"""
         bitrate = preset.get("bitrate", {})
@@ -847,7 +860,7 @@ class FFmpegProcessor:
         cq_value = "20" if quality == "quality" else "28" if quality == "size" else "24"
         args = ["-c:v", encoder, "-pix_fmt", "yuv420p"]
         if encoder == "h264_nvenc":
-            args.extend(["-preset", nvenc_preset, "-rc", "vbr", "-cq", cq_value])
+            args.extend(["-preset", nvenc_preset, "-tune", "ull", "-rc", "vbr", "-cq", cq_value, "-multipass", "disabled", "-bf", "0", "-rc-lookahead", "0", "-spatial-aq", "0", "-temporal-aq", "0", "-zerolatency", "1"])
         elif encoder == "h264_qsv":
             args.extend(["-global_quality", cq_value])
         elif encoder == "h264_amf":

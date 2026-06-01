@@ -109,9 +109,11 @@ class ToolingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = os.path.join(temp_dir, "中文视频.mp4")
             open(output_path, "wb").close()
+            captured_cmd: list[str] = []
 
-            def fake_popen(*_, **kwargs):
+            def fake_popen(cmd, **kwargs):
                 """断言子进程输出使用容错解码"""
+                captured_cmd.extend(cmd)
                 self.assertEqual(kwargs.get("encoding"), "utf-8")
                 self.assertEqual(kwargs.get("errors"), "replace")
                 return FakeBinaryOutputProcess(output_path)
@@ -126,6 +128,7 @@ class ToolingTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, output_path)
+        self.assertIn("bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best", captured_cmd)
 
 
 if __name__ == "__main__":
