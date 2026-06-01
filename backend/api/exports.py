@@ -1,6 +1,8 @@
 # backend/api/exports.py
 # 导出 API 路由 - 提供视频导出接口
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -35,6 +37,15 @@ class ExportResponse(BaseModel):
 @router.post("/create", response_model=ExportResponse)
 async def create_export(request: ExportRequest, db: Session = Depends(get_db)):
     """创建并执行导出任务"""
+    if not request.video_path or not request.video_path.strip():
+        raise HTTPException(status_code=400, detail="请先填写输入视频路径")
+    if not os.path.exists(request.video_path):
+        raise HTTPException(status_code=404, detail=f"输入文件不存在: {request.video_path}")
+    if request.subtitle_path and not os.path.exists(request.subtitle_path):
+        raise HTTPException(status_code=404, detail=f"字幕文件不存在: {request.subtitle_path}")
+    if request.audio_path and not os.path.exists(request.audio_path):
+        raise HTTPException(status_code=404, detail=f"音频文件不存在: {request.audio_path}")
+
     task = DownloadTask(
         video_id=0,
         task_type="export",

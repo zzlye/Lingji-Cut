@@ -6,13 +6,15 @@ import { ApiConfigPanel } from './ApiConfigPanel'
 import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
+import { GlossaryPanel } from './GlossaryPanel'
+import { BannedWordsPanel } from './BannedWordsPanel'
 import { settingsApi } from '@/lib/api'
 import { loadAutomationPreferences } from '@/lib/automationPreferences'
 import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationPreferences, ProjectPaths, ToolStatusMap } from '@/types'
 
 /** 设置页签类型 */
-export type SettingsTab = 'auto' | 'effects' | 'api' | 'subtitle' | 'voice' | 'paths'
+export type SettingsTab = 'auto' | 'effects' | 'api' | 'subtitle' | 'voice' | 'glossary' | 'banned' | 'paths'
 
 /** 设置中心属性 */
 interface SettingsCenterProps {
@@ -37,6 +39,8 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; description: string
   { id: 'api', label: 'API 设置', description: '文本模型渠道' },
   { id: 'subtitle', label: '字幕设置', description: '语言和字幕样式' },
   { id: 'voice', label: '配音配置', description: 'TTS 和声音' },
+  { id: 'glossary', label: '术语表', description: '专业词和固定写法' },
+  { id: 'banned', label: '禁词表', description: '提醒和拦截策略' },
   { id: 'paths', label: '文件位置', description: '项目目录和子文件夹' },
 ]
 
@@ -102,6 +106,8 @@ export function SettingsCenter({ onClose, onDragStart, initialTab = 'effects', o
           {activeTab === 'api' && <ApiConfigPanel compact />}
           {activeTab === 'subtitle' && <SubtitleEditor compact />}
           {activeTab === 'voice' && <VoiceConfigPanel compact />}
+          {activeTab === 'glossary' && <GlossaryPanel />}
+          {activeTab === 'banned' && <BannedWordsPanel />}
           {activeTab === 'paths' && <FileLocationPanel />}
         </div>
       </div>
@@ -191,9 +197,14 @@ function AutomationConfirmPanel({
                   <h4 className="text-sm font-medium">术语和禁词</h4>
                   <p className="mt-1 text-xs text-foreground-muted">术语会传给字幕处理，禁词命中会在任务阶段提醒。</p>
                 </div>
-                <button onClick={() => onOpenTab('subtitle')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
-                  编辑字库
-                </button>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => onOpenTab('glossary')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                    术语表
+                  </button>
+                  <button onClick={() => onOpenTab('banned')} className="h-8 rounded-md border border-border px-3 text-xs hover:bg-white/5">
+                    禁词表
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
                 <MetricTile label="术语条目" value={String(preferences.glossary_terms.length)} />

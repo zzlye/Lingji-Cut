@@ -3,6 +3,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import not_
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
@@ -32,6 +33,7 @@ class TaskResponse(BaseModel):
 @router.get("", response_model=List[TaskResponse])
 async def get_tasks(
     status: Optional[str] = None,
+    include_orphans: bool = False,
     db: Session = Depends(get_db)
 ):
     """
@@ -39,6 +41,13 @@ async def get_tasks(
     支持按状态筛选（pending/downloading/processing/completed/failed）
     """
     query = db.query(DownloadTask)
+    if not include_orphans:
+        # 过滤旧版本或手动调试留下的孤儿失败记录，避免用户打开任务列表就看到无关错误。
+        query = query.filter(not_(
+            (DownloadTask.video_id <= 0) &
+            (DownloadTask.parent_job_id.is_(None)) &
+            (DownloadTask.status == "failed")
+        ))
     if status:
         query = query.filter(DownloadTask.status == status)
     return query.order_by(DownloadTask.created_at.desc()).all()

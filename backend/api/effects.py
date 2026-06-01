@@ -2,6 +2,7 @@
 # 画面处理 API 路由 - 提供预设管理、预览和完整处理接口
 
 import json
+import os
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -264,6 +265,11 @@ async def apply_effects(request: EffectApplyRequest, db: Session = Depends(get_d
     """执行完整画面处理任务"""
     processor = FFmpegProcessor()
     preset = request.preset.model_dump()
+    if not request.video_path or not request.video_path.strip():
+        raise HTTPException(status_code=400, detail="请先填写输入视频路径")
+    if not os.path.exists(request.video_path):
+        raise HTTPException(status_code=404, detail=f"输入文件不存在: {request.video_path}")
+
     task = DownloadTask(
         video_id=0,
         task_type="effects",
