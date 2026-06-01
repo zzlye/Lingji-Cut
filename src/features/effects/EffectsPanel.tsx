@@ -69,7 +69,7 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
   acceleration: {
     enabled: true,
     mode: 'auto',
-    quality: 'balanced',
+    quality: 'size',
   },
 })
 
@@ -613,12 +613,12 @@ function MotionSection({ config, updateValue, updateRange }: SectionProps) {
 
 /** 输出配置 */
 function OutputSection({ config, filterGraph, updateValue, updateRange }: SectionProps & { filterGraph: string }) {
-  const acceleration = config.acceleration || { enabled: true, mode: 'auto', quality: 'balanced' }
+  const acceleration = config.acceleration || { enabled: true, mode: 'auto', quality: 'size' }
   return (
     <div className="space-y-4">
       <TogglePanel
-        title="硬件加速"
-        description="自动检测 NVIDIA、Intel 或 AMD 编码器；不可用时回退 CPU，避免画面处理长时间占满处理器。"
+        title="CPU + GPU 混合加速"
+        description="CPU 负责滤镜，GPU 负责编码；会实测 NVIDIA、Intel、AMD 编码器，优先使用真正可运行的 GPU。"
         enabled={acceleration.enabled}
         onToggle={(value) => updateValue(['acceleration', 'enabled'], value)}
       >
@@ -638,7 +638,7 @@ function OutputSection({ config, filterGraph, updateValue, updateRange }: Sectio
           <SelectField
             label="GPU 质量"
             value={acceleration.quality}
-            options={[['balanced', '均衡'], ['quality', '清晰优先'], ['size', '速度/体积优先']]}
+            options={[['size', '速度优先'], ['balanced', '均衡'], ['quality', '清晰优先']]}
             onChange={(value) => updateValue(['acceleration', 'quality'], value)}
           />
         </div>

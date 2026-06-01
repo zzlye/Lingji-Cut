@@ -82,21 +82,30 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""
-        with patch("backend.core.ffmpeg_processor.available_ffmpeg_encoders", return_value={"h264_qsv", "libx264"}):
+        with patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)):
             encoder = self.processor._resolve_video_encoder({
                 "acceleration": {"enabled": True, "mode": "auto", "quality": "balanced"},
             })
 
-        self.assertEqual(encoder, "h264_qsv")
+        self.assertEqual(encoder, "h264_nvenc")
 
     def test_unavailable_gpu_encoder_falls_back_to_cpu(self):
         """指定的 GPU 编码器不可用时回退 CPU，避免画面处理直接失败"""
-        with patch("backend.core.ffmpeg_processor.available_ffmpeg_encoders", return_value={"libx264"}):
+        with patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=()):
             encoder = self.processor._resolve_video_encoder({
                 "acceleration": {"enabled": True, "mode": "nvidia", "quality": "balanced"},
             })
 
         self.assertEqual(encoder, "libx264")
+
+    def test_unavailable_selected_gpu_falls_back_to_working_gpu(self):
+        """指定 GPU 不可用时优先切换到实测可用 GPU，而不是直接走慢速 CPU"""
+        with patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)):
+            encoder = self.processor._resolve_video_encoder({
+                "acceleration": {"enabled": True, "mode": "intel", "quality": "size"},
+            })
+
+        self.assertEqual(encoder, "h264_nvenc")
 
     def test_gpu_runtime_failure_retries_with_cpu_encoder(self):
         """GPU 编码器运行失败时自动重试 CPU 编码"""
@@ -123,6 +132,38 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result, output_path)
         self.assertEqual(calls[0][calls[0].index("-c:v") + 1], "h264_nvenc")
         self.assertEqual(calls[1][calls[1].index("-c:v") + 1], "libx264")
+
+    def test_gpu_effects_command_does_not_mix_cpu_crf(self):
+        """GPU 画面处理使用硬件质量参数，不混入 CPU 的 crf 参数"""
+        self._create_test_video()
+        output_path = os.path.join(self.temp_dir, "gpu_args.mp4")
+        calls: list[list[str]] = []
+
+        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None, progress_callback=None, progress_total_seconds=None):
+            calls.append(cmd)
+            return output_path
+
+        with (
+            patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)),
+            patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run_ffmpeg),
+        ):
+            result = self.processor.apply_effects(
+                video_path=self.input_video,
+                preset={
+                    "adjustments": {"enabled": False},
+                    "canvas": {"enabled": False},
+                    "transform": {"enabled": False},
+                    "timing": {"enabled": False},
+                    "bitrate": {"enabled": False},
+                    "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+                },
+                output_path=output_path,
+            )
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(calls[0][calls[0].index("-c:v") + 1], "h264_nvenc")
+        self.assertIn("-cq", calls[0])
+        self.assertNotIn("-crf", calls[0])
 
     def test_effects_reports_progress_during_ffmpeg_run(self):
         """画面处理会从 ffmpeg 进度输出同步百分比"""

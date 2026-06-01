@@ -6,6 +6,7 @@ import queue
 import random
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from functools import lru_cache
@@ -19,6 +20,11 @@ from .tooling import get_ffmpeg_command
 logger = get_logger("ffmpeg")
 
 GPU_ENCODER_ORDER = ["h264_nvenc", "h264_qsv", "h264_amf"]
+GPU_ENCODER_LABELS = {
+    "h264_nvenc": "NVIDIA NVENC",
+    "h264_qsv": "Intel QSV",
+    "h264_amf": "AMD AMF",
+}
 VIDEO_ENCODER_OPTION_FLAGS = {
     "-c:v",
     "-preset",
@@ -29,6 +35,7 @@ VIDEO_ENCODER_OPTION_FLAGS = {
     "-quality",
     "-qp_i",
     "-qp_p",
+    "-rc",
 }
 
 
@@ -49,6 +56,68 @@ def available_ffmpeg_encoders(ffmpeg_cmd: str) -> set[str]:
     if result.returncode != 0:
         return set()
     return set(result.stdout.split())
+
+
+@lru_cache(maxsize=1)
+def working_gpu_encoders(ffmpeg_cmd: str) -> tuple[str, ...]:
+    """实际跑一段短编码，过滤掉列出但运行不可用的 GPU 编码器"""
+    encoders = available_ffmpeg_encoders(ffmpeg_cmd)
+    working: list[str] = []
+    for encoder in GPU_ENCODER_ORDER:
+        if encoder not in encoders:
+            continue
+        if _probe_gpu_encoder(ffmpeg_cmd, encoder):
+            working.append(encoder)
+    return tuple(working)
+
+
+def _probe_gpu_encoder(ffmpeg_cmd: str, encoder: str) -> bool:
+    """用短测试视频确认 GPU 编码器可以真正打开"""
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{encoder}.mp4")
+    temp_path = temp_file.name
+    temp_file.close()
+    cmd = [
+        ffmpeg_cmd,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-f", "lavfi",
+        "-i", "testsrc=size=320x180:rate=24:duration=0.6",
+        "-frames:v", "12",
+        "-pix_fmt", "yuv420p",
+    ]
+    cmd.extend(_probe_encoder_args(encoder))
+    cmd.append(temp_path)
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        return result.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0
+    except Exception:
+        return False
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
+
+def _probe_encoder_args(encoder: str) -> list[str]:
+    """生成 GPU 编码器探测参数"""
+    if encoder == "h264_nvenc":
+        return ["-c:v", encoder, "-preset", "p1", "-rc", "vbr", "-cq", "28"]
+    if encoder == "h264_qsv":
+        return ["-c:v", encoder, "-global_quality", "28"]
+    if encoder == "h264_amf":
+        return ["-c:v", encoder, "-quality", "speed", "-qp_i", "28", "-qp_p", "28"]
+    return ["-c:v", encoder]
 
 
 class FFmpegProcessor:
@@ -101,7 +170,7 @@ class FFmpegProcessor:
 
         if bitrate:
             cmd.extend(["-b:v", bitrate])
-        else:
+        elif encoder == "libx264":
             cmd.extend(["-crf", "23"])
 
         # 画面处理需要重新编码视频，音频默认直接复制以减少失真。
@@ -493,30 +562,35 @@ class FFmpegProcessor:
         progress_callback: Optional[Callable[[float], None]] = None,
         progress_total_seconds: Optional[float] = None,
     ) -> str:
-        """GPU 编码失败时自动重试 CPU，避免驱动或设备不可用导致任务卡死"""
-        try:
-            return self._run_ffmpeg(
-                cmd,
-                action_name,
-                timeout=timeout,
-                control_keys=control_keys,
-                progress_callback=progress_callback,
-                progress_total_seconds=progress_total_seconds,
-            )
-        except RuntimeError as exc:
-            if encoder == "libx264":
-                raise
-            logger.warning(f"{action_name}使用 {encoder} 失败，自动回退 CPU 编码: {exc}")
+        """GPU 编码失败时先换其他 GPU，最后才回退 CPU，避免直接进入慢速路径"""
+        attempts: list[tuple[str, list[str], str]] = [(encoder, cmd, action_name)]
+        if encoder != "libx264":
+            for fallback_encoder in self._fallback_gpu_encoders(encoder):
+                gpu_args = self._video_encoder_args(preset, for_subtitles=for_subtitles, encoder=fallback_encoder)
+                attempts.append((fallback_encoder, self._replace_video_encoder_args(cmd, gpu_args), f"{action_name}{GPU_ENCODER_LABELS.get(fallback_encoder, fallback_encoder)}回退"))
             cpu_args = self._video_encoder_args(preset, for_subtitles=for_subtitles, encoder="libx264")
-            cpu_cmd = self._replace_video_encoder_args(cmd, cpu_args)
-            return self._run_ffmpeg(
-                cpu_cmd,
-                f"{action_name}CPU回退",
-                timeout=timeout,
-                control_keys=control_keys,
-                progress_callback=progress_callback,
-                progress_total_seconds=progress_total_seconds,
-            )
+            attempts.append(("libx264", self._replace_video_encoder_args(cmd, cpu_args), f"{action_name}CPU兜底"))
+
+        errors: list[str] = []
+        for index, (attempt_encoder, attempt_cmd, attempt_name) in enumerate(attempts):
+            try:
+                if index > 0:
+                    logger.warning(f"{action_name}切换编码器到 {GPU_ENCODER_LABELS.get(attempt_encoder, attempt_encoder)}")
+                return self._run_ffmpeg(
+                    attempt_cmd,
+                    attempt_name,
+                    timeout=timeout,
+                    control_keys=control_keys,
+                    progress_callback=progress_callback,
+                    progress_total_seconds=progress_total_seconds,
+                )
+            except RuntimeError as exc:
+                errors.append(f"{attempt_encoder}: {exc}")
+                if attempt_encoder == "libx264":
+                    raise RuntimeError(f"{action_name}失败，GPU 和 CPU 兜底均不可用: {'；'.join(errors)}") from exc
+                logger.warning(f"{action_name}使用 {attempt_encoder} 失败: {exc}")
+
+        raise RuntimeError(f"{action_name}失败: {'；'.join(errors)}")
 
     def _communicate_with_progress(
         self,
@@ -744,15 +818,20 @@ class FFmpegProcessor:
         }
         if mode in encoder_map:
             encoder = encoder_map[mode]
-            if encoder == "libx264" or encoder in available_ffmpeg_encoders(self.ffmpeg_cmd):
+            if encoder == "libx264" or encoder in working_gpu_encoders(self.ffmpeg_cmd):
                 return encoder
-            return "libx264"
+            return self._first_working_gpu_encoder() or "libx264"
 
-        encoders = available_ffmpeg_encoders(self.ffmpeg_cmd)
-        for encoder in GPU_ENCODER_ORDER:
-            if encoder in encoders:
-                return encoder
-        return "libx264"
+        return self._first_working_gpu_encoder() or "libx264"
+
+    def _first_working_gpu_encoder(self) -> Optional[str]:
+        """读取首个实测可用 GPU 编码器"""
+        encoders = working_gpu_encoders(self.ffmpeg_cmd)
+        return encoders[0] if encoders else None
+
+    def _fallback_gpu_encoders(self, current_encoder: str) -> list[str]:
+        """返回除当前编码器外的实测可用 GPU 兜底列表"""
+        return [encoder for encoder in working_gpu_encoders(self.ffmpeg_cmd) if encoder != current_encoder]
 
     def _video_encoder_args(self, preset: dict[str, Any], for_subtitles: bool, encoder: Optional[str] = None) -> list[str]:
         """生成视频编码参数，GPU 不可用时回退 CPU"""
@@ -764,11 +843,11 @@ class FFmpegProcessor:
             return args
 
         quality = str((preset.get("acceleration") or {}).get("quality") or "balanced")
-        nvenc_preset = {"quality": "p6", "balanced": "p4", "size": "p2"}.get(quality, "p4")
-        cq_value = "19" if quality == "quality" else "24" if quality == "size" else "22"
+        nvenc_preset = {"quality": "p5", "balanced": "p3", "size": "p1"}.get(quality, "p3")
+        cq_value = "20" if quality == "quality" else "28" if quality == "size" else "24"
         args = ["-c:v", encoder, "-pix_fmt", "yuv420p"]
         if encoder == "h264_nvenc":
-            args.extend(["-preset", nvenc_preset, "-cq", cq_value])
+            args.extend(["-preset", nvenc_preset, "-rc", "vbr", "-cq", cq_value])
         elif encoder == "h264_qsv":
             args.extend(["-global_quality", cq_value])
         elif encoder == "h264_amf":
