@@ -260,7 +260,7 @@ export const exportApi = {
 }
 
 /** 一键自动化 API */
-type AutomationStartParams = {
+export type AutomationStartParams = {
   url: string
   processing_preset: import('@/types').ProcessingConfig
   format_id?: string

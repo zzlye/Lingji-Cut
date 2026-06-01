@@ -239,6 +239,22 @@ export interface AutomationBatchControlResponse {
 /** 自动化字幕文本处理方式 */
 export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
 
+/** 一键自动化偏好 */
+export interface AutomationPreferences {
+  output_format: 'mp4' | 'mkv' | 'mov' | 'webm'
+  subtitle_preset_id: number | null
+  subtitle_language: string
+  text_profile_id: number | null
+  subtitle_operation: SubtitleTextOperation
+  subtitle_target_language: string
+  burn_subtitles: boolean
+  enable_voice: boolean
+  voice_profile_id: number | null
+  voice_mode: 'full' | 'segmented'
+  audio_mode: 'replace' | 'mix'
+  original_volume: number
+}
+
 /** 配音音色 */
 export interface VoiceOption {
   id: string

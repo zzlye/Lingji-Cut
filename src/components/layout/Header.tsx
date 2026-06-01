@@ -2,9 +2,9 @@
 // 顶部栏组件 - URL 输入、解析按钮、全局任务状态、窗口控制
 
 import { useEffect, useRef, useState } from 'react'
-import { automationApi, profileApi, videoApi } from '@/lib/api'
+import { automationApi, videoApi } from '@/lib/api'
+import { buildAutomationPayload } from '@/lib/automationPayload'
 import { useTaskStore } from '@/stores/taskStore'
-import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { SettingsCenter } from '@/features/settings/SettingsCenter'
 import type { BackendAutomationJob } from '@/types'
 
@@ -123,29 +123,7 @@ export function Header() {
     addLog('info', '开始一键完成流程')
 
     try {
-      let textProfileId: number | undefined
-      try {
-        const textProfiles = await profileApi.listText()
-        textProfileId = textProfiles[0]?.id
-      } catch {
-        // 文本 API 配置不是必需项，读取失败时保持原字幕流程。
-        textProfileId = undefined
-      }
-
-      const payload = {
-        url,
-        processing_preset: loadAutomationConfig(),
-        output_format: 'mp4',
-        text_profile_id: textProfileId,
-        subtitle_operation: textProfileId ? 'polish' : 'none',
-        burn_subtitles: true,
-        enable_voice: true,
-        voice_mode: 'segmented',
-        audio_mode: 'mix',
-        original_volume: 0.25,
-      } as const
-
-      const { job_id } = await automationApi.start(payload)
+      const { job_id } = await automationApi.start(buildAutomationPayload(url))
       addLog('info', `自动处理任务已进入队列: ${job_id}`)
 
       const job = await watchAutomationJob(job_id)

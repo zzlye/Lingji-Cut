@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { profileApi } from '@/lib/api'
+import { saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
@@ -141,6 +142,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 选择已有文本配置 */
   const selectProfile = (profile: ApiProfile) => {
     setSelectedProfileId(profile.id)
+    saveAutomationPreferences({ text_profile_id: profile.id })
     setProfileForm({
       name: profile.name,
       provider_type: profile.provider_type,
@@ -249,6 +251,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
         ? await profileApi.updateText(selectedProfileId, payload)
         : await profileApi.createText({ ...payload, api_key: profileForm.api_key })
 
+      saveAutomationPreferences({ text_profile_id: saved.id })
       addLog('info', `文本 API 配置 "${saved.name}" 已保存`)
       await loadProfiles()
       setSelectedProfileId(saved.id)

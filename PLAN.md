@@ -54,6 +54,7 @@
 - 一键自动化：
   - `POST /automation/start` 创建后台自动化任务，立即返回 `job_id`。
   - `POST /automation/batch/start` 支持多个链接批量入队，复用同一套处理参数，并按批次并发数执行。
+  - 前端通过本地自动化偏好统一保存画面处理、字幕处理方式、硬字幕开关、文本 API、配音开关、配音模式、音频合成方式和原声音量；顶部单条一键完成和任务页批量入队共用同一套参数生成逻辑。
   - `POST /automation/batch/{batch_id}/pause` 和 `POST /automation/batch/{batch_id}/resume` 支持批次暂停/恢复，暂停会阻止后续待调度任务继续执行。
   - `GET /automation/jobs` 和 `GET /automation/jobs/{id}` 展示自动化任务列表、阶段进度、错误和最终导出路径。
   - `GET /automation/jobs/{id}/events` 通过 SSE 推送实时进度；前端异常时降级为查询接口。

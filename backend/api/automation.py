@@ -372,9 +372,9 @@ def _pick_voice_profile(db: Session, profile_id: Optional[int]) -> Optional[Voic
 
 
 def _pick_text_profile(db: Session, profile_id: Optional[int]) -> Optional[TextProviderProfile]:
-    """选择指定文本配置"""
+    """选择指定或首个文本配置"""
     if not profile_id:
-        return None
+        return db.query(TextProviderProfile).order_by(TextProviderProfile.id.asc()).first()
     profile = db.query(TextProviderProfile).filter(TextProviderProfile.id == profile_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="文本 API 配置不存在")

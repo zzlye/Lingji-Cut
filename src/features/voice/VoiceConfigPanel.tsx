@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { profileApi, voiceApi } from '@/lib/api'
+import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, VoiceGenerateSettings, VoiceOption } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
@@ -62,6 +63,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [settings, setSettings] = useState<VoiceGenerateSettings>(() => createDefaultSettings())
   const [voice, setVoice] = useState('alloy')
   const [customVoice, setCustomVoice] = useState('')
+  const [automationOptions, setAutomationOptions] = useState(() => loadAutomationPreferences())
   const [previewText, setPreviewText] = useState(DEFAULT_PREVIEW_TEXT)
   const [audioUrl, setAudioUrl] = useState('')
   const [isSaving, setIsSaving] = useState(false)
@@ -104,6 +106,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 选择已有配音 API 配置 */
   const selectProfile = (profile: ApiProfile) => {
     setSelectedProfileId(profile.id)
+    setAutomationOptions(saveAutomationPreferences({ voice_profile_id: profile.id, enable_voice: true }))
     setProfileForm({
       name: profile.name,
       provider_type: profile.provider_type,
@@ -182,6 +185,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         ? await profileApi.updateVoice(selectedProfileId, payload)
         : await profileApi.createVoice(payload)
 
+      setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id, enable_voice: true }))
       addLog('info', `配音配置 "${saved.name}" 已保存`)
       await loadProfiles()
       setSelectedProfileId(saved.id)
@@ -350,6 +354,37 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             </section>
 
             <section className="rounded-lg border border-border bg-background p-4">
+              <SectionTitle title="一键完成配音策略" description="控制自动化流程是否配音，以及配音和原声如何合成。" />
+              <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+                <ToggleField
+                  label="启用自动配音"
+                  checked={automationOptions.enable_voice}
+                  onChange={(value) => setAutomationOptions(saveAutomationPreferences({ enable_voice: value }))}
+                />
+                <SelectField
+                  label="生成方式"
+                  value={automationOptions.voice_mode}
+                  options={[['segmented', '按字幕分段'], ['full', '整段生成']]}
+                  onChange={(value) => setAutomationOptions(saveAutomationPreferences({ voice_mode: value as typeof automationOptions.voice_mode }))}
+                />
+                <SelectField
+                  label="音频合成"
+                  value={automationOptions.audio_mode}
+                  options={[['mix', '保留原声并混合'], ['replace', '替换原声']]}
+                  onChange={(value) => setAutomationOptions(saveAutomationPreferences({ audio_mode: value as typeof automationOptions.audio_mode }))}
+                />
+                <RangeField
+                  label="原声音量"
+                  value={automationOptions.original_volume}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  onChange={(value) => setAutomationOptions(saveAutomationPreferences({ original_volume: value }))}
+                />
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-background p-4">
               <SectionTitle title="输出和高级参数" description="设置音频格式、采样率、码率、情绪和风格提示。" />
               <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
                 <SelectField label="格式" value={settings.format} options={[['mp3', 'MP3'], ['wav', 'WAV'], ['flac', 'FLAC'], ['pcm', 'PCM'], ['opus', 'OPUS']]} onChange={(value) => updateSetting('format', value as VoiceGenerateSettings['format'])} />
@@ -465,6 +500,23 @@ function SelectField({ label, value, options, onChange }: { label: string; value
           <option key={optionValue} value={optionValue}>{labelText}</option>
         ))}
       </select>
+    </label>
+  )
+}
+
+/** 开关输入 */
+function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex h-full min-h-9 items-end">
+      <span className="flex h-9 w-full items-center justify-between gap-3 rounded-md border border-border bg-background-elevated px-3 text-sm">
+        <span className="text-xs text-foreground-muted">{label}</span>
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(event) => onChange(event.target.checked)}
+          className="h-4 w-4 accent-primary"
+        />
+      </span>
     </label>
   )
 }

@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { subtitleApi } from '@/lib/api'
+import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 
@@ -197,6 +198,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [selectedId, setSelectedId] = useState<number | 'new'>('new')
   const [form, setForm] = useState<SubtitlePresetForm>(() => createDefaultForm())
   const [customLanguage, setCustomLanguage] = useState('')
+  const [automationOptions, setAutomationOptions] = useState(() => loadAutomationPreferences())
   const [isSaving, setIsSaving] = useState(false)
   const [isPreviewOpen, setIsPreviewOpen] = useState(true)
   const { addLog } = useTaskStore()
@@ -214,8 +216,13 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
       const data = await subtitleApi.listPresets()
       setPresets(data)
       if (data.length > 0 && selectedId === 'new') {
-        setSelectedId(data[0].id)
-        setForm(presetToForm(data[0]))
+        const preferred = data.find((preset) => preset.id === automationOptions.subtitle_preset_id) || data.find((preset) => preset.is_default) || data[0]
+        setSelectedId(preferred.id)
+        setForm(presetToForm(preferred))
+        setAutomationOptions(saveAutomationPreferences({
+          subtitle_preset_id: preferred.id,
+          subtitle_language: automationOptions.subtitle_language || preferred.language,
+        }))
       }
     } catch (error) {
       addLog('error', `加载字幕预设失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -236,6 +243,10 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     if (!preset) return
     setSelectedId(preset.id)
     setForm(presetToForm(preset))
+    setAutomationOptions(saveAutomationPreferences({
+      subtitle_preset_id: preset.id,
+      subtitle_language: preset.language || automationOptions.subtitle_language,
+    }))
     setCustomLanguage('')
   }
 
@@ -286,6 +297,10 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
       const saved = selectedId === 'new'
         ? await subtitleApi.createPreset(payload)
         : await subtitleApi.updatePreset(selectedId, payload)
+      setAutomationOptions(saveAutomationPreferences({
+        subtitle_preset_id: saved.id,
+        subtitle_language: language,
+      }))
       addLog('info', `字幕预设 "${saved.name}" 已保存`)
       setSelectedId(saved.id)
       setForm(presetToForm(saved))
@@ -352,6 +367,29 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                   {isSaving ? '保存中...' : '保存预设'}
                 </button>
               </div>
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-border bg-background p-4">
+            <SectionTitle title="一键完成字幕策略" description="这些选项会被顶部一键完成和批量自动处理直接复用。" />
+            <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3">
+              <SelectField
+                label="文本 API 处理"
+                value={automationOptions.subtitle_operation}
+                options={[['none', '不处理'], ['polish', '润色字幕'], ['translate', '翻译字幕'], ['generate', '生成字幕文案']]}
+                onChange={(value) => setAutomationOptions(saveAutomationPreferences({ subtitle_operation: value as typeof automationOptions.subtitle_operation }))}
+              />
+              <SelectField
+                label="输出语言"
+                value={automationOptions.subtitle_target_language || ''}
+                options={[['', '跟随字幕'], ['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语']]}
+                onChange={(value) => setAutomationOptions(saveAutomationPreferences({ subtitle_target_language: value }))}
+              />
+              <ToggleField
+                label="默认烧录硬字幕"
+                checked={automationOptions.burn_subtitles}
+                onChange={(value) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: value }))}
+              />
             </div>
           </section>
 

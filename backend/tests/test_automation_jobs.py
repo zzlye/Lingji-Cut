@@ -6,8 +6,8 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.models import AutomationJobRecord  # noqa: E402
+from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.models import AutomationJobRecord, TextProviderProfile  # noqa: E402
 
 
 class FakeQuery:
@@ -229,6 +229,18 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(params["batch_id"], "batch-a")
         self.assertEqual(params["batch_concurrency"], 6)
         self.assertEqual(_get_batch_concurrency_from_job(job), 6)
+
+    def test_pick_text_profile_uses_first_saved_profile_by_default(self):
+        """一键流程未指定文本配置时自动使用首个已保存配置"""
+        profiles = [
+            TextProviderProfile(id=3, name="文本 B", provider_type="openai", base_url="https://b.example", api_key_encrypted="", model="b"),
+            TextProviderProfile(id=1, name="文本 A", provider_type="openai", base_url="https://a.example", api_key_encrypted="", model="a"),
+        ]
+        db = FakeDb(profiles)
+
+        profile = _pick_text_profile(db, None)
+
+        self.assertEqual(profile.id, 3)
 
     def test_restore_batch_runtime_state_keeps_paused_batches(self):
         jobs = [

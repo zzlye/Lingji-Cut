@@ -3,9 +3,9 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { automationApi, taskApi } from '@/lib/api'
+import { buildAutomationPayload } from '@/lib/automationPayload'
 import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationJob, AutomationStep, BackendAutomationJob, DownloadTask } from '@/types'
-import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { VideoInfoCard } from './VideoInfoCard'
 
 /**
@@ -103,17 +103,7 @@ export function TaskPanel() {
       const result = await automationApi.startBatch({
         urls,
         concurrency: batchConcurrency,
-        template: {
-          url: urls[0],
-          processing_preset: loadAutomationConfig(),
-          output_format: 'mp4',
-          subtitle_operation: 'none',
-          burn_subtitles: true,
-          enable_voice: true,
-          voice_mode: 'segmented',
-          audio_mode: 'mix',
-          original_volume: 0.25,
-        },
+        template: buildAutomationPayload(urls[0]),
       })
       addLog('info', `批量自动处理已入队: ${result.accepted_count} 个任务，批次 ${result.batch_id}`)
       setBatchUrls('')
