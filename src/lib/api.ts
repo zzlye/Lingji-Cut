@@ -260,49 +260,42 @@ export const exportApi = {
 }
 
 /** 一键自动化 API */
+type AutomationStartParams = {
+  url: string
+  processing_preset: import('@/types').ProcessingConfig
+  format_id?: string
+  output_format?: string
+  subtitle_preset_id?: number
+  subtitle_language?: string
+  text_profile_id?: number
+  subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
+  subtitle_target_language?: string
+  burn_subtitles?: boolean
+  enable_voice?: boolean
+  voice_profile_id?: number
+  voice_text?: string
+  audio_mode?: 'replace' | 'mix'
+  original_volume?: number
+}
+
 export const automationApi = {
   /** 后端完整执行一键流程 */
-  run: (params: {
-    url: string
-    processing_preset: import('@/types').ProcessingConfig
-    format_id?: string
-    output_format?: string
-    subtitle_preset_id?: number
-    subtitle_language?: string
-    text_profile_id?: number
-    subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
-    subtitle_target_language?: string
-    burn_subtitles?: boolean
-    enable_voice?: boolean
-    voice_profile_id?: number
-    voice_text?: string
-    audio_mode?: 'replace' | 'mix'
-    original_volume?: number
-  }) =>
+  run: (params: AutomationStartParams) =>
     request<import('@/types').AutomationRunResponse>('/automation/run', {
       method: 'POST',
       body: JSON.stringify(params),
     }),
 
   /** 启动后台一键流程，立即返回任务 ID */
-  start: (params: {
-    url: string
-    processing_preset: import('@/types').ProcessingConfig
-    format_id?: string
-    output_format?: string
-    subtitle_preset_id?: number
-    subtitle_language?: string
-    text_profile_id?: number
-    subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
-    subtitle_target_language?: string
-    burn_subtitles?: boolean
-    enable_voice?: boolean
-    voice_profile_id?: number
-    voice_text?: string
-    audio_mode?: 'replace' | 'mix'
-    original_volume?: number
-  }) =>
+  start: (params: AutomationStartParams) =>
     request<import('@/types').AutomationStartResponse>('/automation/start', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 批量启动后台一键流程 */
+  startBatch: (params: { urls: string[]; template: AutomationStartParams; concurrency?: number }) =>
+    request<import('@/types').AutomationBatchStartResponse>('/automation/batch/start', {
       method: 'POST',
       body: JSON.stringify(params),
     }),

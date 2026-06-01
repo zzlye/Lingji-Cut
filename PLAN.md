@@ -51,6 +51,7 @@
 
 - 一键自动化：
   - `POST /automation/start` 创建后台自动化任务，立即返回 `job_id`。
+  - `POST /automation/batch/start` 支持多个链接批量入队，复用同一套处理参数，并按批次并发数执行。
   - `GET /automation/jobs` 和 `GET /automation/jobs/{id}` 展示自动化任务列表、阶段进度、错误和最终导出路径。
   - `GET /automation/jobs/{id}/events` 通过 SSE 推送实时进度；前端异常时降级为查询接口。
   - `POST /automation/jobs/{id}/retry` 支持按原参数重试失败或已完成任务。
@@ -58,7 +59,7 @@
   - `POST /automation/run` 保留同步执行入口，方便脚本、测试和调试直接跑完整链路。
   - 如果已保存文本 API 配置，一键流程会默认对字幕正文做润色；没有文本配置时直接使用 YouTube 字幕。
   - 字幕失败、配音失败属于可跳过阶段，主流程会尽量继续导出。
-  - 当前已是后台任务执行，后续要升级为可配置并发队列和批量调度。
+  - 当前已是后台任务执行，后续要升级为按批次暂停/恢复和更细的调度控制。
 
 - UI/UX：
   - 第一屏直接进入工作台，不做营销页。
@@ -74,6 +75,7 @@
   - `POST /videos/parse`：解析 YouTube URL。
   - `POST /videos/download`：创建下载任务。
   - `POST /automation/start`：创建后台一键自动流程任务。
+  - `POST /automation/batch/start`：批量创建后台一键自动流程任务。
   - `GET /automation/jobs`：获取一键自动流程任务列表。
   - `GET /automation/jobs/{id}`：获取一键自动流程任务进度。
   - `GET /automation/jobs/{id}/events`：订阅一键自动流程实时进度。
@@ -106,6 +108,7 @@
 
 - 自动化测试：
   - `/automation/start` 可创建后台自动化任务，前端任务列表能通过 SSE 显示进度。
+  - `/automation/batch/start` 可按多个 URL 创建自动化任务，并去除空行和重复链接。
   - `/automation/jobs/{id}/retry` 可让失败或已完成任务重新进入队列。
   - `/automation/jobs/{id}/resume` 可复用已完成阶段，避免失败后重复下载和重复处理。
   - `/automation/run` 可按顺序创建下载、画面处理、字幕、配音、导出任务。

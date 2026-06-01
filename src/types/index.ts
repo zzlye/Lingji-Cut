@@ -200,6 +200,15 @@ export interface AutomationStartResponse {
   job_id: string
 }
 
+/** 后端批量启动自动化任务响应 */
+export interface AutomationBatchStartResponse {
+  message: string
+  batch_id: string
+  job_ids: string[]
+  accepted_count: number
+  skipped_count: number
+}
+
 /** 自动化字幕文本处理方式 */
 export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
 

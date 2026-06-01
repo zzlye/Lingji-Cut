@@ -35,6 +35,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - YouTube URL 解析和下载任务接口。
 - 一键自动流程已由后端自动化任务编排：`解析 -> 下载 -> 画面处理 -> 字幕渲染 -> 可选配音 -> 导出`。
   - `/automation/start` 会创建后台任务并立即返回 `job_id`，前端优先通过 `/automation/jobs/{id}/events` 接收 SSE 实时进度，异常时降级为 `/automation/jobs/{id}` 查询。
+  - `/automation/batch/start` 支持一次提交多个 YouTube 链接，按用户设置的批次并发数排队执行。
   - `/automation/jobs/{id}/retry` 支持失败或已完成任务按原参数重新进入队列。
   - `/automation/jobs/{id}/resume` 支持断点续跑，会复用已完成且文件仍存在的下载、画面处理、字幕和配音阶段。
   - `/automation/run` 保留同步执行入口，方便脚本和测试直接跑完整链路。
@@ -48,7 +49,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - `/effects/apply` 可执行完整画面处理任务。
 - `/subtitles/render` 可下载 YouTube 字幕、生成 `ASS`，并可烧录硬字幕视频。
 - `/subtitles/process-text` 可使用已保存文本 API 生成、翻译或润色字幕正文。
-- `/automation/start`、`/automation/jobs`、`/automation/jobs/{id}`、`/automation/jobs/{id}/events`、`/automation/jobs/{id}/retry`、`/automation/jobs/{id}/resume` 可创建、列表展示、实时推送、查询、重试和断点续跑后台自动化任务。
+- `/automation/start`、`/automation/batch/start`、`/automation/jobs`、`/automation/jobs/{id}`、`/automation/jobs/{id}/events`、`/automation/jobs/{id}/retry`、`/automation/jobs/{id}/resume` 可创建、批量入队、列表展示、实时推送、查询、重试和断点续跑后台自动化任务。
 - `/automation/run` 可同步执行完整一键流程，并返回每个阶段的任务状态和最终导出路径。
 - 字幕预设支持语言、单/双行、字体、字号、九宫格位置、颜色、描边、阴影、背景透明度和实时预览。
 - 配音配置内置配音 API 管理、音色目录、试听、语速、音量、音调、输出格式、采样率、码率和风格提示。
@@ -61,7 +62,7 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - 字幕内容优先来自 YouTube 原字幕/自动字幕；存在已保存文本 API 配置时，一键流程会默认对字幕正文做润色。
 - 文本 API 已支持生成、翻译、润色入口；一键流程会把处理后的文本映射回原字幕时间轴，后续还需要做更精细的分段批处理和逐句对齐。
 - 自动配音当前优先使用字幕正文，字幕缺失时才回退到标题文案；按字幕时间轴分段配音和对齐仍需继续做。
-- 一键流程已沉到后端后台任务编排，并支持 SSE 实时进度、任务重试和断点续跑；后续还需要更完整的批量任务调度。
+- 一键流程已沉到后端后台任务编排，并支持批量入队、SSE 实时进度、任务重试和断点续跑；后续还需要按批次暂停/恢复和更细的调度控制。
 
 ## 配音渠道支持
 

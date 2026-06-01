@@ -7,6 +7,7 @@ import asyncio
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Lock, Semaphore
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -24,7 +25,11 @@ from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plai
 router = APIRouter(prefix="/automation", tags=["automation"])
 
 # 后台自动化任务线程池，避免多个长视频同时阻塞 API 线程。
-AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
+# 批次级并发控制，确保同一批任务按用户设置的并发数执行。
+BATCH_SEMAPHORES: dict[str, Semaphore] = {}
+BATCH_SEMAPHORE_LOCK = Lock()
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -90,6 +95,22 @@ class AutomationStartResponse(BaseModel):
     """启动自动化任务响应"""
     message: str
     job_id: str
+
+
+class AutomationBatchStartRequest(BaseModel):
+    """批量一键自动流程请求"""
+    urls: list[str]
+    template: AutomationRunRequest
+    concurrency: int = Field(default=2, ge=1, le=8)
+
+
+class AutomationBatchStartResponse(BaseModel):
+    """批量启动自动化任务响应"""
+    message: str
+    batch_id: str
+    job_ids: list[str]
+    accepted_count: int
+    skipped_count: int
 
 
 class AutomationRunResponse(BaseModel):
@@ -740,6 +761,77 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     job.stages = json.dumps(stages, ensure_ascii=False)
 
 
+def _create_automation_job(db: Session, request: AutomationRunRequest, batch_id: Optional[str] = None, title: str = "一键自动流程") -> AutomationJobRecord:
+    """创建自动化任务记录"""
+    job_id = f"auto-{uuid.uuid4().hex[:16]}"
+    params = request.model_dump()
+    if batch_id:
+        params["batch_id"] = batch_id
+
+    job = AutomationJobRecord(
+        id=job_id,
+        source_url=request.url,
+        title=title,
+        status="pending",
+        progress=0,
+        current_step="等待开始",
+        stages=json.dumps(_default_stages(), ensure_ascii=False),
+        params=json.dumps(params, ensure_ascii=False),
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def _get_batch_id_from_job(job: AutomationJobRecord) -> Optional[str]:
+    """从任务参数里读取批次 ID"""
+    if not job.params:
+        return None
+    try:
+        params = json.loads(job.params)
+    except json.JSONDecodeError:
+        return None
+    batch_id = params.get("batch_id")
+    return batch_id if isinstance(batch_id, str) and batch_id else None
+
+
+def _register_batch_semaphore(batch_id: str, concurrency: int) -> None:
+    """注册批次并发控制器"""
+    with BATCH_SEMAPHORE_LOCK:
+        BATCH_SEMAPHORES[batch_id] = Semaphore(max(1, min(8, concurrency)))
+
+
+def _run_background_job_with_batch_limit(job_id: str, resume_from_checkpoint: bool = False) -> None:
+    """后台线程入口，按批次并发限制执行任务"""
+    db = SessionLocal()
+    try:
+        job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+        batch_id = _get_batch_id_from_job(job) if job else None
+    finally:
+        db.close()
+
+    semaphore = BATCH_SEMAPHORES.get(batch_id) if batch_id else None
+    if not semaphore:
+        _run_background_job(job_id, resume_from_checkpoint)
+        return
+
+    with semaphore:
+        _run_background_job(job_id, resume_from_checkpoint)
+
+
+def _normalize_batch_urls(urls: list[str]) -> list[str]:
+    """清理批量链接：去空行、去重并保持原始顺序"""
+    normalized_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for raw_url in urls:
+        url = raw_url.strip()
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        normalized_urls.append(url)
+    return normalized_urls
+
+
 @router.post("/run", response_model=AutomationRunResponse)
 def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db)):
     """执行完整一键自动流程"""
@@ -760,21 +852,34 @@ def start_automation(request: AutomationRunRequest, db: Session = Depends(get_db
     if not request.url.strip():
         raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
 
-    job_id = f"auto-{uuid.uuid4().hex[:16]}"
-    job = AutomationJobRecord(
-        id=job_id,
-        source_url=request.url,
-        title="一键自动流程",
-        status="pending",
-        progress=0,
-        current_step="等待开始",
-        stages=json.dumps(_default_stages(), ensure_ascii=False),
-        params=request.model_dump_json(),
+    job = _create_automation_job(db, request)
+    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job.id)
+    return AutomationStartResponse(message="自动化任务已启动", job_id=job.id)
+
+
+@router.post("/batch/start", response_model=AutomationBatchStartResponse)
+def start_batch_automation(request: AutomationBatchStartRequest, db: Session = Depends(get_db)):
+    """批量启动一键自动化任务"""
+    normalized_urls = _normalize_batch_urls(request.urls)
+    if not normalized_urls:
+        raise HTTPException(status_code=400, detail="请至少填写一个有效链接")
+
+    batch_id = f"batch-{uuid.uuid4().hex[:12]}"
+    _register_batch_semaphore(batch_id, request.concurrency)
+    job_ids: list[str] = []
+    for index, url in enumerate(normalized_urls, 1):
+        job_request = request.template.model_copy(update={"url": url})
+        job = _create_automation_job(db, job_request, batch_id=batch_id, title=f"批量自动流程 {index}/{len(normalized_urls)}")
+        job_ids.append(job.id)
+        AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job.id)
+
+    return AutomationBatchStartResponse(
+        message="批量自动化任务已进入队列",
+        batch_id=batch_id,
+        job_ids=job_ids,
+        accepted_count=len(job_ids),
+        skipped_count=max(0, len(request.urls) - len(job_ids)),
     )
-    db.add(job)
-    db.commit()
-    AUTOMATION_EXECUTOR.submit(_run_background_job, job_id)
-    return AutomationStartResponse(message="自动化任务已启动", job_id=job_id)
 
 
 @router.get("/jobs", response_model=list[AutomationJobResponse])
@@ -806,7 +911,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
 
     _reset_job_for_retry(job)
     db.commit()
-    AUTOMATION_EXECUTOR.submit(_run_background_job, job_id)
+    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id)
     return AutomationStartResponse(message="自动化任务已重新进入队列", job_id=job_id)
 
 
@@ -823,7 +928,7 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
 
     _prepare_job_for_resume(job)
     db.commit()
-    AUTOMATION_EXECUTOR.submit(_run_background_job, job_id, True)
+    AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id, True)
     return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
 
 

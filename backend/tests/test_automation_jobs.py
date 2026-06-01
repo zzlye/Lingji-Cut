@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _default_stages, _job_to_response, _prepare_job_for_resume, _reset_job_for_retry, _stage_output_if_reusable  # noqa: E402
+from backend.api.automation import _default_stages, _job_to_response, _normalize_batch_urls, _prepare_job_for_resume, _reset_job_for_retry, _stage_output_if_reusable  # noqa: E402
 from backend.models import AutomationJobRecord  # noqa: E402
 
 
@@ -109,6 +109,20 @@ class AutomationJobTests(unittest.TestCase):
             self.assertIsNone(_stage_output_if_reusable(job, "effects"))
         finally:
             os.remove(temp_path)
+
+    def test_batch_urls_are_trimmed_and_deduplicated(self):
+        urls = _normalize_batch_urls([
+            "  https://youtube.com/watch?v=1  ",
+            "",
+            "https://youtube.com/watch?v=2",
+            "https://youtube.com/watch?v=1",
+            "   ",
+        ])
+
+        self.assertEqual(urls, [
+            "https://youtube.com/watch?v=1",
+            "https://youtube.com/watch?v=2",
+        ])
 
 
 if __name__ == "__main__":

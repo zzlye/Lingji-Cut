@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { automationApi, taskApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationJob, AutomationStep, BackendAutomationJob, DownloadTask } from '@/types'
+import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { VideoInfoCard } from './VideoInfoCard'
 
 /**
@@ -17,6 +18,9 @@ export function TaskPanel() {
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [resumingJobId, setResumingJobId] = useState<string | null>(null)
+  const [batchUrls, setBatchUrls] = useState('')
+  const [batchConcurrency, setBatchConcurrency] = useState(2)
+  const [isStartingBatch, setIsStartingBatch] = useState(false)
 
   const mergedTasks = useMemo(() => {
     const taskMap = new Map<number, DownloadTask>()
@@ -83,6 +87,40 @@ export function TaskPanel() {
     }
   }
 
+  /** 按行批量提交自动化任务 */
+  const startBatchAutomation = async () => {
+    const urls = batchUrls
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (urls.length === 0 || isStartingBatch) return
+
+    setIsStartingBatch(true)
+    try {
+      const result = await automationApi.startBatch({
+        urls,
+        concurrency: batchConcurrency,
+        template: {
+          url: urls[0],
+          processing_preset: loadAutomationConfig(),
+          output_format: 'mp4',
+          subtitle_operation: 'none',
+          burn_subtitles: true,
+          enable_voice: true,
+          audio_mode: 'mix',
+          original_volume: 0.25,
+        },
+      })
+      addLog('info', `批量自动处理已入队: ${result.accepted_count} 个任务，批次 ${result.batch_id}`)
+      setBatchUrls('')
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `批量自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsStartingBatch(false)
+    }
+  }
+
   useEffect(() => {
     if (!activeJobIds) return
 
@@ -108,6 +146,39 @@ export function TaskPanel() {
     <div className="min-h-full p-4">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         {currentVideo && <VideoInfoCard video={currentVideo} />}
+
+        <section className="rounded-lg border border-border bg-background-elevated p-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium">批量自动处理</h3>
+              <p className="mt-1 text-xs text-foreground-muted">每行一个 YouTube 链接，使用当前画面处理配置入队执行。</p>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-foreground-muted">
+              <span>并发</span>
+              <input
+                type="number"
+                min={1}
+                max={8}
+                value={batchConcurrency}
+                onChange={(event) => setBatchConcurrency(Math.min(8, Math.max(1, Number(event.target.value) || 1)))}
+                className="h-8 w-16 rounded-md border border-border bg-background px-2 text-sm text-foreground"
+              />
+              <button
+                onClick={startBatchAutomation}
+                disabled={!batchUrls.trim() || isStartingBatch}
+                className="h-8 rounded-md bg-accent px-4 text-sm text-accent-foreground hover:bg-accent/90 disabled:opacity-50"
+              >
+                {isStartingBatch ? '入队中...' : '批量入队'}
+              </button>
+            </div>
+          </div>
+          <textarea
+            value={batchUrls}
+            onChange={(event) => setBatchUrls(event.target.value)}
+            placeholder="每行一个链接..."
+            className="min-h-28 w-full resize-y rounded-md border border-border bg-background p-3 text-sm text-foreground placeholder:text-foreground-muted focus:border-primary focus:outline-none"
+          />
+        </section>
 
         <section className="rounded-lg border border-border bg-background-elevated p-4">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
