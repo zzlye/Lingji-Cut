@@ -7,6 +7,7 @@ from .task import DownloadTask
 from .subtitle import SubtitlePreset
 from .profile import TextProviderProfile, VoiceProviderProfile
 from .processing import ProcessingPreset
+from .automation import AutomationJobRecord
 
 __all__ = [
     "Base",
@@ -20,4 +21,5 @@ __all__ = [
     "TextProviderProfile",
     "VoiceProviderProfile",
     "ProcessingPreset",
+    "AutomationJobRecord",
 ]

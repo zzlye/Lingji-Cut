@@ -157,10 +157,28 @@ export interface AutomationJob {
   steps: AutomationStep[]
 }
 
+/** 后端持久化自动化任务 */
+export interface BackendAutomationJob {
+  id: string
+  source_url: string
+  video_id: number | null
+  title: string | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  current_step: string | null
+  output_path: string | null
+  error_message: string | null
+  stages: AutomationStageResult[]
+  subtitle_text: string
+  created_at: string | null
+  completed_at: string | null
+}
+
 /** 后端自动化阶段结果 */
 export interface AutomationStageResult {
   key: AutomationStep['key'] | 'pipeline'
-  status: 'completed' | 'failed' | 'skipped'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+  progress?: number
   task_id?: number | null
   output_path?: string | null
   error_message?: string | null
@@ -174,6 +192,12 @@ export interface AutomationRunResponse {
   output_path: string
   stages: AutomationStageResult[]
   subtitle_text: string
+}
+
+/** 后端启动自动化任务响应 */
+export interface AutomationStartResponse {
+  message: string
+  job_id: string
 }
 
 /** 自动化字幕文本处理方式 */

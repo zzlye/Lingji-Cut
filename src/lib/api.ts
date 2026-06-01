@@ -283,6 +283,37 @@ export const automationApi = {
       method: 'POST',
       body: JSON.stringify(params),
     }),
+
+  /** 启动后台一键流程，立即返回任务 ID */
+  start: (params: {
+    url: string
+    processing_preset: import('@/types').ProcessingConfig
+    format_id?: string
+    output_format?: string
+    subtitle_preset_id?: number
+    subtitle_language?: string
+    text_profile_id?: number
+    subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
+    subtitle_target_language?: string
+    burn_subtitles?: boolean
+    enable_voice?: boolean
+    voice_profile_id?: number
+    voice_text?: string
+    audio_mode?: 'replace' | 'mix'
+    original_volume?: number
+  }) =>
+    request<import('@/types').AutomationStartResponse>('/automation/start', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 获取后台一键流程列表 */
+  listJobs: () =>
+    request<import('@/types').BackendAutomationJob[]>('/automation/jobs'),
+
+  /** 获取后台一键流程进度 */
+  getJob: (id: string) =>
+    request<import('@/types').BackendAutomationJob>(`/automation/jobs/${id}`),
 }
 
 /** 设置 API */

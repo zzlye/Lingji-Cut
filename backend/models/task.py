@@ -30,6 +30,8 @@ class DownloadTask(Base):
     error_message = Column(Text, nullable=True)
     # 任务参数（JSON 字符串）
     params = Column(Text, nullable=True)
+    # 所属一键自动化任务 ID
+    parent_job_id = Column(String(80), nullable=True, index=True)
     # 创建时间
     created_at = Column(DateTime, server_default=func.now())
     # 更新时间

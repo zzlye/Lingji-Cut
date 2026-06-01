@@ -6,7 +6,7 @@ import { automationApi, profileApi, videoApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import { SettingsCenter } from '@/features/settings/SettingsCenter'
-import type { AutomationStageResult } from '@/types'
+import type { BackendAutomationJob } from '@/types'
 
 /** 设置弹窗默认尺寸和窗口边距 */
 const SETTINGS_MODAL_WIDTH = 960
@@ -77,7 +77,7 @@ export function Header() {
     setParsing,
     addLog,
     addTask,
-    startAutomationJob,
+    upsertAutomationJob,
     updateAutomationJob,
     updateAutomationStep,
   } = useTaskStore()
@@ -115,56 +115,14 @@ export function Header() {
 
   /**
    * 一键完成流程
-   * 调用后端编排器执行解析、下载、画面处理、字幕渲染、可选配音和最终导出。
+   * 启动后端后台编排器，并轮询同步解析、下载、画面处理、字幕、配音和导出进度。
    */
   const handleAutoRun = async () => {
     if (!url.trim() || isRunningAuto) return
 
-    const automationJobId = startAutomationJob(url)
-
-    /** 后端当前是同步编排，前端先把阶段置为运行中，完成后按返回结果回填。 */
-    const markRunning = () => {
-      updateAutomationJob(automationJobId, {
-        status: 'running',
-        current_step: '后端自动流程执行中',
-      })
-      ;(['parse', 'download', 'effects', 'subtitle', 'voice', 'export'] as const).forEach((step) => {
-        updateAutomationStep(automationJobId, step, {
-          status: 'running',
-          progress: 35,
-          error_message: null,
-        })
-      })
-    }
-
-    /** 将后端阶段结果同步到前端任务队列和阶段卡片 */
-    const applyStageResult = (stage: AutomationStageResult, videoId: number) => {
-      if (stage.key === 'pipeline') return
-      updateAutomationStep(automationJobId, stage.key, {
-        status: stage.status,
-        progress: 100,
-        output_path: stage.output_path || null,
-        error_message: stage.error_message || null,
-      })
-      if (stage.task_id && stage.key !== 'parse') {
-        addTask({
-          id: stage.task_id,
-          video_id: videoId,
-          task_type: stage.key,
-          status: stage.status === 'completed' ? 'completed' : stage.status === 'failed' ? 'failed' : 'completed',
-          progress: 100,
-          output_path: stage.output_path || null,
-          error_message: stage.error_message || null,
-          created_at: new Date().toISOString(),
-          completed_at: new Date().toISOString(),
-        })
-      }
-    }
-
     setIsRunningAuto(true)
     setParsing(true)
     addLog('info', '开始一键完成流程')
-    markRunning()
 
     try {
       let textProfileId: number | undefined
@@ -176,7 +134,7 @@ export function Header() {
         textProfileId = undefined
       }
 
-      const result = await automationApi.run({
+      const payload = {
         url,
         processing_preset: loadAutomationConfig(),
         output_format: 'mp4',
@@ -186,45 +144,102 @@ export function Header() {
         enable_voice: true,
         audio_mode: 'mix',
         original_volume: 0.25,
-      })
+      } as const
 
-      updateAutomationJob(automationJobId, {
-        title: result.title || '一键自动流程',
-        video_id: result.video_id,
-      })
-      result.stages.forEach((stage) => applyStageResult(stage, result.video_id))
-      updateAutomationJob(automationJobId, {
-        status: 'completed',
-        progress: 100,
-        current_step: '流程完成',
-        completed_at: new Date().toISOString(),
-      })
-      addLog('info', `一键完成流程已结束: ${result.output_path}`)
+      const { job_id } = await automationApi.start(payload)
+      addLog('info', `自动处理任务已进入队列: ${job_id}`)
 
-      // 自动流程完成后重新解析一次，刷新素材卡片里的标题、字幕轨和缩略图。
-      try {
-        const video = await videoApi.parse(url)
-        setCurrentVideo(video)
-      } catch {
-        // 成品已经导出，刷新元数据失败只记录为弱提示。
-        addLog('warn', '自动流程已完成，但刷新视频信息失败')
+      for (;;) {
+        const job = await automationApi.getJob(job_id)
+        syncBackendAutomationJob(job)
+        if (job.status === 'completed') {
+          addLog('info', `一键完成流程已结束: ${job.output_path || '已导出'}`)
+          try {
+            const video = await videoApi.parse(url)
+            setCurrentVideo(video)
+          } catch {
+            // 成品已经导出，刷新元数据失败只记录为弱提示。
+            addLog('warn', '自动流程已完成，但刷新视频信息失败')
+          }
+          break
+        }
+        if (job.status === 'failed') {
+          throw new Error(job.error_message || '自动化任务失败')
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1200))
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误'
-      updateAutomationStep(automationJobId, 'export', {
-        status: 'failed',
-        error_message: message,
-      })
-      updateAutomationJob(automationJobId, {
-        status: 'failed',
-        current_step: '流程失败',
-        completed_at: new Date().toISOString(),
-      })
       addLog('error', `一键完成失败: ${message}`)
     } finally {
       setIsRunningAuto(false)
       setParsing(false)
     }
+  }
+
+  /** 把后端自动化任务映射到前端队列展示 */
+  const syncBackendAutomationJob = (job: BackendAutomationJob) => {
+    const steps = (['parse', 'download', 'effects', 'subtitle', 'voice', 'export'] as const).map((key) => {
+      const stage = job.stages.find((item) => item.key === key)
+      return {
+        key,
+        label: {
+          parse: '解析视频',
+          download: '下载入库',
+          effects: '画面处理',
+          subtitle: '字幕处理',
+          voice: '配音生成',
+          export: '合成导出',
+        }[key],
+        description: {
+          parse: '读取 YouTube 元数据和字幕轨',
+          download: '下载原视频并归档到项目目录',
+          effects: '应用画面差异化和输出参数',
+          subtitle: '生成、翻译、润色并渲染字幕',
+          voice: '按配置生成或跳过配音',
+          export: '合成视频、字幕、配音并导出成品',
+        }[key],
+        status: stage?.status === 'failed' ? 'failed' : stage?.status === 'skipped' ? 'skipped' : stage?.status === 'completed' ? 'completed' : job.status === 'running' && job.current_step?.includes({
+          parse: '解析',
+          download: '下载',
+          effects: '画面',
+          subtitle: '字幕',
+          voice: '配音',
+          export: '导出',
+        }[key]) ? 'running' : 'pending',
+        progress: stage?.status === 'completed' || stage?.status === 'skipped' ? 100 : Math.round(stage?.progress || 0),
+        output_path: stage?.output_path || null,
+        error_message: stage?.error_message || null,
+      }
+    })
+
+    upsertAutomationJob({
+      id: job.id,
+      title: job.title || '一键自动流程',
+      source_url: job.source_url,
+      video_id: job.video_id,
+      status: job.status,
+      progress: Math.round(job.progress || 0),
+      current_step: job.current_step || '等待开始',
+      created_at: job.created_at || new Date().toISOString(),
+      completed_at: job.completed_at,
+      steps,
+    })
+
+    job.stages.forEach((stage) => {
+      if (!stage.task_id || stage.key === 'parse' || stage.key === 'pipeline' || !job.video_id) return
+      addTask({
+        id: stage.task_id,
+        video_id: job.video_id,
+        task_type: stage.key,
+        status: stage.status === 'failed' ? 'failed' : stage.status === 'completed' || stage.status === 'skipped' ? 'completed' : 'processing',
+        progress: stage.status === 'completed' || stage.status === 'skipped' ? 100 : Math.round(stage.progress || 0),
+        output_path: stage.output_path || null,
+        error_message: stage.error_message || null,
+        created_at: job.created_at || new Date().toISOString(),
+        completed_at: stage.status === 'completed' || stage.status === 'skipped' ? new Date().toISOString() : null,
+      })
+    })
   }
 
   /**

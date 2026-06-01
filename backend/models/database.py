@@ -43,6 +43,7 @@ def init_db():
     _migrate_text_profiles()
     _migrate_subtitle_presets()
     _migrate_voice_profiles()
+    _migrate_download_tasks()
 
 
 def _migrate_text_profiles():
@@ -99,3 +100,20 @@ def _migrate_voice_profiles():
         for column_name, column_sql in required_columns.items():
             if column_name not in existing_columns:
                 connection.execute(text(f"ALTER TABLE voice_provider_profiles ADD COLUMN {column_name} {column_sql}"))
+
+
+def _migrate_download_tasks():
+    """补齐旧版本任务表缺失的列"""
+    inspector = inspect(engine)
+    if "download_tasks" not in inspector.get_table_names():
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("download_tasks")}
+    required_columns = {
+        "parent_job_id": "VARCHAR(80)",
+    }
+
+    with engine.begin() as connection:
+        for column_name, column_sql in required_columns.items():
+            if column_name not in existing_columns:
+                connection.execute(text(f"ALTER TABLE download_tasks ADD COLUMN {column_name} {column_sql}"))

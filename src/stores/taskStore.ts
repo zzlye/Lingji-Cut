@@ -48,6 +48,8 @@ interface TaskState {
   updateTask: (id: number, updates: Partial<DownloadTask>) => void
   /** 创建一键自动处理流程 */
   startAutomationJob: (sourceUrl: string) => string
+  /** 写入后端返回的一键自动处理流程 */
+  upsertAutomationJob: (job: AutomationJob) => void
   /** 更新一键自动处理流程 */
   updateAutomationJob: (id: string, updates: Partial<AutomationJob>) => void
   /** 更新一键自动处理流程步骤 */
@@ -69,7 +71,14 @@ export const useTaskStore = create<TaskState>((set) => ({
   isParsing: false,
 
   addTask: (task) =>
-    set((state) => ({ tasks: [task, ...state.tasks] })),
+    set((state) => {
+      const exists = state.tasks.some((item) => item.id === task.id)
+      return {
+        tasks: exists
+          ? state.tasks.map((item) => item.id === task.id ? { ...item, ...task } : item)
+          : [task, ...state.tasks],
+      }
+    }),
 
   updateTask: (id, updates) =>
     set((state) => ({
@@ -95,6 +104,16 @@ export const useTaskStore = create<TaskState>((set) => ({
     set((state) => ({ automationJobs: [job, ...state.automationJobs] }))
     return id
   },
+
+  upsertAutomationJob: (job) =>
+    set((state) => {
+      const exists = state.automationJobs.some((item) => item.id === job.id)
+      return {
+        automationJobs: exists
+          ? state.automationJobs.map((item) => item.id === job.id ? job : item)
+          : [job, ...state.automationJobs],
+      }
+    }),
 
   updateAutomationJob: (id, updates) =>
     set((state) => ({

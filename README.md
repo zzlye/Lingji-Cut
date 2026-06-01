@@ -33,7 +33,9 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 ## 已实现能力
 
 - YouTube URL 解析和下载任务接口。
-- 一键自动流程已由后端 `/automation/run` 编排：`解析 -> 下载 -> 画面处理 -> 字幕渲染 -> 可选配音 -> 导出`。
+- 一键自动流程已由后端自动化任务编排：`解析 -> 下载 -> 画面处理 -> 字幕渲染 -> 可选配音 -> 导出`。
+  - `/automation/start` 会创建后台任务并立即返回 `job_id`，前端按 `/automation/jobs/{id}` 轮询阶段进度。
+  - `/automation/run` 保留同步执行入口，方便脚本和测试直接跑完整链路。
   - 字幕步骤会自动选择解析到的字幕轨，并使用默认/首个字幕预设生成 `ASS`，同时尝试烧录硬字幕。
   - 配音为可选步骤：存在已保存配音配置时优先使用字幕正文生成配音；没有配置或生成失败时跳过并继续导出。
   - 导出步骤会生成最终 `mp4` 到项目 `exports` 目录。
@@ -44,7 +46,8 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 - `/effects/apply` 可执行完整画面处理任务。
 - `/subtitles/render` 可下载 YouTube 字幕、生成 `ASS`，并可烧录硬字幕视频。
 - `/subtitles/process-text` 可使用已保存文本 API 生成、翻译或润色字幕正文。
-- `/automation/run` 可在后端执行完整一键流程，并返回每个阶段的任务状态和最终导出路径。
+- `/automation/start`、`/automation/jobs`、`/automation/jobs/{id}` 可创建、列表展示和查询后台自动化任务。
+- `/automation/run` 可同步执行完整一键流程，并返回每个阶段的任务状态和最终导出路径。
 - 字幕预设支持语言、单/双行、字体、字号、九宫格位置、颜色、描边、阴影、背景透明度和实时预览。
 - 配音配置内置配音 API 管理、音色目录、试听、语速、音量、音调、输出格式、采样率、码率和风格提示。
 - `/exports/create` 可执行字幕烧录、音频合成和最终格式导出。
@@ -54,9 +57,9 @@ YouTube 视频下载、画面处理、字幕、配音、导出处理桌面软件
 当前一键流程已经具备闭环，但还有这些产品化限制：
 
 - 字幕内容优先来自 YouTube 原字幕/自动字幕；存在已保存文本 API 配置时，一键流程会默认对字幕正文做润色。
-- 文本 API 已支持生成、翻译、润色入口，但处理后的字幕时间轴目前按行重建；后续需要保持原字幕时间码并支持分段批处理。
+- 文本 API 已支持生成、翻译、润色入口；一键流程会把处理后的文本映射回原字幕时间轴，后续还需要做更精细的分段批处理和逐句对齐。
 - 自动配音当前优先使用字幕正文，字幕缺失时才回退到标题文案；按字幕时间轴分段配音和对齐仍需继续做。
-- 一键流程已沉到后端同步编排；后续还需要异步队列、断点恢复、更细进度推送和批量任务管理。
+- 一键流程已沉到后端后台任务编排；后续还需要断点恢复、WebSocket/SSE 实时推送和更完整的批量任务调度。
 
 ## 配音渠道支持
 
@@ -101,6 +104,14 @@ D:\tools\python-3.12.10-embed\python.exe
 D:\tools\python-3.12.10-embed\python.exe backend\run.py
 Invoke-RestMethod http://127.0.0.1:8765/health
 Invoke-RestMethod http://127.0.0.1:8765/effects/presets
+```
+
+### 本地自动化测试
+
+```powershell
+D:\tools\python-3.12.10-embed\python.exe backend\tests\test_subtitle_mapping.py -v
+D:\tools\python-3.12.10-embed\python.exe backend\tests\test_local_media_pipeline.py -v
+D:\tools\python-3.12.10-embed\python.exe backend\tests\test_automation_jobs.py -v
 ```
 
 ## 外部工具路径

@@ -2,9 +2,9 @@
 // 任务面板组件 - 显示一键自动流程、底层任务记录和当前视频信息
 
 import { useEffect, useMemo, useState } from 'react'
-import { taskApi } from '@/lib/api'
+import { automationApi, taskApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
-import type { AutomationJob, AutomationStep, DownloadTask } from '@/types'
+import type { AutomationJob, AutomationStep, BackendAutomationJob, DownloadTask } from '@/types'
 import { VideoInfoCard } from './VideoInfoCard'
 
 /**
@@ -12,7 +12,7 @@ import { VideoInfoCard } from './VideoInfoCard'
  * 显示当前解析的视频信息、一键自动处理流程和底层任务记录。
  */
 export function TaskPanel() {
-  const { currentVideo, tasks, automationJobs, addLog } = useTaskStore()
+  const { currentVideo, tasks, automationJobs, addLog, upsertAutomationJob } = useTaskStore()
   const [serverTasks, setServerTasks] = useState<DownloadTask[]>([])
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
 
@@ -27,8 +27,12 @@ export function TaskPanel() {
   const loadTasks = async () => {
     setIsLoadingTasks(true)
     try {
-      const data = await taskApi.list()
-      setServerTasks(data)
+      const [taskData, automationData] = await Promise.all([
+        taskApi.list(),
+        automationApi.listJobs(),
+      ])
+      setServerTasks(taskData)
+      automationData.forEach((job) => upsertAutomationJob(mapBackendAutomationJob(job)))
     } catch (error) {
       addLog('error', `加载任务列表失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
@@ -39,6 +43,15 @@ export function TaskPanel() {
   useEffect(() => {
     loadTasks()
   }, [])
+
+  useEffect(() => {
+    if (!automationJobs.some((job) => job.status === 'running' || job.status === 'pending')) return
+
+    const timer = window.setInterval(() => {
+      loadTasks()
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [automationJobs])
 
   return (
     <div className="min-h-full p-4">
@@ -93,6 +106,63 @@ export function TaskPanel() {
       </div>
     </div>
   )
+}
+
+/** 把后端持久化自动任务转换为前端展示结构 */
+function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJob {
+  const stageLabels: Record<AutomationStep['key'], string> = {
+    parse: '解析视频',
+    download: '下载入库',
+    effects: '画面处理',
+    subtitle: '字幕处理',
+    voice: '配音生成',
+    export: '合成导出',
+  }
+  const stageDescriptions: Record<AutomationStep['key'], string> = {
+    parse: '读取 YouTube 元数据和字幕轨',
+    download: '下载原视频并归档到项目目录',
+    effects: '应用画面差异化和输出参数',
+    subtitle: '生成、翻译、润色并渲染字幕',
+    voice: '按配置生成或跳过配音',
+    export: '合成视频、字幕、配音并导出成品',
+  }
+  const steps = (Object.keys(stageLabels) as AutomationStep['key'][]).map((key) => {
+    const stage = job.stages.find((item) => item.key === key)
+    const isCurrentStep = job.status === 'running' && Boolean(job.current_step?.includes({
+      parse: '解析',
+      download: '下载',
+      effects: '画面',
+      subtitle: '字幕',
+      voice: '配音',
+      export: '导出',
+    }[key]))
+    return {
+      key,
+      label: stageLabels[key],
+      description: stageDescriptions[key],
+      status: stage?.status === 'completed' || stage?.status === 'failed' || stage?.status === 'skipped'
+        ? stage.status
+        : isCurrentStep || stage?.status === 'running'
+          ? 'running'
+          : 'pending',
+      progress: stage?.status === 'completed' || stage?.status === 'skipped' ? 100 : Math.round(stage?.progress || 0),
+      output_path: stage?.output_path || null,
+      error_message: stage?.error_message || null,
+    }
+  })
+
+  return {
+    id: job.id,
+    title: job.title || '一键自动流程',
+    source_url: job.source_url,
+    video_id: job.video_id,
+    status: job.status,
+    progress: Math.round(job.progress || 0),
+    current_step: job.current_step || '等待开始',
+    created_at: job.created_at || new Date().toISOString(),
+    completed_at: job.completed_at,
+    steps,
+  }
 }
 
 /** 自动流程概览 */
