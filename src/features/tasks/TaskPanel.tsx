@@ -15,6 +15,7 @@ export function TaskPanel() {
   const { currentVideo, tasks, automationJobs, addLog, upsertAutomationJob } = useTaskStore()
   const [serverTasks, setServerTasks] = useState<DownloadTask[]>([])
   const [isLoadingTasks, setIsLoadingTasks] = useState(false)
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
 
   const mergedTasks = useMemo(() => {
     const taskMap = new Map<number, DownloadTask>()
@@ -22,6 +23,15 @@ export function TaskPanel() {
     for (const task of tasks) taskMap.set(task.id, task)
     return Array.from(taskMap.values()).sort((a, b) => b.id - a.id)
   }, [serverTasks, tasks])
+
+  const activeJobIds = useMemo(
+    () => automationJobs
+      .filter((job) => job.status === 'running' || job.status === 'pending')
+      .map((job) => job.id)
+      .sort()
+      .join('|'),
+    [automationJobs],
+  )
 
   /** 从后端读取持久化任务记录 */
   const loadTasks = async () => {
@@ -44,14 +54,40 @@ export function TaskPanel() {
     loadTasks()
   }, [])
 
-  useEffect(() => {
-    if (!automationJobs.some((job) => job.status === 'running' || job.status === 'pending')) return
+  /** 重试失败或已完成的自动化任务 */
+  const retryAutomationJob = async (jobId: string) => {
+    setRetryingJobId(jobId)
+    try {
+      const result = await automationApi.retry(jobId)
+      addLog('info', `自动处理任务已重新进入队列: ${result.job_id}`)
+      await loadTasks()
+    } catch (error) {
+      addLog('error', `重试自动处理失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setRetryingJobId(null)
+    }
+  }
 
-    const timer = window.setInterval(() => {
-      loadTasks()
-    }, 2000)
-    return () => window.clearInterval(timer)
-  }, [automationJobs])
+  useEffect(() => {
+    if (!activeJobIds) return
+
+    const sources = activeJobIds.split('|').map((jobId) => {
+      const source = new EventSource(automationApi.eventsUrl(jobId))
+      source.addEventListener('job', (event) => {
+        upsertAutomationJob(mapBackendAutomationJob(JSON.parse((event as MessageEvent).data) as BackendAutomationJob))
+      })
+      source.addEventListener('error', () => {
+        source.close()
+      })
+      return source
+    })
+
+    const timer = window.setInterval(loadTasks, 4000)
+    return () => {
+      sources.forEach((source) => source.close())
+      window.clearInterval(timer)
+    }
+  }, [activeJobIds])
 
   return (
     <div className="min-h-full p-4">
@@ -72,7 +108,12 @@ export function TaskPanel() {
           ) : (
             <div className="space-y-3">
               {automationJobs.map((job) => (
-                <AutomationJobCard key={job.id} job={job} />
+                <AutomationJobCard
+                  key={job.id}
+                  job={job}
+                  isRetrying={retryingJobId === job.id}
+                  onRetry={() => retryAutomationJob(job.id)}
+                />
               ))}
             </div>
           )}
@@ -195,7 +236,7 @@ function EmptyAutomationList() {
 }
 
 /** 自动流程卡片 */
-function AutomationJobCard({ job }: { job: AutomationJob }) {
+function AutomationJobCard({ job, isRetrying, onRetry }: { job: AutomationJob; isRetrying: boolean; onRetry: () => void }) {
   return (
     <article className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -206,9 +247,20 @@ function AutomationJobCard({ job }: { job: AutomationJob }) {
           </div>
           <p className="mt-1 max-w-3xl truncate text-xs text-foreground-muted">{job.source_url}</p>
         </div>
-        <div className="text-right text-xs text-foreground-muted">
-          <div>{formatTime(job.created_at)}</div>
-          <div className="mt-1">{job.current_step}</div>
+        <div className="flex shrink-0 flex-col items-end gap-2 text-right text-xs text-foreground-muted">
+          <div>
+            <div>{formatTime(job.created_at)}</div>
+            <div className="mt-1">{job.current_step}</div>
+          </div>
+          {(job.status === 'failed' || job.status === 'completed') && (
+            <button
+              onClick={onRetry}
+              disabled={isRetrying}
+              className="h-8 rounded-md border border-border px-3 text-xs text-foreground hover:bg-white/5 disabled:opacity-50"
+            >
+              {isRetrying ? '重试中...' : '重试'}
+            </button>
+          )}
         </div>
       </div>
 

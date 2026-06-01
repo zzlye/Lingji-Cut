@@ -78,8 +78,6 @@ export function Header() {
     addLog,
     addTask,
     upsertAutomationJob,
-    updateAutomationJob,
-    updateAutomationStep,
   } = useTaskStore()
 
   useEffect(() => {
@@ -149,24 +147,14 @@ export function Header() {
       const { job_id } = await automationApi.start(payload)
       addLog('info', `自动处理任务已进入队列: ${job_id}`)
 
-      for (;;) {
-        const job = await automationApi.getJob(job_id)
-        syncBackendAutomationJob(job)
-        if (job.status === 'completed') {
-          addLog('info', `一键完成流程已结束: ${job.output_path || '已导出'}`)
-          try {
-            const video = await videoApi.parse(url)
-            setCurrentVideo(video)
-          } catch {
-            // 成品已经导出，刷新元数据失败只记录为弱提示。
-            addLog('warn', '自动流程已完成，但刷新视频信息失败')
-          }
-          break
-        }
-        if (job.status === 'failed') {
-          throw new Error(job.error_message || '自动化任务失败')
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 1200))
+      const job = await watchAutomationJob(job_id)
+      addLog('info', `一键完成流程已结束: ${job.output_path || '已导出'}`)
+      try {
+        const video = await videoApi.parse(url)
+        setCurrentVideo(video)
+      } catch {
+        // 成品已经导出，刷新元数据失败只记录为弱提示。
+        addLog('warn', '自动流程已完成，但刷新视频信息失败')
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误'
@@ -174,6 +162,60 @@ export function Header() {
     } finally {
       setIsRunningAuto(false)
       setParsing(false)
+    }
+  }
+
+  /** 监听后台自动化任务，优先使用 SSE，失败时降级为轮询 */
+  const watchAutomationJob = (jobId: string) => new Promise<BackendAutomationJob>((resolve, reject) => {
+    if (typeof EventSource === 'undefined') {
+      pollAutomationJob(jobId).then(resolve).catch(reject)
+      return
+    }
+
+    let settled = false
+    const source = new EventSource(automationApi.eventsUrl(jobId))
+    const fallbackTimer = window.setTimeout(() => {
+      if (settled) return
+      settled = true
+      source.close()
+      pollAutomationJob(jobId).then(resolve).catch(reject)
+    }, 5000)
+
+    source.addEventListener('job', (event) => {
+      window.clearTimeout(fallbackTimer)
+      const job = JSON.parse((event as MessageEvent).data) as BackendAutomationJob
+      syncBackendAutomationJob(job)
+      if (job.status === 'completed') {
+        settled = true
+        window.clearTimeout(fallbackTimer)
+        source.close()
+        resolve(job)
+      }
+      if (job.status === 'failed') {
+        settled = true
+        window.clearTimeout(fallbackTimer)
+        source.close()
+        reject(new Error(job.error_message || '自动化任务失败'))
+      }
+    })
+
+    source.addEventListener('error', () => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(fallbackTimer)
+      source.close()
+      pollAutomationJob(jobId).then(resolve).catch(reject)
+    })
+  })
+
+  /** SSE 不可用时按固定间隔查询后台任务 */
+  const pollAutomationJob = async (jobId: string) => {
+    for (;;) {
+      const job = await automationApi.getJob(jobId)
+      syncBackendAutomationJob(job)
+      if (job.status === 'completed') return job
+      if (job.status === 'failed') throw new Error(job.error_message || '自动化任务失败')
+      await new Promise((resolve) => window.setTimeout(resolve, 1200))
     }
   }
 

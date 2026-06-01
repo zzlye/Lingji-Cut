@@ -9,8 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, TextEngine, VoiceEngine
@@ -654,6 +655,18 @@ def _run_background_job(job_id: str) -> None:
         db.close()
 
 
+def _reset_job_for_retry(job: AutomationJobRecord) -> None:
+    """重置失败任务，保留原始参数后重新进入后台队列"""
+    job.status = "pending"
+    job.progress = 0
+    job.current_step = "等待重试"
+    job.output_path = None
+    job.subtitle_text = None
+    job.error_message = None
+    job.completed_at = None
+    job.stages = json.dumps(_default_stages(), ensure_ascii=False)
+
+
 @router.post("/run", response_model=AutomationRunResponse)
 def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db)):
     """执行完整一键自动流程"""
@@ -705,3 +718,52 @@ def get_automation_job(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="自动化任务不存在")
     return _job_to_response(job)
+
+
+@router.post("/jobs/{job_id}/retry", response_model=AutomationStartResponse)
+def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
+    """重试失败的一键自动化任务"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status not in {"failed", "completed"}:
+        raise HTTPException(status_code=400, detail="只有失败或已完成的自动化任务可以重试")
+    if not job.params:
+        raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
+
+    _reset_job_for_retry(job)
+    db.commit()
+    AUTOMATION_EXECUTOR.submit(_run_background_job, job_id)
+    return AutomationStartResponse(message="自动化任务已重新进入队列", job_id=job_id)
+
+
+@router.get("/jobs/{job_id}/events")
+async def stream_automation_job_events(job_id: str, request: Request):
+    """通过 SSE 持续推送自动化任务进度"""
+
+    async def event_stream():
+        last_payload = ""
+        while True:
+            if await request.is_disconnected():
+                break
+
+            db = SessionLocal()
+            try:
+                job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+                if not job:
+                    payload = json.dumps({"error": "自动化任务不存在"}, ensure_ascii=False)
+                    yield f"event: error\ndata: {payload}\n\n"
+                    break
+
+                payload = _job_to_response(job).model_dump_json()
+                if payload != last_payload:
+                    yield f"event: job\ndata: {payload}\n\n"
+                    last_payload = payload
+                if job.status in {"completed", "failed"}:
+                    break
+            finally:
+                db.close()
+
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
