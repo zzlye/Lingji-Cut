@@ -897,6 +897,25 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     job.stages = json.dumps(stages, ensure_ascii=False)
 
 
+def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
+    """后端重启后恢复中断任务，尽量从已完成阶段后继续"""
+    stages = _load_job_stages(job)
+    for stage in stages:
+        if stage.get("status") in {"running", "failed"}:
+            stage["status"] = "pending"
+            stage["progress"] = 0
+            stage["task_id"] = None
+            stage["output_path"] = None
+            stage["error_message"] = None
+
+    job.status = "pending"
+    job.progress = _calculate_job_progress(stages)
+    job.current_step = "后端重启后等待恢复"
+    job.error_message = None
+    job.completed_at = None
+    job.stages = json.dumps(stages, ensure_ascii=False)
+
+
 def _create_automation_job(db: Session, request: AutomationRunRequest, batch_id: Optional[str] = None, batch_concurrency: Optional[int] = None, title: str = "一键自动流程") -> AutomationJobRecord:
     """创建自动化任务记录"""
     job_id = f"auto-{uuid.uuid4().hex[:16]}"
@@ -1051,6 +1070,26 @@ def _register_batch_semaphore(batch_id: str, concurrency: int) -> None:
         BATCH_PAUSED.discard(batch_id)
 
 
+def _register_batch_pause(batch_id: str) -> None:
+    """恢复持久化的批次暂停状态"""
+    with BATCH_SEMAPHORE_LOCK:
+        BATCH_PAUSED.add(batch_id)
+
+
+def _restore_batch_runtime_state(jobs: list[AutomationJobRecord]) -> None:
+    """根据持久化任务参数恢复批次并发和暂停状态"""
+    for job in jobs:
+        batch_id = _get_batch_id_from_job(job)
+        if not batch_id:
+            continue
+        params = _get_job_params(job)
+        with BATCH_SEMAPHORE_LOCK:
+            if batch_id not in BATCH_SEMAPHORES:
+                BATCH_SEMAPHORES[batch_id] = Semaphore(_get_batch_concurrency_from_job(job))
+            if params.get("batch_paused") or job.status == "paused":
+                BATCH_PAUSED.add(batch_id)
+
+
 def _run_background_job_with_batch_limit(job_id: str, resume_from_checkpoint: bool = False) -> None:
     """后台线程入口，按批次并发限制执行任务"""
     try:
@@ -1094,6 +1133,31 @@ def _submit_automation_job(job_id: str, resume_from_checkpoint: bool = False) ->
             return
         SCHEDULED_AUTOMATION_JOBS.add(job_id)
     AUTOMATION_EXECUTOR.submit(_run_background_job_with_batch_limit, job_id, resume_from_checkpoint)
+
+
+def recover_automation_jobs_on_startup() -> dict[str, int]:
+    """后端启动后恢复未完成的一键自动化任务"""
+    db = SessionLocal()
+    try:
+        jobs = db.query(AutomationJobRecord).filter(AutomationJobRecord.status.in_(["pending", "running", "paused"])).all()
+        _restore_batch_runtime_state(jobs)
+
+        submitted = 0
+        paused = 0
+        for job in jobs:
+            if job.status == "paused":
+                paused += 1
+                continue
+            if job.status == "running":
+                _prepare_interrupted_job_for_startup(job)
+            elif job.status == "pending":
+                job.current_step = job.current_step or "等待恢复"
+            submitted += 1
+            _submit_automation_job(job.id, True)
+        db.commit()
+        return {"submitted": submitted, "paused": paused}
+    finally:
+        db.close()
 
 
 def _normalize_batch_urls(urls: list[str]) -> list[str]:

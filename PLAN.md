@@ -58,6 +58,7 @@
   - `GET /automation/jobs/{id}/events` 通过 SSE 推送实时进度；前端异常时降级为查询接口。
   - `POST /automation/jobs/{id}/retry` 支持按原参数重试失败或已完成任务。
   - `POST /automation/jobs/{id}/resume` 支持断点续跑，优先复用已完成且文件存在的阶段输出。
+  - 后端启动时会恢复未完成自动化任务：中断的 `running` 任务按断点续跑重新入队，`paused` 批次继续保持暂停。
   - `POST /automation/run` 保留同步执行入口，方便脚本、测试和调试直接跑完整链路。
   - 如果已保存文本 API 配置，一键流程会默认对字幕正文做润色；没有文本配置时直接使用 YouTube 字幕。
   - 字幕失败、配音失败属于可跳过阶段，主流程会尽量继续导出。
@@ -116,6 +117,7 @@
   - `/automation/batch/{batch_id}/pause` 和 `/automation/batch/{batch_id}/resume` 可控制批次待调度任务。
   - `/automation/jobs/{id}/retry` 可让失败或已完成任务重新进入队列。
   - `/automation/jobs/{id}/resume` 可复用已完成阶段，避免失败后重复下载和重复处理。
+  - 后端重启后可恢复未完成自动化任务，并保持批次暂停状态。
   - `/automation/run` 可按顺序创建下载、画面处理、字幕、配音、导出任务。
   - 文本 API 字幕处理可按原字幕时间轴逐条/分批处理，并尊重并发、重试和限速配置。
   - 没有字幕或配音配置时对应阶段可跳过，导出仍继续。

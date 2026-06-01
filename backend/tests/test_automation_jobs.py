@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _job_to_response, _normalize_batch_urls, _pause_batch_jobs, _prepare_job_for_resume, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _create_automation_job, _default_stages, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.models import AutomationJobRecord  # noqa: E402
 
 
@@ -44,6 +44,11 @@ class FakeDb:
 
 
 class AutomationJobTests(unittest.TestCase):
+    def tearDown(self):
+        """清理批次运行时状态，避免测试互相影响"""
+        BATCH_PAUSED.clear()
+        BATCH_SEMAPHORES.clear()
+
     def test_job_response_preserves_stage_progress(self):
         job = AutomationJobRecord(
             id="auto-test",
@@ -126,6 +131,31 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIsNone(stages["export"]["task_id"])
         self.assertIsNone(stages["export"]["error_message"])
 
+    def test_prepare_interrupted_job_for_startup_clears_running_stage(self):
+        job = AutomationJobRecord(
+            id="auto-startup",
+            source_url="https://youtube.com/watch?v=test",
+            status="running",
+            progress=50,
+            current_step="字幕处理",
+            error_message="旧错误",
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+                {"key": "subtitle", "status": "running", "progress": 55, "task_id": 2, "output_path": None, "error_message": "中断"},
+            ], ensure_ascii=False),
+        )
+
+        _prepare_interrupted_job_for_startup(job)
+        stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+        self.assertEqual(job.status, "pending")
+        self.assertEqual(job.current_step, "后端重启后等待恢复")
+        self.assertIsNone(job.error_message)
+        self.assertEqual(stages["download"]["status"], "completed")
+        self.assertEqual(stages["subtitle"]["status"], "pending")
+        self.assertIsNone(stages["subtitle"]["task_id"])
+        self.assertIsNone(stages["subtitle"]["error_message"])
+
     def test_stage_output_reusable_requires_existing_file(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
             temp_path = temp_file.name
@@ -199,6 +229,24 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(params["batch_id"], "batch-a")
         self.assertEqual(params["batch_concurrency"], 6)
         self.assertEqual(_get_batch_concurrency_from_job(job), 6)
+
+    def test_restore_batch_runtime_state_keeps_paused_batches(self):
+        jobs = [
+            AutomationJobRecord(id="auto-paused", source_url="https://youtube.com/1", status="paused", params=json.dumps({"batch_id": "batch-a", "batch_concurrency": 5, "batch_paused": True})),
+            AutomationJobRecord(id="auto-pending", source_url="https://youtube.com/2", status="pending", params=json.dumps({"batch_id": "batch-b", "batch_concurrency": 3})),
+        ]
+
+        _restore_batch_runtime_state(jobs)
+
+        self.assertTrue(_is_batch_paused("batch-a"))
+        self.assertFalse(_is_batch_paused("batch-b"))
+        self.assertIn("batch-a", BATCH_SEMAPHORES)
+        self.assertIn("batch-b", BATCH_SEMAPHORES)
+
+    def test_register_batch_pause_sets_runtime_pause_flag(self):
+        _register_batch_pause("batch-manual")
+
+        self.assertTrue(_is_batch_paused("batch-manual"))
 
     def test_subtitle_entries_to_voice_segments_preserves_timeline(self):
         entries = [

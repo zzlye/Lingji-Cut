@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .models import init_db
 from .api import automation_router, videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router
+from .api.automation import recover_automation_jobs_on_startup
 
 # 创建 FastAPI 应用实例
 app = FastAPI(
@@ -40,8 +41,9 @@ app.include_router(automation_router)
 
 @app.on_event("startup")
 async def startup():
-    """应用启动时初始化数据库"""
+    """应用启动时初始化数据库，并恢复未完成的一键任务"""
     init_db()
+    recover_automation_jobs_on_startup()
 
 
 @app.get("/health")
