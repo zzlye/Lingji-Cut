@@ -61,7 +61,7 @@ export interface DownloadTask {
   id: number
   video_id: number
   task_type: 'download' | 'effects' | 'subtitle' | 'voice' | 'export'
-  status: 'pending' | 'downloading' | 'processing' | 'paused' | 'cancelled' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'processing' | 'paused' | 'cancelled' | 'completed' | 'failed' | 'skipped'
   progress: number
   output_path: string | null
   error_message: string | null

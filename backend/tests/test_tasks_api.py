@@ -2,6 +2,7 @@
 # 任务列表接口测试 - 验证孤儿失败任务不会污染用户任务视图
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -14,7 +15,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.api.tasks import cleanup_interrupted_tasks, clear_tasks, delete_task, get_tasks, pause_task, cancel_task, _task_to_response  # noqa: E402
-from backend.models import DownloadTask  # noqa: E402
+from backend.models import AutomationJobRecord, DownloadTask  # noqa: E402
 
 
 class FakeQuery:
@@ -52,11 +53,14 @@ class FakeQuery:
 class FakeDb:
     """测试用数据库会话"""
 
-    def __init__(self, tasks):
+    def __init__(self, tasks, jobs=None):
         self.tasks = tasks
+        self.jobs = jobs or []
         self.commit_count = 0
 
-    def query(self, *_):
+    def query(self, model=None):
+        if model is AutomationJobRecord:
+            return FakeQuery(self.jobs)
         return FakeQuery(self.tasks)
 
     def delete(self, task):
@@ -118,6 +122,24 @@ class TasksApiTests(unittest.TestCase):
         result = asyncio.run(get_tasks(include_orphans=True, db=FakeDb([orphan, real_task])))
 
         self.assertEqual([task.id for task in result], [1, 2])
+
+    def test_get_tasks_hides_superseded_child_records_by_default(self):
+        """断点续跑成功后默认只展示当前阶段引用的子任务"""
+        old_failed = DownloadTask(id=1, video_id=8, task_type="export", status="failed", progress=0, parent_job_id="auto-1")
+        current_export = DownloadTask(id=2, video_id=8, task_type="export", status="completed", progress=100, parent_job_id="auto-1")
+        standalone = DownloadTask(id=3, video_id=8, task_type="download", status="completed", progress=100)
+        job = AutomationJobRecord(
+            id="auto-1",
+            source_url="https://youtube.com/watch?v=test",
+            status="completed",
+            stages=json.dumps([
+                {"key": "export", "status": "completed", "task_id": 2, "progress": 100, "output_path": "D:/out.mp4", "error_message": None},
+            ], ensure_ascii=False),
+        )
+
+        result = asyncio.run(get_tasks(db=FakeDb([old_failed, current_export, standalone], jobs=[job])))
+
+        self.assertEqual([task.id for task in result], [2, 3])
 
     def test_delete_task_removes_finished_record(self):
         """已结束的底层任务可以手动删除"""

@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .process_control import request_control, terminate_matching_tool_processes
+from .process_control import clear_control_request, request_control, terminate_matching_tool_processes
 from .paths import ensure_project_dirs
 from ..models import AutomationJobRecord, DownloadTask, VideoSource
 
@@ -27,6 +27,23 @@ def request_job_control(db: Session, job: AutomationJobRecord, action: str) -> i
         killed_count += terminate_task_external_processes(db, task)
     killed_count += terminate_matching_tool_processes(_job_match_fragments(db, job))
     return killed_count
+
+
+def request_stage_task_control(db: Session, task: DownloadTask, action: str) -> int:
+    """只控制当前阶段的底层任务，避免阶段跳过误伤后续字幕或导出进程"""
+    killed_count = request_control(f"task:{task.id}", action)
+    killed_count += terminate_matching_tool_processes(_stage_output_fragments(db, task))
+    return killed_count
+
+
+def clear_job_control_requests(db: Session | None, job: AutomationJobRecord) -> None:
+    """清理自动化任务及其子任务残留控制请求，避免重试或继续时被旧请求拦截"""
+    clear_control_request(f"job:{job.id}")
+    if db:
+        for task in _tasks_for_job(db, job):
+            clear_control_request(f"task:{task.id}")
+    for task_id in _stage_task_ids(job):
+        clear_control_request(f"task:{task_id}")
 
 
 def terminate_task_external_processes(db: Session, task: DownloadTask) -> int:
@@ -49,18 +66,7 @@ def mark_job_child_tasks_controlled(db: Session, job: AutomationJobRecord, statu
 
 def _tasks_for_job(db: Session, job: AutomationJobRecord) -> list[DownloadTask]:
     """读取自动化任务关联的底层任务，包含阶段里记录过的 task_id"""
-    task_ids: set[int] = set()
-    try:
-        stages = json.loads(job.stages or "[]")
-    except json.JSONDecodeError:
-        stages = []
-    if isinstance(stages, list):
-        for stage in stages:
-            if isinstance(stage, dict) and stage.get("task_id"):
-                try:
-                    task_ids.add(int(stage["task_id"]))
-                except (TypeError, ValueError):
-                    pass
+    task_ids = _stage_task_ids(job)
 
     try:
         query = db.query(DownloadTask).filter(DownloadTask.parent_job_id == job.id)
@@ -76,6 +82,40 @@ def _tasks_for_job(db: Session, job: AutomationJobRecord) -> list[DownloadTask]:
         except Exception:
             pass
     return [task for task in tasks if isinstance(task, DownloadTask)]
+
+
+def _stage_task_ids(job: AutomationJobRecord) -> set[int]:
+    """从自动化阶段 JSON 中提取底层任务 ID"""
+    task_ids: set[int] = set()
+    try:
+        stages = json.loads(job.stages or "[]")
+    except json.JSONDecodeError:
+        stages = []
+    if not isinstance(stages, list):
+        return task_ids
+    for stage in stages:
+        if not isinstance(stage, dict) or not stage.get("task_id"):
+            continue
+        try:
+            task_ids.add(int(stage["task_id"]))
+        except (TypeError, ValueError):
+            pass
+    return task_ids
+
+
+def _stage_output_fragments(db: Session, task: DownloadTask) -> list[str]:
+    """生成当前阶段专属输出路径，作为没有 PID 记录时的兜底终止条件"""
+    fragments: list[str] = []
+    if task.output_path:
+        fragments.append(task.output_path)
+
+    if task.task_type == "effects":
+        video = _video_for_task(db, task)
+        if video:
+            title = _safe_file_name(video.title or video.video_id)
+            if title:
+                fragments.append(os.path.join(ensure_project_dirs()["output_dir"], f"{title}_enhanced.mp4"))
+    return _dedupe_fragments(fragments)
 
 
 def _task_match_fragments(db: Session, task: DownloadTask) -> list[str]:

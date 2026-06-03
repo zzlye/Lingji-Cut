@@ -1,6 +1,8 @@
 # backend/api/tasks.py
 # 任务 API 路由 - 提供任务管理接口
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import not_
@@ -10,7 +12,7 @@ from pydantic import BaseModel
 
 from ..core.process_control import clear_control_request
 from ..core.task_runtime import request_task_control, terminate_task_external_processes
-from ..models import get_db, DownloadTask
+from ..models import get_db, AutomationJobRecord, DownloadTask
 
 # 创建路由器
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -79,7 +81,49 @@ async def get_tasks(
         ))
     if status:
         query = query.filter(DownloadTask.status == status)
-    return [_task_to_response(task) for task in query.order_by(DownloadTask.created_at.desc()).all()]
+    tasks = query.order_by(DownloadTask.created_at.desc()).all()
+    if not include_orphans:
+        tasks = _filter_superseded_child_tasks(db, tasks)
+    return [_task_to_response(task) for task in tasks]
+
+
+def _filter_superseded_child_tasks(db: Session, tasks: list[DownloadTask]) -> list[DownloadTask]:
+    """默认隐藏已被断点续跑替代的旧自动化子任务，避免旧失败记录误导用户"""
+    visible_task_ids = _current_stage_task_ids(db)
+    result: list[DownloadTask] = []
+    for task in tasks:
+        if not task.parent_job_id:
+            result.append(task)
+            continue
+        if task.id in visible_task_ids or task.status in RUNNING_STATUSES:
+            result.append(task)
+    return result
+
+
+def _current_stage_task_ids(db: Session) -> set[int]:
+    """读取当前自动化阶段引用的底层任务 ID"""
+    task_ids: set[int] = set()
+    try:
+        jobs = db.query(AutomationJobRecord).all()
+    except Exception:
+        return task_ids
+    for job in jobs:
+        if not isinstance(job, AutomationJobRecord) or not job.stages:
+            continue
+        try:
+            stages = json.loads(job.stages)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(stages, list):
+            continue
+        for stage in stages:
+            if not isinstance(stage, dict) or not stage.get("task_id"):
+                continue
+            try:
+                task_ids.add(int(stage["task_id"]))
+            except (TypeError, ValueError):
+                pass
+    return task_ids
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
@@ -102,12 +146,13 @@ async def retry_task(task_id: int, db: Session = Depends(get_db)):
 
     if task.parent_job_id:
         from .automation import _prepare_job_for_resume, _submit_automation_job
+        from ..core.task_runtime import clear_job_control_requests
         from ..models import AutomationJobRecord
 
-        clear_control_request(f"task:{task_id}")
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == task.parent_job_id).first()
         if not job:
             raise HTTPException(status_code=404, detail="所属自动化任务不存在")
+        clear_job_control_requests(db, job)
         _prepare_job_for_resume(job)
         task.status = "pending"
         task.error_message = None

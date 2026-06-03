@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, TextEngine, VoiceEngine
 from ..core.paths import ensure_project_dirs
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
-from ..core.task_runtime import mark_job_child_tasks_controlled, request_job_control
+from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
 from ..core.tooling import assert_required_tools_available
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
 from ..utils import decrypt_api_key
@@ -942,14 +942,18 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             _handle_task_control(db, subtitle_task, exc)
             raise
         except Exception as exc:
-            _fail_task(db, subtitle_task, exc)
             if isinstance(exc, BannedWordsDetected):
+                _fail_task(db, subtitle_task, exc)
                 if job:
                     _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(exc))
                 raise
-            stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=str(exc)))
+            skip_message = f"{str(exc) or '字幕处理失败'}，已跳过字幕并继续导出"
+            _complete_task(db, subtitle_task, None)
+            subtitle_task.error_message = skip_message
+            db.commit()
+            stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=skip_message))
             if job:
-                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=str(exc))
+                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=skip_message)
 
     voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice else None
     reusable_audio_path = _stage_output_if_reusable(job, "voice") if resume_from_checkpoint else None
@@ -1095,10 +1099,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         stages.append(AutomationStageResult(key="export", status="completed", task_id=export_task.id, output_path=output_path))
         if job:
             job.output_path = output_path
-            job.status = "completed"
-            job.current_step = "流程完成"
             job.completed_at = datetime.now()
             _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path)
+            clear_job_control_requests(db, job)
+            job.status = "completed"
+            job.current_step = "流程完成"
             job.progress = 100
             db.commit()
     except TaskControlRequested as exc:
@@ -1132,7 +1137,7 @@ def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> No
             return
         job.status = "running"
         job.current_step = "准备自动处理"
-        clear_control_request(_job_control_key(job.id))
+        clear_job_control_requests(db, job)
         db.commit()
 
         params = json.loads(job.params or "{}")
@@ -1159,6 +1164,7 @@ def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> No
 
 def _reset_job_for_retry(job: AutomationJobRecord) -> None:
     """重置失败任务，保留原始参数后重新进入后台队列"""
+    clear_job_control_requests(None, job)
     job.status = "pending"
     job.progress = 0
     job.current_step = "等待重试"
@@ -1167,11 +1173,11 @@ def _reset_job_for_retry(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(_default_stages(), ensure_ascii=False)
-    clear_control_request(_job_control_key(job.id))
 
 
 def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     """准备断点续跑，保留已完成阶段并清理失败阶段"""
+    clear_job_control_requests(None, job)
     stages = _load_job_stages(job)
     for stage in stages:
         if stage.get("status") in {"running", "failed", "paused", CANCELLED_STATUS}:
@@ -1188,7 +1194,6 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(stages, ensure_ascii=False)
-    clear_control_request(_job_control_key(job.id))
 
 
 def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
@@ -1301,13 +1306,23 @@ def _current_running_stage(job: AutomationJobRecord) -> Optional[dict[str, Any]]
 
 
 def _skip_current_effects_stage(db: Session, job: AutomationJobRecord) -> int:
-    """请求跳过当前画面处理阶段，并终止正在跑的 ffmpeg"""
+    """请求跳过当前画面处理阶段，并只终止当前阶段 ffmpeg"""
     stage = _current_running_stage(job)
     if not stage or stage.get("key") != "effects":
         raise HTTPException(status_code=400, detail="当前只有画面处理阶段支持跳过")
 
-    killed_count = request_job_control(db, job, "skip")
-    mark_job_child_tasks_controlled(db, job, "skipped", "用户跳过画面处理")
+    task_id = stage.get("task_id")
+    if not task_id:
+        raise HTTPException(status_code=400, detail="画面处理任务尚未进入可跳过状态")
+
+    task = db.query(DownloadTask).filter(DownloadTask.id == int(task_id)).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="画面处理子任务不存在")
+
+    killed_count = request_stage_task_control(db, task, "skip")
+    if task.status in {"pending", "processing", "downloading", "paused"}:
+        task.status = "skipped"
+        task.error_message = "用户跳过画面处理"
     params = _get_job_params(job)
     params["enable_effects"] = False
     params["skip_effects_requested"] = True
@@ -1632,6 +1647,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    clear_job_control_requests(db, job)
     _reset_job_for_retry(job)
     db.commit()
     _submit_automation_job(job_id)
@@ -1654,6 +1670,7 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    clear_job_control_requests(db, job)
     _prepare_job_for_resume(job)
     db.commit()
     _submit_automation_job(job_id, True)

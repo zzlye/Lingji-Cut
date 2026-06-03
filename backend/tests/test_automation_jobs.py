@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _cancel_job, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.models import AutomationJobRecord, TextProviderProfile  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _cancel_job, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile  # noqa: E402
 
 
 class FakeQuery:
@@ -18,6 +18,9 @@ class FakeQuery:
         self.jobs = jobs
 
     def order_by(self, *_):
+        return self
+
+    def filter(self, *_):
         return self
 
     def all(self):
@@ -42,6 +45,19 @@ class FakeDb:
 
     def add(self, job):
         self.jobs.append(job)
+
+
+class FakeTaskDb(FakeDb):
+    """测试用数据库会话，支持按模型返回任务或自动化任务"""
+
+    def __init__(self, jobs, tasks):
+        super().__init__(jobs)
+        self.tasks = tasks
+
+    def query(self, model):
+        if model is DownloadTask:
+            return FakeQuery(self.tasks)
+        return FakeQuery(self.jobs)
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -163,6 +179,35 @@ class AutomationJobTests(unittest.TestCase):
         self.assertTrue(cancelled_response.can_resume)
         self.assertTrue(cancelled_response.can_retry)
         self.assertIsNotNone(job.completed_at)
+
+    def test_skip_effects_controls_only_current_effects_task(self):
+        """跳过画面处理只控制当前阶段任务，不能污染后续字幕和导出"""
+        stages = [
+            {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+            {"key": "effects", "status": "running", "progress": 50, "task_id": 2, "output_path": None, "error_message": None},
+            {"key": "subtitle", "status": "pending", "progress": 0, "task_id": None, "output_path": None, "error_message": None},
+            {"key": "export", "status": "pending", "progress": 0, "task_id": None, "output_path": None, "error_message": None},
+        ]
+        job = AutomationJobRecord(
+            id="auto-skip-effects",
+            source_url="https://youtube.com/watch?v=test",
+            status="running",
+            params=json.dumps({"enable_effects": True}, ensure_ascii=False),
+            stages=json.dumps(stages, ensure_ascii=False),
+        )
+        effects_task = DownloadTask(id=2, video_id=8, task_type="effects", status="processing", progress=50)
+        db = FakeTaskDb([job], [effects_task])
+
+        with patch("backend.api.automation.request_stage_task_control", return_value=1) as stage_control, \
+                patch("backend.api.automation.request_job_control") as job_control:
+            killed_count = _skip_current_effects_stage(db, job)
+
+        self.assertEqual(killed_count, 1)
+        stage_control.assert_called_once_with(db, effects_task, "skip")
+        job_control.assert_not_called()
+        self.assertEqual(effects_task.status, "skipped")
+        self.assertEqual(effects_task.error_message, "用户跳过画面处理")
+        self.assertFalse(json.loads(job.params)["enable_effects"])
 
     def test_prepare_interrupted_job_for_startup_clears_running_stage(self):
         job = AutomationJobRecord(

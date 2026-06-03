@@ -887,6 +887,7 @@ function TaskStatus({ status }: { status: DownloadTask['status'] }) {
     cancelled: '已取消',
     completed: '已完成',
     failed: '失败',
+    skipped: '已跳过',
   }
   const classes: Record<DownloadTask['status'], string> = {
     pending: 'text-foreground-muted',
@@ -896,6 +897,7 @@ function TaskStatus({ status }: { status: DownloadTask['status'] }) {
     cancelled: 'text-foreground-muted',
     completed: 'text-success',
     failed: 'text-destructive',
+    skipped: 'text-warning',
   }
   return <span className={`text-xs ${classes[status]}`}>{labels[status]}</span>
 }
@@ -912,7 +914,7 @@ function progressColor(status: AutomationStep['status']) {
 /** 底层任务进度颜色 */
 function taskProgressColor(status: DownloadTask['status']) {
   if (status === 'failed') return 'bg-destructive'
-  if (status === 'paused') return 'bg-warning'
+  if (status === 'paused' || status === 'skipped') return 'bg-warning'
   if (status === 'cancelled') return 'bg-foreground-muted'
   if (status === 'completed') return 'bg-success'
   return 'bg-accent'

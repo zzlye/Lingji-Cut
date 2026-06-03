@@ -477,32 +477,102 @@ class FFmpegProcessor:
         control_keys: Optional[list[str]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """转换视频格式"""
+        """转换视频格式；同格式导出直接复制，避免无意义启动 ffmpeg"""
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
+        output_format = (output_format or "mp4").strip().lower().lstrip(".") or "mp4"
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(input_path))[0]
             output_path = os.path.join(ensure_project_dirs()["exports_dir"], f"{base_name}.{output_format}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
+        input_ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+        if input_ext == output_format:
+            logger.info(f"复制导出: {input_path} -> {output_path}")
+            return self._copy_media_file(
+                input_path=input_path,
+                output_path=output_path,
+                control_keys=control_keys,
+                progress_callback=progress_callback,
+            )
+
+        temp_output_path = self._temporary_output_path(output_path)
         cmd = [
             self.ffmpeg_cmd,
             "-i", input_path,
             "-c", "copy",
             "-y",
-            output_path
+            temp_output_path
         ]
 
         logger.info(f"转换格式: {input_path} -> {output_path}")
 
-        return self._run_ffmpeg(
-            cmd,
-            "格式转换",
-            timeout=7200,
-            control_keys=control_keys,
-            progress_callback=progress_callback,
-            progress_total_seconds=self._media_duration_seconds(input_path),
-        )
+        try:
+            self._run_ffmpeg(
+                cmd,
+                "格式转换",
+                timeout=7200,
+                control_keys=control_keys,
+                progress_callback=progress_callback,
+                progress_total_seconds=self._media_duration_seconds(input_path),
+            )
+            os.replace(temp_output_path, output_path)
+            return output_path
+        finally:
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except OSError:
+                    pass
+
+    def _copy_media_file(
+        self,
+        input_path: str,
+        output_path: str,
+        control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """按块复制媒体文件，成功后原子替换最终导出文件"""
+        source_path = os.path.abspath(input_path)
+        target_path = os.path.abspath(output_path)
+        if source_path == target_path:
+            if progress_callback:
+                progress_callback(100)
+            return output_path
+
+        control_keys = normalize_control_keys(control_keys)
+        temp_output_path = self._temporary_output_path(output_path)
+        total_size = max(1, os.path.getsize(input_path))
+        copied_size = 0
+        try:
+            raise_if_control_requested(control_keys)
+            with open(input_path, "rb") as source, open(temp_output_path, "wb") as target:
+                while True:
+                    raise_if_control_requested(control_keys)
+                    chunk = source.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+                    copied_size += len(chunk)
+                    if progress_callback:
+                        progress_callback(min(99.0, copied_size / total_size * 100))
+            os.replace(temp_output_path, output_path)
+            if progress_callback:
+                progress_callback(100)
+            return output_path
+        finally:
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except OSError:
+                    pass
+
+    def _temporary_output_path(self, output_path: str) -> str:
+        """生成同目录临时输出路径，避免失败时留下半截成品"""
+        directory = os.path.dirname(output_path) or "."
+        stem, ext = os.path.splitext(os.path.basename(output_path))
+        return os.path.join(directory, f".{stem}.{os.getpid()}.{threading.get_ident()}.tmp{ext}")
 
     def _run_ffmpeg(
         self,
@@ -543,7 +613,7 @@ class FFmpegProcessor:
             raise_if_control_requested(control_keys)
 
             if process.returncode != 0:
-                raise RuntimeError(f"{action_name}失败: {stderr or stdout}")
+                raise RuntimeError(f"{action_name}失败: {self._format_ffmpeg_error(stderr or stdout, process.returncode)}")
 
             logger.info(f"{action_name}完成: {output_path}")
             return output_path
@@ -666,6 +736,17 @@ class FFmpegProcessor:
         if process.returncode == 0:
             progress_callback(100)
         return "\n".join(output_lines), ""
+
+    def _format_ffmpeg_error(self, output: str, returncode: int) -> str:
+        """压缩 ffmpeg 错误，只保留真正有用的尾部信息"""
+        lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+        useful_lines = [
+            line for line in lines
+            if not line.startswith(("ffmpeg version", "built with", "configuration:", "libav", "libsw"))
+        ]
+        tail = useful_lines[-30:] if useful_lines else lines[-30:]
+        detail = "\n".join(tail).strip()
+        return f"退出码 {returncode}" + (f"\n{detail}" if detail else "")
 
     def _command_with_progress(self, cmd: list[str]) -> list[str]:
         """给 ffmpeg 命令加上机器可读进度输出"""

@@ -65,6 +65,26 @@ class LocalMediaPipelineTest(unittest.TestCase):
             self.assertTrue(os.path.exists(path), path)
             self.assertGreater(os.path.getsize(path), 0, path)
 
+    def test_same_format_export_copies_without_ffmpeg(self):
+        """同格式导出直接复制文件，避免跳过画面处理后还启动 ffmpeg"""
+        self._create_test_video()
+        output_path = os.path.join(self.temp_dir, "copied.mp4")
+        progress_values: list[float] = []
+
+        with patch.object(self.processor, "_run_ffmpeg") as run_ffmpeg:
+            exported_path = self.processor.convert_format(
+                input_path=self.input_video,
+                output_format="mp4",
+                output_path=output_path,
+                progress_callback=progress_values.append,
+            )
+
+        self.assertEqual(exported_path, output_path)
+        self.assertTrue(os.path.exists(output_path))
+        self.assertEqual(os.path.getsize(output_path), os.path.getsize(self.input_video))
+        self.assertEqual(progress_values[-1], 100)
+        run_ffmpeg.assert_not_called()
+
     def test_timed_voice_mix_generates_aligned_audio_file(self):
         """带时间轴的分段音频可以混合成完整配音文件"""
         first_audio = os.path.join(self.temp_dir, "first.wav")
