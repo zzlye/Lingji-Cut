@@ -180,6 +180,21 @@ app.whenReady().then(async () => {
   const isHealthy = await checkBackendHealth()
   if (!isHealthy) {
     console.error('[Main] Python 后端启动超时')
+    // 后端未就绪时明确告知用户，避免静默进入一个所有请求都失败的空界面
+    dialog.showErrorBox(
+      '后端服务启动失败',
+      [
+        '本地处理服务（端口 8765）未能在预期时间内就绪。',
+        '',
+        '可能原因：',
+        '• Python 运行环境或依赖缺失',
+        '• 端口 8765 被其他程序占用',
+        '• 安全软件拦截了本地服务',
+        '',
+        '界面仍会打开，但解析、下载、处理等功能将无法使用。',
+        '请关闭应用后重试，或排查以上问题。',
+      ].join('\n')
+    )
   }
 
   // 创建窗口

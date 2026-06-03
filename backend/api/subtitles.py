@@ -278,10 +278,34 @@ def _load_text_settings(profile: TextProviderProfile) -> dict:
         return {}
 
 
+def _default_subtitle_presets() -> list[SubtitlePresetCreate]:
+    """内置字幕样式预设，保证字幕设置页和一键流程开箱即用"""
+    return [
+        # 默认：白字黑边、底部居中，适配绝大多数横屏短视频
+        SubtitlePresetCreate(name="默认字幕", is_default=True),
+        # 醒目大字：字号更大、描边更粗、上移边距，适合强调或竖屏
+        SubtitlePresetCreate(name="醒目大字", font_size=56, outline_width=3, margin_v=48),
+    ]
+
+
+def ensure_default_subtitle_presets(db: Session) -> None:
+    """字幕预设为空时惰性创建内置默认预设。
+
+    一键流程的 _pick_subtitle_preset 直接查库取 is_default 预设，
+    因此后端启动时也会调用本函数，避免新用户未进设置页就一键完成时拿不到统一字幕样式。
+    """
+    if db.query(SubtitlePreset).first():
+        return
+    for item in _default_subtitle_presets():
+        db.add(SubtitlePreset(**item.model_dump()))
+    db.commit()
+
+
 @router.get("/presets", response_model=list[SubtitlePresetResponse])
 async def get_presets(db: Session = Depends(get_db)):
-    """获取所有字幕预设"""
-    return db.query(SubtitlePreset).all()
+    """获取所有字幕预设；表为空时惰性创建内置默认预设，避免新用户面对空列表"""
+    ensure_default_subtitle_presets(db)
+    return db.query(SubtitlePreset).order_by(SubtitlePreset.id.asc()).all()
 
 
 @router.post("/presets", response_model=SubtitlePresetResponse)

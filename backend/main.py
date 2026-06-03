@@ -10,6 +10,7 @@ from .models import init_db
 from .api import automation_router, videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router
 from .api.automation import recover_automation_jobs_on_startup
 from .api.tasks import mark_interrupted_tasks
+from .api.subtitles import ensure_default_subtitle_presets
 from .core.process_control import cleanup_stale_runtime_processes
 from .models import SessionLocal
 
@@ -50,6 +51,8 @@ async def startup():
     db = SessionLocal()
     try:
         mark_interrupted_tasks(db)
+        # 首次启动播种内置字幕预设，保证一键流程和字幕设置页开箱即用
+        ensure_default_subtitle_presets(db)
     finally:
         db.close()
     recover_automation_jobs_on_startup()

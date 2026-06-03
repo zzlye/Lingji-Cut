@@ -71,6 +71,8 @@ class VoiceEngine:
         output_path: str,
         provider_type: str = "openai_tts",
         voice: str = "alloy",
+        # 多人对话配音时按字幕分段的说话人挑选音色；为 None 时所有分段使用默认音色。
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         api_key: str = "",
         base_url: str = "",
         model: str = "",
