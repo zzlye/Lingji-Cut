@@ -2,6 +2,7 @@
 # 本地语音识别 - 使用 faster-whisper 在本机从视频音频生成带时间轴字幕
 
 import os
+import re
 import subprocess
 from functools import lru_cache
 from typing import Any, Callable, Optional
@@ -10,6 +11,30 @@ from ..utils import get_logger
 
 
 logger = get_logger("local_asr")
+TERMINAL_PUNCTUATION = "，。、！？；,.!?;:："
+LEADING_FRAGMENT_WORDS = {
+    "a",
+    "an",
+    "the",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "for",
+    "with",
+    "and",
+    "or",
+    "but",
+    "so",
+    "if",
+    "when",
+    "while",
+    "that",
+    "this",
+    "these",
+    "those",
+}
 
 # 模型缓存，避免同一轮任务重复加载模型。
 _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
@@ -155,6 +180,9 @@ class LocalSpeechRecognizer:
             progress_callback(100)
         if not entries:
             raise RuntimeError("本地语音识别没有识别到字幕内容")
+        entries = self._merge_short_entries(entries)
+        for index, entry in enumerate(entries, 1):
+            entry["index"] = index
         logger.info(f"本地识别完成: {len(entries)} 条字幕, language={detected_language}")
         return entries, detected_language
 
@@ -297,6 +325,113 @@ class LocalSpeechRecognizer:
         """合并词级文本，兼容英文前导空格和中日韩无空格文本"""
         raw = "".join(str(getattr(word, "word", "") or "") for word in words)
         return " ".join(raw.split())
+
+    def _merge_short_entries(self, entries: list[dict]) -> list[dict]:
+        """合并极短字幕碎片，避免单词或词尾独立闪现导致时间轴观感发飘"""
+        if len(entries) < 2:
+            return entries
+
+        merged = [dict(entry) for entry in entries]
+        index = 0
+        max_duration_ms = 350
+        short_tail_duration_ms = 900
+        max_gap_ms = 120
+        while index < len(merged):
+            current = merged[index]
+            prev_entry = merged[index - 1] if index > 0 else None
+            next_entry = merged[index + 1] if index + 1 < len(merged) else None
+            duration_ms = self._entry_duration_ms(current)
+            continuation_tail = self._is_short_continuation(prev_entry, current, duration_ms, short_tail_duration_ms)
+            if (duration_ms > max_duration_ms and not continuation_tail) or not self._is_merge_candidate_text(str(current.get("text") or "")):
+                index += 1
+                continue
+
+            prev_gap = self._entry_gap_ms(prev_entry, current)
+            next_gap = self._entry_gap_ms(current, next_entry)
+            merge_forward = next_entry is not None and next_gap <= max_gap_ms
+            merge_backward = prev_entry is not None and prev_gap <= max_gap_ms
+            if merge_forward and not continuation_tail and (self._prefer_merge_forward(str(current.get("text") or "")) or not merge_backward):
+                next_entry["start"] = current["start"]
+                next_entry["text"] = self._join_entry_text(str(current.get("text") or ""), str(next_entry.get("text") or ""))
+                merged.pop(index)
+                continue
+            if merge_backward:
+                prev_entry["end"] = current["end"]
+                prev_entry["text"] = self._join_entry_text(str(prev_entry.get("text") or ""), str(current.get("text") or ""))
+                merged.pop(index)
+                index = max(0, index - 1)
+                continue
+            index += 1
+        return merged
+
+    def _is_merge_candidate_text(self, text: str) -> bool:
+        """判断是否属于需要平滑的超短字幕内容"""
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return False
+        words = normalized.split()
+        compact = normalized.strip(TERMINAL_PUNCTUATION + "\"'()[]{}“”‘’")
+        return len(words) <= 2 or len(compact) <= 2
+
+    def _is_short_continuation(self, prev_entry: Optional[dict], current: dict, duration_ms: int, max_duration_ms: int) -> bool:
+        """识别上一句没收完就被拆出去的短尾巴，优先并回上一条字幕"""
+        if not prev_entry or duration_ms > max_duration_ms:
+            return False
+        prev_text = " ".join(str(prev_entry.get("text") or "").split()).strip()
+        current_text = " ".join(str(current.get("text") or "").split()).strip()
+        if not prev_text or not current_text:
+            return False
+        if prev_text[-1] in TERMINAL_PUNCTUATION:
+            return False
+        return len(current_text.split()) <= 2
+
+    def _prefer_merge_forward(self, text: str) -> bool:
+        """冠词、介词等前导碎片优先并到后一条，词尾则并回前一条"""
+        normalized = " ".join(str(text or "").split()).strip()
+        if not normalized:
+            return False
+        if normalized[-1] in TERMINAL_PUNCTUATION:
+            return False
+        lowered = normalized.strip("\"'()[]{}“”‘’").lower()
+        if lowered in LEADING_FRAGMENT_WORDS:
+            return True
+        return lowered.isalpha() and len(lowered.split()) == 1 and len(lowered) <= 3
+
+    def _join_entry_text(self, left: str, right: str) -> str:
+        """合并相邻字幕文本，英文保留空格，中日韩连续文本不额外插空格"""
+        left_clean = " ".join(str(left or "").split())
+        right_clean = " ".join(str(right or "").split())
+        if not left_clean:
+            return right_clean
+        if not right_clean:
+            return left_clean
+        if self._is_cjk_tail(left_clean[-1]) and self._is_cjk_head(right_clean[0]):
+            return f"{left_clean}{right_clean}"
+        if right_clean[0] in TERMINAL_PUNCTUATION:
+            return f"{left_clean}{right_clean}"
+        return f"{left_clean} {right_clean}"
+
+    def _entry_duration_ms(self, entry: dict) -> int:
+        """读取字幕条目时长，统一按毫秒比较阈值"""
+        start_ms = int(round(self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000")) * 1000))
+        end_ms = int(round(self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000")) * 1000))
+        return max(0, end_ms - start_ms)
+
+    def _entry_gap_ms(self, left: Optional[dict], right: Optional[dict]) -> int:
+        """计算相邻字幕之间的间隔，重叠时按 0 处理，方便平滑边界碎片"""
+        if not left or not right:
+            return 10**9
+        left_end = int(round(self._srt_time_to_seconds(str(left.get("end") or "00:00:00,000")) * 1000))
+        right_start = int(round(self._srt_time_to_seconds(str(right.get("start") or "00:00:00,000")) * 1000))
+        return max(0, right_start - left_end)
+
+    def _is_cjk_tail(self, char: str) -> bool:
+        """判断末尾字符是否为中日韩文字，避免合并时插入多余空格"""
+        return bool(re.match(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", char or ""))
+
+    def _is_cjk_head(self, char: str) -> bool:
+        """判断开头字符是否为中日韩文字，避免合并时插入多余空格"""
+        return self._is_cjk_tail(char)
 
     def _beam_size(self) -> int:
         """读取识别 beam size，GPU 默认更准，CPU 默认更快"""

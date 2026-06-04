@@ -254,6 +254,61 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertIn("なりそうです", entries[0]["text"])
 
+    def test_transcribe_video_merges_too_short_orphan_entries(self):
+        """极短的英文孤立词和词尾应并回相邻字幕，避免时间轴忽快忽慢"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class ShortOrphanWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    FakeSegment(72.54, 74.14, "ignored", words=[
+                        FakeWord(72.54, 72.88, " allowing"),
+                        FakeWord(72.88, 73.10, " you"),
+                        FakeWord(73.10, 73.24, " to"),
+                        FakeWord(73.24, 73.56, " effectively"),
+                        FakeWord(73.56, 73.74, " hit"),
+                        FakeWord(73.74, 73.98, " through"),
+                        FakeWord(73.98, 74.14, " someone's"),
+                    ]),
+                    FakeSegment(74.14, 74.40, "ignored", words=[
+                        FakeWord(74.14, 74.40, " shield."),
+                    ]),
+                    FakeSegment(114.86, 115.06, "ignored", words=[
+                        FakeWord(114.86, 115.06, " A"),
+                    ]),
+                    FakeSegment(115.04, 117.56, "ignored", words=[
+                        FakeWord(115.04, 115.30, " density"),
+                        FakeWord(115.30, 115.48, " mace"),
+                        FakeWord(115.48, 115.62, " is"),
+                        FakeWord(115.62, 115.80, " used"),
+                        FakeWord(115.80, 116.00, " for"),
+                        FakeWord(116.00, 116.38, " regular"),
+                        FakeWord(116.38, 116.62, " macing"),
+                        FakeWord(116.62, 116.84, " from"),
+                        FakeWord(116.84, 117.06, " high"),
+                        FakeWord(117.06, 117.56, " distances,"),
+                    ]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = ShortOrphanWhisperModel
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        texts = [entry["text"] for entry in entries]
+        self.assertNotIn("shield.", texts)
+        self.assertNotIn("A", texts)
+        self.assertIn("allowing you to effectively hit through someone's shield.", texts)
+        self.assertIn("A density mace is used for regular macing from high distances,", texts)
+        merged_shield = next(entry for entry in entries if entry["text"].endswith("shield."))
+        merged_density = next(entry for entry in entries if entry["text"].startswith("A density mace"))
+        self.assertEqual(merged_shield["end"], "00:01:14,400")
+        self.assertEqual(merged_density["start"], "00:01:54,860")
+
 
 if __name__ == "__main__":
     unittest.main()
