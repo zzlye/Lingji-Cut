@@ -74,6 +74,7 @@ def _migrate_subtitle_presets():
     existing_columns = {column["name"] for column in inspector.get_columns("subtitle_presets")}
     required_columns = {
         "language": "VARCHAR(50) DEFAULT 'auto'",
+        "secondary_font_size": "INTEGER DEFAULT 42",
         "secondary_color": "VARCHAR(20) DEFAULT '#FDE68A'",
         "shadow_enabled": "BOOLEAN DEFAULT 1",
         "shadow_x": "INTEGER DEFAULT 2",

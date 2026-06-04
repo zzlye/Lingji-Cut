@@ -26,6 +26,8 @@ class SubtitlePreset(Base):
     font_name = Column(String(100), default="Microsoft YaHei")
     # 字体大小
     font_size = Column(Integer, default=48)
+    # 双行字幕第二行字体大小
+    secondary_font_size = Column(Integer, default=42)
     # 字体颜色（十六进制）
     font_color = Column(String(20), default="#FFFFFF")
     # 双行字幕第二行或强调字幕颜色

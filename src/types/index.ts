@@ -82,6 +82,7 @@ export interface SubtitlePreset {
   language: string
   font_name: string
   font_size: number
+  secondary_font_size: number
   font_color: string
   secondary_color: string
   outline_color: string

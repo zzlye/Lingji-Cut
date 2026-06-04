@@ -17,8 +17,6 @@ from ..utils import decrypt_api_key
 # 创建路由器
 router = APIRouter(prefix="/subtitles", tags=["subtitles"])
 
-LEGACY_SINGLE_LINE_PRESET_NAMES = {"默认字幕", "醒目大字", "短视频清晰", "短视频清晰字幕"}
-
 
 class SubtitlePresetCreate(BaseModel):
     """创建字幕预设请求"""
@@ -28,6 +26,7 @@ class SubtitlePresetCreate(BaseModel):
     language: str = "auto"
     font_name: str = "Microsoft YaHei"
     font_size: int = 48
+    secondary_font_size: int = 42
     font_color: str = "#FFFFFF"
     secondary_color: str = "#FDE68A"
     outline_color: str = "#000000"
@@ -50,6 +49,7 @@ class SubtitlePresetResponse(BaseModel):
     language: str
     font_name: str
     font_size: int
+    secondary_font_size: int
     font_color: str
     secondary_color: str
     outline_color: str
@@ -157,6 +157,7 @@ def _preset_to_dict(preset: SubtitlePreset | None) -> dict:
         "language": preset.language,
         "font_name": preset.font_name,
         "font_size": preset.font_size,
+        "secondary_font_size": preset.secondary_font_size,
         "font_color": preset.font_color,
         "secondary_color": preset.secondary_color,
         "outline_color": preset.outline_color,
@@ -290,17 +291,6 @@ def _default_subtitle_presets() -> list[SubtitlePresetCreate]:
     ]
 
 
-def _repair_legacy_single_line_presets(db: Session) -> None:
-    """修正旧版本内置预设的双行默认值，保留用户明确选择的双语模板"""
-    changed = False
-    for preset in db.query(SubtitlePreset).all():
-        if preset.name in LEGACY_SINGLE_LINE_PRESET_NAMES and str(preset.line_mode or "").lower() != "single":
-            preset.line_mode = "single"
-            changed = True
-    if changed:
-        db.commit()
-
-
 def ensure_default_subtitle_presets(db: Session) -> None:
     """字幕预设为空时惰性创建内置默认预设。
 
@@ -308,7 +298,6 @@ def ensure_default_subtitle_presets(db: Session) -> None:
     因此后端启动时也会调用本函数，避免新用户未进设置页就一键完成时拿不到统一字幕样式。
     """
     if db.query(SubtitlePreset).first():
-        _repair_legacy_single_line_presets(db)
         return
     for item in _default_subtitle_presets():
         db.add(SubtitlePreset(**item.model_dump()))

@@ -286,7 +286,7 @@ class FFmpegProcessor:
             drop_frame = timing.get("drop_frame", {})
             if drop_frame.get("enabled"):
                 interval = max(2, int(round(self._value(drop_frame.get("interval")) or 25)))
-                filters.append(f"select='not(eq(mod(n\\,{interval})\\,0))',setpts=N/FRAME_RATE/TB")
+                filters.append(f"select='not(eq(mod(n\\,{interval})\\,0))'")
 
             zoom = self._value(timing.get("dynamic_zoom"))
             if zoom is not None and zoom > 0:

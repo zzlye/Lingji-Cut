@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, combine_original_and_translated_entries, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
@@ -47,6 +47,10 @@ class FakeDb:
     def add(self, job):
         self.jobs.append(job)
 
+    def delete(self, job):
+        if job in self.jobs:
+            self.jobs.remove(job)
+
 
 class FakeTaskDb(FakeDb):
     """测试用数据库会话，支持按模型返回任务或自动化任务"""
@@ -59,6 +63,12 @@ class FakeTaskDb(FakeDb):
         if model is DownloadTask:
             return FakeQuery(self.tasks)
         return FakeQuery(self.jobs)
+
+    def delete(self, item):
+        if item in self.tasks:
+            self.tasks.remove(item)
+        elif item in self.jobs:
+            self.jobs.remove(item)
 
 
 class FakeSubtitleDownloader:
@@ -531,6 +541,35 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(segments[0]["text"], "进入战斗阶段")
         self.assertEqual(segments[1]["speaker"], "角色 A")
         self.assertEqual(segments[1]["text"], "放技能")
+
+    def test_combine_original_and_translated_entries_for_double_line_display(self):
+        """双行翻译显示用原文加译文，但不改变译文时间轴"""
+        original = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "hello"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "world"},
+        ]
+        translated = [
+            {"index": 1, "start": "00:00:01,100", "end": "00:00:02,200", "text": "你好"},
+            {"index": 2, "start": "00:00:02,200", "end": "00:00:03,200", "text": "世界"},
+        ]
+
+        combined = combine_original_and_translated_entries(original, translated)
+
+        self.assertEqual(combined[0]["start"], "00:00:01,100")
+        self.assertEqual(combined[0]["text"], "hello\n你好")
+        self.assertEqual(combined[1]["text"], "world\n世界")
+
+    def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
+        """删除素材记录只删数据库任务，不碰磁盘成品文件"""
+        job = AutomationJobRecord(id="auto-delete", source_url="https://youtube.com/watch?v=1", status="completed")
+        task = DownloadTask(id=9, video_id=1, task_type="export", status="completed", parent_job_id="auto-delete", output_path="D:\\video.mp4")
+        db = FakeTaskDb([job], [task])
+
+        _delete_job_record(db, job)
+
+        self.assertEqual(db.jobs, [])
+        self.assertEqual(db.tasks, [])
+        self.assertEqual(db.commit_count, 1)
 
     def test_voice_for_segment_uses_speaker_map(self):
         """分段配音按说话人选择音色，未匹配时回退默认音色"""

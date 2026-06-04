@@ -1,11 +1,14 @@
 // src/features/history/HistoryPanel.tsx
 // 历史记录 - 展示所有已结束的一键流程（完成/失败/取消）
-import { History as HistoryIcon } from 'lucide-react'
+import { History as HistoryIcon, Trash2 } from 'lucide-react'
+import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { formatClockTime } from '@/lib/format'
 import { useAutomationStore } from '@/stores/automationStore'
+import { useTaskStore } from '@/stores/taskStore'
 
 /** 已结束状态 → 文案与色调 */
 const FINISHED_META: Record<string, { label: string; variant: 'default' | 'destructive' | 'outline'; dot: string }> = {
@@ -16,7 +19,19 @@ const FINISHED_META: Record<string, { label: string; variant: 'default' | 'destr
 
 export function HistoryPanel() {
   const jobs = useAutomationStore((s) => s.jobs)
+  const removeJob = useAutomationStore((s) => s.removeJob)
+  const { addLog } = useTaskStore()
   const history = jobs.filter((job) => job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled')
+
+  const handleDelete = async (jobId: string, title: string) => {
+    try {
+      await automationApi.deleteJob(jobId)
+      removeJob(jobId)
+      addLog('info', `历史记录 "${title}" 已删除`)
+    } catch (error) {
+      addLog('error', `删除历史记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
@@ -46,6 +61,10 @@ export function HistoryPanel() {
                   </div>
                   <span className="shrink-0 text-xs text-muted-foreground">{formatClockTime(job.completed_at || job.created_at)}</span>
                   <Badge variant={meta.variant} className="shrink-0">{meta.label}</Badge>
+                  <Button size="sm" variant="outline" className="shrink-0 text-destructive" onClick={() => handleDelete(job.id, job.title)}>
+                    <Trash2 className="mr-1.5 size-4" />
+                    删除
+                  </Button>
                 </CardContent>
               </Card>
             )

@@ -193,17 +193,47 @@ Language: ja
         self.assertTrue(presets)
         self.assertTrue(all(preset.line_mode == "single" for preset in presets))
 
-    def test_ensure_default_subtitle_presets_repairs_legacy_short_video_preset(self):
-        """旧版短视频默认预设启动后会修正为单行，但不改明确双语模板"""
+    def test_ensure_default_subtitle_presets_preserves_existing_line_mode(self):
+        """已有预设不再按名称强制改成单行，避免覆盖用户保存的双行选择"""
         short_video = SimpleNamespace(name="短视频清晰字幕", line_mode="double")
         bilingual = SimpleNamespace(name="电影双语", line_mode="double")
         db = PresetListDb([short_video, bilingual])
 
         ensure_default_subtitle_presets(db)
 
-        self.assertEqual(short_video.line_mode, "single")
+        self.assertEqual(short_video.line_mode, "double")
         self.assertEqual(bilingual.line_mode, "double")
-        self.assertEqual(db.commit_count, 1)
+        self.assertEqual(db.commit_count, 0)
+
+    def test_generate_ass_double_line_uses_secondary_font_size(self):
+        """双行字幕第二行使用独立样式和字号"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "double.ass")
+
+            SubtitleEngine().generate_ass(
+                [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "主字幕\n副字幕"}],
+                output_path,
+                {"font_size": 52, "secondary_font_size": 32, "line_mode": "double", "secondary_color": "#FDE68A"},
+            )
+
+            with open(output_path, "r", encoding="utf-8") as file:
+                content = file.read()
+            self.assertIn("WrapStyle: 0", content)
+            self.assertIn("Style: Secondary,", content)
+            self.assertIn("Secondary,Microsoft YaHei,32,", content)
+            self.assertIn("主字幕\\N{\\rSecondary}副字幕", content)
+
+    def test_double_line_display_entries_keep_original_timing(self):
+        """双行模式不使用单行拆分逻辑，避免一条双语字幕被拆成多个时间段"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [{"index": 1, "start": "00:00:01,000", "end": "00:00:05,000", "text": "原文第一行\nTranslated second line"}],
+            {"font_size": 48, "line_mode": "double"},
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["start"], "00:00:01,000")
+        self.assertEqual(entries[0]["end"], "00:00:05,000")
+        self.assertEqual(entries[0]["text"], "原文第一行\nTranslated second line")
 
     def test_normalize_entries_for_display_splits_long_single_line_text(self):
         """长字幕会按时间比例拆成多条短字幕，改善硬字幕时间轴"""

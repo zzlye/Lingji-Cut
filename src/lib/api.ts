@@ -409,6 +409,14 @@ export const automationApi = {
   getJob: (id: string) =>
     request<import('@/types').BackendAutomationJob>(`/automation/jobs/${id}`),
 
+  /** 删除后台一键流程记录，不删除硬盘上的成品文件 */
+  deleteJob: (id: string) =>
+    request<{ message: string; job_id: string }>(`/automation/jobs/${id}`, { method: 'DELETE' }),
+
+  /** 本地成品媒体播放地址 */
+  mediaUrl: (path: string) =>
+    `${BASE_URL}/automation/media?path=${encodeURIComponent(path)}`,
+
   /** 重试后台一键流程 */
   retry: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/retry`, { method: 'POST' }),

@@ -4,6 +4,7 @@
 import json
 import os
 import asyncio
+import mimetypes
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -11,9 +12,9 @@ from datetime import datetime
 from threading import Lock, Semaphore
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from starlette.responses import StreamingResponse
+from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine
@@ -39,6 +40,7 @@ SCHEDULED_AUTOMATION_JOBS: set[str] = set()
 SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
+MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -778,6 +780,27 @@ def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[d
     return entries
 
 
+def combine_original_and_translated_entries(original_entries: list[dict], translated_entries: list[dict]) -> list[dict]:
+    """把原文和译文合成双行显示字幕，配音仍可单独使用译文条目"""
+    if not original_entries or not translated_entries:
+        return translated_entries
+
+    combined: list[dict] = []
+    for index, translated in enumerate(translated_entries):
+        original = original_entries[min(index, len(original_entries) - 1)]
+        original_text = " ".join(str(original.get("text") or "").replace("\\N", " ").split())
+        translated_text = " ".join(str(translated.get("text") or "").replace("\\N", " ").split())
+        next_entry = dict(translated)
+        if original_text and translated_text and original_text != translated_text:
+            next_entry["text"] = f"{original_text}\n{translated_text}"
+        elif translated_text:
+            next_entry["text"] = translated_text
+        else:
+            next_entry["text"] = original_text
+        combined.append(next_entry)
+    return combined
+
+
 def _plain_text_to_entries(text: str) -> list[dict[str, str | int]]:
     """没有原时间轴时，把纯文本转换成可渲染字幕条目"""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -965,6 +988,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
             if not entries:
                 raise RuntimeError("本地字幕识别结果为空，无法继续自动字幕处理")
+            original_entries_for_display = [dict(entry) for entry in entries]
+            translated_entries_for_display: Optional[list[dict[str, Any]]] = None
             subtitle_text = entries_to_plain_text(entries)
             text_profile = _pick_text_profile(db, request.text_profile_id)
             if text_profile and request.subtitle_operation != "none":
@@ -999,6 +1024,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         ))
                         if processed_entries:
                             entries = processed_entries
+                            if request.subtitle_operation == "translate":
+                                translated_entries_for_display = [dict(entry) for entry in entries]
                             subtitle_text = entries_to_plain_text(entries)
                     except TaskControlRequested:
                         raise
@@ -1016,6 +1043,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         processed_entries = map_text_to_timed_entries(processed_text, entries)
                         if processed_entries:
                             entries = processed_entries
+                            if request.subtitle_operation == "translate":
+                                translated_entries_for_display = [dict(entry) for entry in entries]
                             subtitle_text = processed_text
                 except TaskControlRequested:
                     raise
@@ -1031,7 +1060,12 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if request.banned_word_action == "block":
                     raise BannedWordsDetected(message)
                 warning_messages.append(message)
-            display_entries = engine.normalize_entries_for_display(entries, preset_dict)
+            display_source_entries = (
+                combine_original_and_translated_entries(original_entries_for_display, translated_entries_for_display)
+                if translated_entries_for_display and str(preset_dict.get("line_mode") or "").lower() == "double"
+                else entries
+            )
+            display_entries = engine.normalize_entries_for_display(display_source_entries, preset_dict)
             subtitle_entries = entries
             if job:
                 job.subtitle_text = subtitle_text
@@ -1464,6 +1498,24 @@ def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
     job.params = json.dumps(params, ensure_ascii=False)
 
 
+def _safe_media_file_path(path: str) -> str:
+    """校验素材库播放器要读取的本地媒体文件路径"""
+    media_path = os.path.abspath(os.path.expanduser(path.strip()))
+    if not os.path.exists(media_path) or not os.path.isfile(media_path):
+        raise HTTPException(status_code=404, detail=f"媒体文件不存在: {media_path}")
+    if os.path.splitext(media_path)[1].lower() not in MEDIA_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持播放常见音视频文件")
+    return media_path
+
+
+def _delete_job_record(db: Session, job: AutomationJobRecord) -> None:
+    """删除一键流程记录和它的子任务记录，不删除硬盘上的成品文件"""
+    for task in db.query(DownloadTask).filter(DownloadTask.parent_job_id == job.id).all():
+        db.delete(task)
+    db.delete(job)
+    db.commit()
+
+
 def _pause_batch_jobs(db: Session, batch_id: str) -> int:
     """暂停批次中尚未执行完成的自动化任务"""
     affected = 0
@@ -1738,6 +1790,14 @@ def list_automation_jobs(db: Session = Depends(get_db)):
     return [_job_to_response(job) for job in jobs]
 
 
+@router.get("/media")
+def play_local_media(path: str = Query(..., min_length=1)):
+    """用内置播放器读取本地成品视频或音频"""
+    media_path = _safe_media_file_path(path)
+    media_type = mimetypes.guess_type(media_path)[0] or "application/octet-stream"
+    return FileResponse(media_path, media_type=media_type, filename=os.path.basename(media_path))
+
+
 @router.get("/jobs/{job_id}", response_model=AutomationJobResponse)
 def get_automation_job(job_id: str, db: Session = Depends(get_db)):
     """获取自动化任务进度"""
@@ -1745,6 +1805,19 @@ def get_automation_job(job_id: str, db: Session = Depends(get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="自动化任务不存在")
     return _job_to_response(job)
+
+
+@router.delete("/jobs/{job_id}")
+def delete_automation_job(job_id: str, db: Session = Depends(get_db)):
+    """删除素材库或历史记录中的一键流程记录，不删除实际视频文件"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status in {"pending", "running"}:
+        raise HTTPException(status_code=400, detail="执行中任务不能删除，请先暂停或取消")
+    clear_job_control_requests(db, job)
+    _delete_job_record(db, job)
+    return {"message": "记录已删除", "job_id": job_id}
 
 
 @router.post("/jobs/{job_id}/retry", response_model=AutomationStartResponse)

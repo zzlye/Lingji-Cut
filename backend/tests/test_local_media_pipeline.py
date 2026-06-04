@@ -252,6 +252,21 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(preset["bitrate"]["quality_mode"], "size")
         self.assertEqual(preset["acceleration"]["quality"], "size")
 
+    def test_drop_frame_does_not_rewrite_video_timestamps(self):
+        """抽帧不重写 PTS，避免画面时长变化后音频 copy 导致音画不同步"""
+        preset = self._minimal_preset()
+        preset["timing"] = {
+            "enabled": True,
+            "fps": {"enabled": False, "random": False, "value": 30, "min": 30, "max": 30},
+            "drop_frame": {"enabled": True, "interval": {"enabled": True, "random": False, "value": 25, "min": 25, "max": 25}},
+            "dynamic_zoom": {"enabled": False, "random": False, "value": 0, "min": 0, "max": 0},
+        }
+
+        filter_graph = self.processor.build_effect_filter_graph(preset)
+
+        self.assertIn("select=", filter_graph)
+        self.assertNotIn("setpts=N/FRAME_RATE/TB", filter_graph)
+
     def test_nvenc_speed_quality_uses_low_latency_single_pass_args(self):
         """速度优先的 NVENC 参数减少额外编码开销"""
         args = self.processor._video_encoder_args(

@@ -47,16 +47,16 @@ const POSITION_GRID_OPTIONS: FieldOption[] = POSITION_OPTIONS.map((p) => [p.valu
 
 /** 快速样式模板 */
 const STYLE_TEMPLATES: Array<{ name: string; description: string; patch: Partial<SubtitlePresetForm> }> = [
-  { name: '短视频清晰', description: '白字黑边，底部单行', patch: { line_mode: 'single', font_name: 'Source Han Sans SC', font_size: 48, font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48 } },
-  { name: '电影双语', description: '主副字幕分色，底部留白', patch: { line_mode: 'double', font_name: 'Noto Sans SC', font_size: 42, font_color: '#FFFFFF', secondary_color: '#D1D5DB', outline_color: '#111827', outline_width: 3, shadow_enabled: true, shadow_color: '#000000', shadow_x: 1, shadow_y: 2, background_alpha: 0, position: 'bottom', margin_v: 62 } },
-  { name: '知识讲解', description: '黄字高亮，适合解说', patch: { line_mode: 'single', font_name: 'Alibaba PuHuiTi', font_size: 50, font_color: '#FACC15', secondary_color: '#FFFFFF', outline_color: '#1F2937', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 46 } },
-  { name: '干净信息条', description: '半透明背景，低描边', patch: { line_mode: 'single', font_name: 'HarmonyOS Sans SC', font_size: 40, font_color: '#FFFFFF', secondary_color: '#BAE6FD', outline_color: '#000000', outline_width: 1, shadow_enabled: false, background_alpha: 128, position: 'bottom', margin_v: 36 } },
+  { name: '短视频清晰', description: '白字黑边，底部单行', patch: { line_mode: 'single', font_name: 'Source Han Sans SC', font_size: 48, secondary_font_size: 42, font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48 } },
+  { name: '电影双语', description: '主副字幕分色，底部留白', patch: { line_mode: 'double', font_name: 'Noto Sans SC', font_size: 42, secondary_font_size: 32, font_color: '#FFFFFF', secondary_color: '#D1D5DB', outline_color: '#111827', outline_width: 3, shadow_enabled: true, shadow_color: '#000000', shadow_x: 1, shadow_y: 2, background_alpha: 0, position: 'bottom', margin_v: 62 } },
+  { name: '知识讲解', description: '黄字高亮，适合解说', patch: { line_mode: 'single', font_name: 'Alibaba PuHuiTi', font_size: 50, secondary_font_size: 42, font_color: '#FACC15', secondary_color: '#FFFFFF', outline_color: '#1F2937', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 46 } },
+  { name: '干净信息条', description: '半透明背景，低描边', patch: { line_mode: 'single', font_name: 'HarmonyOS Sans SC', font_size: 40, secondary_font_size: 34, font_color: '#FFFFFF', secondary_color: '#BAE6FD', outline_color: '#000000', outline_width: 1, shadow_enabled: false, background_alpha: 128, position: 'bottom', margin_v: 36 } },
 ]
 
 /** 字幕预设默认值 */
 function createDefaultForm(name = '短视频清晰字幕'): SubtitlePresetForm {
   return {
-    name, is_default: false, line_mode: 'single', language: 'zh-CN', font_name: 'Source Han Sans SC', font_size: 48,
+    name, is_default: false, line_mode: 'single', language: 'zh-CN', font_name: 'Source Han Sans SC', font_size: 48, secondary_font_size: 42,
     font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4,
     shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48,
   }
@@ -72,7 +72,7 @@ function normalizePosition(position: string): SubtitlePosition {
 function presetToForm(preset: SubtitlePreset): SubtitlePresetForm {
   return {
     name: preset.name || '未命名预设', is_default: Boolean(preset.is_default), line_mode: preset.line_mode || 'single',
-    language: preset.language || 'auto', font_name: preset.font_name || 'Source Han Sans SC', font_size: preset.font_size || 48,
+    language: preset.language || 'auto', font_name: preset.font_name || 'Source Han Sans SC', font_size: preset.font_size || 48, secondary_font_size: preset.secondary_font_size || Math.max(18, Math.round((preset.font_size || 48) * 0.88)),
     font_color: preset.font_color || '#FFFFFF', secondary_color: preset.secondary_color || '#FDE68A', outline_color: preset.outline_color || '#000000',
     outline_width: preset.outline_width ?? 4, shadow_enabled: preset.shadow_enabled ?? true, shadow_color: preset.shadow_color || '#000000',
     shadow_x: preset.shadow_x ?? 2, shadow_y: preset.shadow_y ?? 3, background_alpha: preset.background_alpha ?? 0,
@@ -142,7 +142,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     if (!language || language === 'custom') { addLog('warn', '请输入自定义字幕语言'); return }
     setIsSaving(true)
     try {
-      const payload = { ...form, name, language, font_size: Number(form.font_size), outline_width: Number(form.outline_width), shadow_x: Number(form.shadow_x), shadow_y: Number(form.shadow_y), background_alpha: Number(form.background_alpha), margin_v: Number(form.margin_v) }
+      const payload = { ...form, name, language, font_size: Number(form.font_size), secondary_font_size: Number(form.secondary_font_size), outline_width: Number(form.outline_width), shadow_x: Number(form.shadow_x), shadow_y: Number(form.shadow_y), background_alpha: Number(form.background_alpha), margin_v: Number(form.margin_v) }
       const saved = selectedId === 'new' ? await subtitleApi.createPreset(payload) : await subtitleApi.updatePreset(selectedId, payload)
       setAutomationOptions(saveAutomationPreferences({ subtitle_preset_id: saved.id, subtitle_language: language }))
       addLog('info', `字幕预设 "${saved.name}" 已保存`)
@@ -205,7 +205,8 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                 )}
                 <SegmentedField label="字幕行数" value={form.line_mode} options={[['single', '单行'], ['double', '双行']]} onChange={(v) => updateForm('line_mode', v as 'single' | 'double')} />
               </div>
-              <SliderField label="文字大小" value={form.font_size} min={18} max={96} step={1} suffix=" px" onChange={(v) => updateForm('font_size', v)} />
+              <SliderField label="主字幕大小" value={form.font_size} min={18} max={96} step={1} suffix=" px" onChange={(v) => updateForm('font_size', v)} />
+              {form.line_mode === 'double' && <SliderField label="第二行大小" value={form.secondary_font_size} min={18} max={96} step={1} suffix=" px" onChange={(v) => updateForm('secondary_font_size', v)} />}
               <div>
                 <p className="mb-2 text-sm">字幕位置</p>
                 <PositionGrid value={form.position} options={POSITION_GRID_OPTIONS} onChange={(v) => updateForm('position', v as SubtitlePosition)} />
@@ -280,6 +281,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
 /** 预览框 */
 function PreviewBox({ form, languageLabel }: { form: SubtitlePresetForm; languageLabel: string }) {
   const previewFontSize = Math.max(14, Math.min(30, Number(form.font_size) * 0.44))
+  const secondaryPreviewFontSize = Math.max(12, Math.min(28, Number(form.secondary_font_size || form.font_size) * 0.44))
   const backgroundAlpha = Math.max(0, Math.min(255, Number(form.background_alpha) || 0))
   const previewBackground = `rgba(0, 0, 0, ${backgroundAlpha / 255})`
   const positionClass = previewPositionClass(form.position)
@@ -291,7 +293,7 @@ function PreviewBox({ form, languageLabel }: { form: SubtitlePresetForm; languag
         <div className={`flex h-full p-5 ${positionClass}`}>
           <div className="max-w-full rounded px-3 py-2 text-center leading-tight" style={{ background: previewBackground, color: form.font_color, fontFamily: form.font_name, fontSize: `${previewFontSize}px`, textShadow: previewTextShadow, lineHeight: 1.18 }}>
             <div className="break-words">主字幕预览文本</div>
-            {form.line_mode === 'double' && <div className="mt-1 break-words" style={{ color: form.secondary_color }}>Second subtitle line</div>}
+            {form.line_mode === 'double' && <div className="mt-1 break-words" style={{ color: form.secondary_color, fontSize: `${secondaryPreviewFontSize}px` }}>Second subtitle line</div>}
           </div>
         </div>
       </div>
@@ -299,7 +301,7 @@ function PreviewBox({ form, languageLabel }: { form: SubtitlePresetForm; languag
         <PreviewStat label="语言" value={languageLabel} />
         <PreviewStat label="位置" value={positionLabel(form.position)} />
         <PreviewStat label="字体" value={form.font_name} />
-        <PreviewStat label="字号" value={`${form.font_size}px`} />
+        <PreviewStat label="字号" value={form.line_mode === 'double' ? `${form.font_size}/${form.secondary_font_size}px` : `${form.font_size}px`} />
       </div>
     </div>
   )

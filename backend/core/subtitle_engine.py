@@ -232,7 +232,8 @@ class SubtitleEngine:
             preset = {}
 
         font_name = preset.get("font_name", "Microsoft YaHei")
-        font_size = preset.get("font_size", 48)
+        font_size = int(preset.get("font_size") or 48)
+        secondary_font_size = int(preset.get("secondary_font_size") or max(18, round(font_size * 0.88)))
         line_mode = str(preset.get("line_mode") or "single").lower()
         font_color = self._color_to_ass(preset.get("font_color", "&H00FFFFFF"))
         secondary_color = self._color_to_ass(preset.get("secondary_color", "&H000000FF"))
@@ -270,6 +271,7 @@ PlayResY: 1080
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{font_name},{font_size},{font_color},{secondary_color},{outline_color},{shadow_color},0,0,0,0,100,100,0,0,1,{outline_width},1,{alignment},10,10,{margin_v},1
+Style: Secondary,{font_name},{secondary_font_size},{secondary_color},{secondary_color},{outline_color},{shadow_color},0,0,0,0,100,100,0,0,1,{outline_width},1,{alignment},10,10,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -293,6 +295,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def normalize_entries_for_display(self, entries: List[dict], preset: Optional[dict] = None) -> List[dict]:
         """把长字幕拆成短字幕条目，避免单条字幕显示两行并改善时间轴贴合度"""
         preset = preset or {}
+        if str(preset.get("line_mode") or "single").lower() == "double":
+            return self._normalize_double_line_entries(entries)
+
         max_chars = self._max_display_chars(preset)
         normalized_entries: list[dict] = []
         for entry in entries:
@@ -322,14 +327,50 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 })
         return normalized_entries
 
+    def _normalize_double_line_entries(self, entries: List[dict]) -> List[dict]:
+        """双行模式保留原时间段，只清理每行空白，避免被单行拆分逻辑打散"""
+        normalized_entries: list[dict] = []
+        for entry in entries:
+            lines = self._dialogue_lines(str(entry.get("text") or ""))
+            if not lines:
+                continue
+            normalized_entries.append({
+                **entry,
+                "index": len(normalized_entries) + 1,
+                "text": "\n".join(lines),
+            })
+        return normalized_entries
+
     def _format_ass_dialogue_text(self, text: str, preset: dict) -> str:
         """格式化 ASS 单条字幕，单行模式不再写入换行符"""
-        normalized = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
-        if not normalized:
+        lines = self._dialogue_lines(text)
+        if not lines:
             return ""
         if str(preset.get("line_mode") or "single").lower() == "single":
-            return normalized
-        return "\\N".join(self._split_subtitle_text(normalized, self._max_display_chars(preset)))
+            return " ".join(lines)
+
+        primary, secondary = self._double_line_text(lines, self._max_display_chars(preset))
+        if not secondary:
+            return primary
+        return f"{primary}\\N{{\\rSecondary}}{secondary}"
+
+    def _dialogue_lines(self, text: str) -> list[str]:
+        """按显式换行拆字幕行，并清理每行内部空白"""
+        return [
+            WHITESPACE_RE.sub(" ", line).strip()
+            for line in str(text or "").replace("\\N", "\n").splitlines()
+            if WHITESPACE_RE.sub(" ", line).strip()
+        ]
+
+    def _double_line_text(self, lines: list[str], max_chars: int) -> tuple[str, str]:
+        """生成双行字幕文本：显式两行优先，否则把长句切成上下两行"""
+        if len(lines) >= 2:
+            return lines[0], " ".join(lines[1:])
+
+        parts = self._split_subtitle_text(lines[0], max_chars)
+        if len(parts) == 1:
+            return parts[0], ""
+        return parts[0], " ".join(parts[1:])
 
     def _max_display_chars(self, preset: dict) -> int:
         """根据字号估算单行可读字符数"""
