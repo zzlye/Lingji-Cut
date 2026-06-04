@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
@@ -120,6 +121,7 @@ function AutoRunConfirm({
   onOpenSettings: (tab?: SettingsSection) => void
 }) {
   const [open, setOpen] = useState(false)
+  const updatePrefs = usePrefsStore((s) => s.update)
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -132,13 +134,28 @@ function AutoRunConfirm({
         <div className="space-y-3">
           <div>
             <p className="text-sm font-medium">确认一键完成</p>
-            <p className="text-xs text-muted-foreground">将按当前设置自动跑完整条流水线。</p>
+            <p className="text-xs text-muted-foreground">可选步骤可在这里临时开关。</p>
           </div>
           <Separator />
+          {/* 可选步骤开关：画面处理、配音 */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
+              <div className="min-w-0">
+                <p className="text-sm">画面处理</p>
+                <p className="text-xs text-muted-foreground">差异化重编码，关闭可明显加快</p>
+              </div>
+              <Switch checked={preferences.enable_effects} onCheckedChange={(v) => updatePrefs({ enable_effects: v })} />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
+              <div className="min-w-0">
+                <p className="text-sm">配音</p>
+                <p className="text-xs text-muted-foreground">需先在设置里配置配音渠道</p>
+              </div>
+              <Switch checked={preferences.enable_voice} onCheckedChange={(v) => updatePrefs({ enable_voice: v })} />
+            </div>
+          </div>
           <ul className="space-y-1.5 text-xs text-muted-foreground">
-            <li className="flex justify-between"><span>画面处理</span><span className="text-foreground">{preferences.enable_effects ? '开启' : '关闭'}</span></li>
             <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
-            <li className="flex justify-between"><span>配音</span><span className="text-foreground">{preferences.enable_voice ? (preferences.voice_mode === 'segmented' ? '分段配音' : '整段配音') : '关闭'}</span></li>
             <li className="flex justify-between"><span>导出格式</span><span className="text-foreground uppercase">{preferences.output_format}</span></li>
           </ul>
           <div className="flex gap-2">
