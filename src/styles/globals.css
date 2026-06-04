@@ -1,96 +1,145 @@
 /* src/styles/globals.css
- * 全局样式 - 暗色主题 + Tailwind CSS v4
- * 基于 UI/UX Pro Max 设计系统的暗色 OLED 主题
+ * 全局样式 - 深色为主 + 毛玻璃，基于 shadcn/ui 语义 token（Tailwind CSS v4）
  */
 
-/* Tailwind CSS v4 导入 */
 @import "tailwindcss";
+@import "tw-animate-css";
 
-/* 设计系统 CSS 变量 - 使用 @theme 定义自定义 token */
-@theme {
-  /* 主色调 - 粉红色（视频/创意工具活力感） */
-  --color-primary: #EC4899;
-  --color-primary-foreground: #FFFFFF;
+/* 深色变体：配合 <html class="dark"> 启用 dark: 修饰符 */
+@custom-variant dark (&:is(.dark *));
 
-  /* 强调色 - 蓝色（时间线/进度科技感） */
-  --color-accent: #2563EB;
-  --color-accent-foreground: #FFFFFF;
+/* 设计 token 原始值（oklch）。桌面端固定深色主题 */
+:root {
+  --radius: 0.625rem;
 
-  /* 背景色系 */
-  --color-background: #0F172A;
-  --color-background-deep: #020203;
-  --color-background-elevated: #1E293B;
+  --background: oklch(0.17 0.018 265);
+  --foreground: oklch(0.97 0.01 265);
+  --card: oklch(0.215 0.02 265);
+  --card-foreground: oklch(0.97 0.01 265);
+  --popover: oklch(0.20 0.02 265);
+  --popover-foreground: oklch(0.97 0.01 265);
+  --primary: oklch(0.70 0.19 350);
+  --primary-foreground: oklch(0.99 0.005 350);
+  --secondary: oklch(0.27 0.02 265);
+  --secondary-foreground: oklch(0.97 0.01 265);
+  --muted: oklch(0.27 0.02 265);
+  --muted-foreground: oklch(0.71 0.02 265);
+  --accent: oklch(0.31 0.03 265);
+  --accent-foreground: oklch(0.98 0.01 265);
+  --destructive: oklch(0.62 0.22 25);
+  --destructive-foreground: oklch(0.99 0.005 25);
+  --success: oklch(0.72 0.17 152);
+  --warning: oklch(0.80 0.16 80);
+  --info: oklch(0.62 0.17 255);
+  --border: oklch(1 0 0 / 0.10);
+  --input: oklch(1 0 0 / 0.14);
+  --ring: oklch(0.70 0.19 350 / 0.55);
 
-  /* 前景色 */
-  --color-foreground: #FFFFFF;
-  --color-foreground-muted: #94A3B8;
+  /* 毛玻璃专用变量 */
+  --glass-bg: oklch(0.22 0.02 265 / 0.55);
+  --glass-bg-strong: oklch(0.19 0.02 265 / 0.80);
+  --glass-border: oklch(1 0 0 / 0.12);
 
-  /* 表面色 */
-  --color-card: #1E293B;
-  --color-card-foreground: #FFFFFF;
-
-  /* 破坏性操作色 */
-  --color-destructive: #DC2626;
-  --color-destructive-foreground: #FFFFFF;
-
-  /* 成功色 */
-  --color-success: #22C55E;
-
-  /* 警告色 */
-  --color-warning: #F59E0B;
-
-  /* 边框 */
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-bright: rgba(255, 255, 255, 0.15);
+  /* —— 旧 token 兼容别名：迁移期让旧组件存活，逐页替换后删除 —— */
+  --background-deep: oklch(0.12 0.015 265);
+  --background-elevated: oklch(0.215 0.02 265);
+  --foreground-muted: oklch(0.71 0.02 265);
+  --border-bright: oklch(1 0 0 / 0.16);
 }
 
-/* 基础样式重置 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* 将原始变量映射为 Tailwind 颜色 token，供背景、文字、边框等工具类使用 */
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* 旧 token 别名映射 */
+  --color-background-deep: var(--background-deep);
+  --color-background-elevated: var(--background-elevated);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-border-bright: var(--border-bright);
 }
 
-html {
-  /* 禁用用户缩放 */
-  -webkit-app-region: no-drag;
-  /* 字体平滑 */
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    border-color: var(--color-border);
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    line-height: 1.5;
+    font-size: 14px;
+    user-select: none;
+    /* 底层径向光晕，让毛玻璃模糊有内容可糊出层次 */
+    background-image:
+      radial-gradient(1200px 600px at 12% -12%, oklch(0.70 0.19 350 / 0.10), transparent 60%),
+      radial-gradient(1000px 520px at 112% 8%, oklch(0.62 0.17 255 / 0.10), transparent 55%);
+    background-attachment: fixed;
+  }
 }
 
-body {
-  /* 背景色与主题一致，避免白屏闪烁 */
-  background-color: var(--color-background);
-  color: var(--color-foreground);
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  /* 行高 1.5 提升可读性 */
-  line-height: 1.5;
-  /* 最小字体 14px */
-  font-size: 14px;
-  /* 禁止选中文字（桌面应用） */
-  user-select: none;
-  /* 窗口拖拽区域 */
-  -webkit-app-region: no-drag;
+/* 毛玻璃工具类：用于导航条、浮层和少量主卡片（长列表内容区勿用，保可读性与性能） */
+@utility glass {
+  background-color: var(--glass-bg);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid var(--glass-border);
 }
 
-/* 标题栏可拖拽区域 */
+@utility glass-strong {
+  background-color: var(--glass-bg-strong);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 8px 32px oklch(0 0 0 / 0.45);
+}
+
+/* 标题栏可拖拽区域（Electron 无边框窗口） */
 .titlebar-drag {
   -webkit-app-region: drag;
 }
 
-/* 标题栏按钮不可拖拽 */
-.titlebar-drag button {
-  -webkit-app-region: no-drag;
-}
-
-/* 标题栏内部可交互区域 */
+.titlebar-drag button,
 .no-drag,
 .no-drag * {
   -webkit-app-region: no-drag;
 }
 
-/* 滚动条样式 - 暗色主题 */
+/* 滚动条 - 暗色主题 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -101,22 +150,16 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: oklch(1 0 0 / 0.12);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* 焦点样式 - 可访问性 */
-:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
+  background: oklch(1 0 0 / 0.22);
 }
 
 /* 选中文本样式 */
 ::selection {
-  background: rgba(236, 72, 153, 0.3);
+  background: oklch(0.70 0.19 350 / 0.32);
   color: var(--color-foreground);
 }

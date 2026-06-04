@@ -1,71 +1,71 @@
 // src/components/layout/AppShell.tsx
-// 主布局壳组件 - 工作台布局
-// 包含：顶部栏 + 左侧边栏 + 中间主区域 + 底部日志栏
-
+// 主布局壳 - 顶部标题栏 + 左侧导航 + 主工作区 + 活动抽屉 + 设置浮层
 import { useState } from 'react'
-import { Header } from './Header'
-import { Sidebar } from './Sidebar'
-import { LogPanel } from './LogPanel'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { TitleBar } from './TitleBar'
+import { NavRail } from './NavRail'
+import { ActivityDrawer } from './ActivityDrawer'
+import { StudioWorkspace } from '@/features/studio/StudioWorkspace'
 import { TaskPanel } from '@/features/tasks/TaskPanel'
 import { LibraryPanel } from '@/features/library/LibraryPanel'
 import { HistoryPanel } from '@/features/history/HistoryPanel'
+import { SettingsCenter, type SettingsTab } from '@/features/settings/SettingsCenter'
+import { useUiStore } from '@/stores/uiStore'
+import { useAutomationStream } from '@/hooks/useAutomationStream'
 
-/** 侧边栏导航项类型 */
-export type SidebarItem =
-  | 'library'     // 素材库
-  | 'tasks'       // 任务队列
-  | 'history'     // 历史记录
+/** 旧侧边栏项类型，保留以兼容尚未退役的 Sidebar 组件 */
+export type SidebarItem = 'library' | 'tasks' | 'history'
 
-/**
- * 主布局壳组件
- * 实现四区域工作台布局：顶部栏、左侧边栏、中间主区域、底部日志面板
- */
 export function AppShell() {
-  // 当前选中的侧边栏项
-  const [activeItem, setActiveItem] = useState<SidebarItem>('library')
-  // 日志面板是否展开
-  const [isLogExpanded, setIsLogExpanded] = useState(false)
+  // 全局唯一的自动化进度流（SSE）入口，取代 Header/TaskPanel 各自的监听
+  useAutomationStream()
+  const workspace = useUiStore((s) => s.workspace)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('effects')
+
+  const openSettings = (tab: SettingsTab = 'effects') => {
+    setSettingsTab(tab)
+    setSettingsOpen(true)
+  }
 
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
-      {/* 顶部栏 - URL 输入、解析按钮、全局状态 */}
-      <Header />
-
-      {/* 中间内容区域 - 侧边栏 + 主区域 */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* 左侧导航侧边栏 */}
-        <Sidebar
-          activeItem={activeItem}
-          onItemChange={setActiveItem}
-        />
-
-        {/* 主内容区域 */}
-        <main className="flex-1 overflow-auto">
-          <ContentPanel item={activeItem} />
-        </main>
+    <TooltipProvider delayDuration={200}>
+      <div className="flex h-screen flex-col overflow-hidden text-foreground">
+        <TitleBar onOpenSettings={() => openSettings('effects')} />
+        <div className="flex min-h-0 flex-1">
+          <NavRail onOpenSettings={() => openSettings('effects')} />
+          <main className="min-w-0 flex-1 overflow-auto">
+            {workspace === 'queue' ? (
+              <TaskPanel />
+            ) : workspace === 'library' ? (
+              <LibraryPanel />
+            ) : workspace === 'history' ? (
+              <HistoryPanel />
+            ) : (
+              <StudioWorkspace onOpenSettings={openSettings} />
+            )}
+          </main>
+        </div>
+        <ActivityDrawer />
+        {settingsOpen && <SettingsOverlay tab={settingsTab} onClose={() => setSettingsOpen(false)} />}
       </div>
-
-      {/* 底部日志面板 */}
-      <LogPanel
-        isExpanded={isLogExpanded}
-        onToggle={() => setIsLogExpanded(!isLogExpanded)}
-      />
-    </div>
+    </TooltipProvider>
   )
 }
 
-/**
- * 内容面板组件 - 根据侧边栏选择显示不同内容
- */
-function ContentPanel({ item }: { item: SidebarItem }) {
-  switch (item) {
-    case 'library':
-      return <LibraryPanel />
-    case 'tasks':
-      return <TaskPanel />
-    case 'history':
-      return <HistoryPanel />
-    default:
-      return <LibraryPanel />
-  }
+/** 过渡期：复用旧设置中心，以居中遮罩呈现（阶段四会改为独立设置工作区） */
+function SettingsOverlay({ tab, onClose }: { tab: SettingsTab; onClose: () => void }) {
+  return (
+    <div
+      className="no-drag fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onMouseDown={onClose}
+    >
+      <div
+        className="glass-strong w-[min(1000px,100%)] overflow-hidden rounded-xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <SettingsCenter onClose={onClose} onDragStart={() => {}} initialTab={tab} />
+      </div>
+    </div>
+  )
 }
