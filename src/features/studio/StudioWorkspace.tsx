@@ -157,6 +157,7 @@ function AutoRunConfirm({
           <ul className="space-y-1.5 text-xs text-muted-foreground">
             <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
             <li className="flex justify-between"><span>导出格式</span><span className="text-foreground uppercase">{preferences.output_format}</span></li>
+            <li className="flex justify-between"><span>最终导出</span><span className="text-foreground">{preferences.export_with_settings ? '按导出设置' : '直接输出'}</span></li>
           </ul>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" className="flex-1" onClick={() => { setOpen(false); onOpenSettings('effects') }}>
@@ -293,6 +294,7 @@ function ConfigSummary({
 }) {
   const rows: Array<{ icon: typeof Film; label: string; value: string; tab: SettingsSection }> = [
     { icon: Film, label: '画面处理', value: preferences.enable_effects ? '已开启' : '已关闭', tab: 'effects' },
+    { icon: SlidersHorizontal, label: '最终导出', value: preferences.export_with_settings ? '按导出设置' : '直接输出', tab: 'effects' },
     { icon: Captions, label: '字幕', value: SUBTITLE_OP_LABEL[preferences.subtitle_operation], tab: 'subtitle' },
     { icon: Mic, label: '配音', value: preferences.enable_voice ? '已开启' : '已关闭', tab: 'voice' },
     { icon: BookMarked, label: '术语字库', value: `${preferences.glossary_terms.length} 条`, tab: 'glossary' },

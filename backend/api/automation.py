@@ -99,6 +99,7 @@ class AutomationRunRequest(BaseModel):
     processing_preset: dict[str, Any] = Field(default_factory=dict)
     format_id: Optional[str] = None
     output_format: str = "mp4"
+    export_with_settings: bool = True
     subtitle_preset_id: Optional[int] = None
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
@@ -812,6 +813,51 @@ def merge_subtitle_burn_preset(subtitle_preset: dict[str, Any], processing_prese
     return merged
 
 
+def build_final_export_preset(processing_preset: dict[str, Any]) -> dict[str, Any]:
+    """生成最终导出专用预设，只保留分辨率、码率和硬件加速，不重复套视觉效果"""
+    canvas = processing_preset.get("canvas") if isinstance(processing_preset.get("canvas"), dict) else {"enabled": False}
+    bitrate = processing_preset.get("bitrate") if isinstance(processing_preset.get("bitrate"), dict) else {"enabled": False}
+    acceleration = processing_preset.get("acceleration") if isinstance(processing_preset.get("acceleration"), dict) else {"enabled": True, "mode": "auto", "quality": "balanced"}
+    return {
+        "adjustments": {"enabled": False},
+        "canvas": dict(canvas),
+        "transform": {
+            "enabled": False,
+            "rotate_mode": "none",
+            "flip_horizontal": False,
+            "flip_vertical": False,
+            "random_rotate": {"enabled": False, "random": False, "value": 0, "min": 0, "max": 0},
+            "remove_black_bars": False,
+            "show_full_frame": True,
+        },
+        "timing": {
+            "enabled": False,
+            "fps": {"enabled": False, "random": False, "value": 30, "min": 30, "max": 30},
+            "drop_frame": {"enabled": False, "interval": {"enabled": False, "random": False, "value": 25, "min": 25, "max": 25}},
+            "dynamic_zoom": {"enabled": False, "random": False, "value": 0, "min": 0, "max": 0},
+        },
+        "bitrate": dict(bitrate),
+        "acceleration": dict(acceleration),
+    }
+
+
+def should_apply_final_export_settings(export_with_settings: bool, enable_effects: bool, processing_preset: dict[str, Any]) -> bool:
+    """判断是否需要在导出末尾再按导出设置统一输出一次"""
+    if not export_with_settings or enable_effects or not isinstance(processing_preset, dict):
+        return False
+
+    bitrate = processing_preset.get("bitrate")
+    if isinstance(bitrate, dict) and bitrate.get("enabled", True):
+        return True
+
+    canvas = processing_preset.get("canvas")
+    if not isinstance(canvas, dict) or canvas.get("enabled") is False:
+        return False
+    resolution = str(canvas.get("resolution") or "720p")
+    mode = str(canvas.get("mode") or "keep")
+    return resolution != "original" or mode != "keep"
+
+
 def _plain_text_to_entries(text: str) -> list[dict[str, str | int]]:
     """没有原时间轴时，把纯文本转换成可渲染字幕条目"""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -842,13 +888,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     assert_required_tools_available()
     downloader = Downloader()
     processor = FFmpegProcessor()
+    paths = ensure_project_dirs()
     stages: list[AutomationStageResult] = []
     subtitle_text = ""
     subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
     subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
+    final_export_preset: dict[str, Any] = build_final_export_preset(request.processing_preset)
     audio_path: Optional[str] = None
     warning_messages: list[str] = []
+    preset_dict: dict[str, Any] = {}
 
     video = _parse_or_update_video(db, request.url, downloader)
     _check_control(db, job)
@@ -977,7 +1026,6 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, subtitle_task)
             preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
-            paths = ensure_project_dirs()
             preset_dict = _preset_to_dict(preset)
             engine = SubtitleEngine()
 
@@ -1253,11 +1301,35 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             db.commit()
             if job:
                 _update_job_stage(db, job, "export", "running", progress=70, task_id=export_task.id)
+        if should_apply_final_export_settings(request.export_with_settings, request.enable_effects, request.processing_preset):
+            render_start = max(15.0, float(export_task.progress or 15.0))
+            working_video = processor.apply_effects(
+                video_path=working_video,
+                preset=final_export_preset,
+                output_path=os.path.join(paths["output_dir"], f"{os.path.splitext(os.path.basename(working_video))[0]}_final.mp4"),
+                control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(
+                    db,
+                    job,
+                    export_task,
+                    min(92.0, render_start + progress * max(0.0, 92.0 - render_start) / 100.0),
+                ),
+            )
+            _check_control(db, job, export_task)
+            export_task.progress = 92
+            db.commit()
+            if job:
+                _update_job_stage(db, job, "export", "running", progress=92, task_id=export_task.id)
         output_path = processor.convert_format(
             input_path=working_video,
             output_format=request.output_format,
             control_keys=_control_keys(job, export_task),
-            progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(95.0, 80.0 + progress * 0.15)),
+            progress_callback=lambda progress: _update_export_progress(
+                db,
+                job,
+                export_task,
+                min(95.0, max(80.0, float(export_task.progress or 80.0)) + progress * 0.15),
+            ),
         )
         _check_control(db, job, export_task)
         _complete_task(db, export_task, output_path)

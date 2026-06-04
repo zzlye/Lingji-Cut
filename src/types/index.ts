@@ -279,6 +279,7 @@ export interface GlossaryTerm {
 /** 一键自动化偏好 */
 export interface AutomationPreferences {
   output_format: 'mp4' | 'mkv' | 'mov' | 'webm'
+  export_with_settings: boolean
   enable_effects: boolean
   subtitle_preset_id: number | null
   subtitle_language: string

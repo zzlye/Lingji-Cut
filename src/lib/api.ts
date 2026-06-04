@@ -352,6 +352,7 @@ export type AutomationStartParams = {
   processing_preset: import('@/types').ProcessingConfig
   format_id?: string
   output_format?: string
+  export_with_settings?: boolean
   subtitle_preset_id?: number
   subtitle_language?: string
   text_profile_id?: number

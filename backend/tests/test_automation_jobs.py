@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, combine_original_and_translated_entries, merge_subtitle_burn_preset, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
@@ -109,6 +109,7 @@ class FakeAutomationProcessor:
     def __init__(self, temp_dir: str):
         self.temp_dir = temp_dir
         self.burn_calls: list[dict] = []
+        self.effects_calls: list[dict] = []
 
     def burn_subtitles(self, **kwargs):
         """记录烧录参数并返回假输出文件"""
@@ -116,6 +117,14 @@ class FakeAutomationProcessor:
         output_path = os.path.join(self.temp_dir, "subtitled.mp4")
         with open(output_path, "wb") as file:
             file.write(b"subtitled")
+        return output_path
+
+    def apply_effects(self, **kwargs):
+        """记录最终导出渲染参数并返回假输出文件"""
+        self.effects_calls.append(kwargs)
+        output_path = os.path.join(self.temp_dir, "final.mp4")
+        with open(output_path, "wb") as file:
+            file.write(b"final")
         return output_path
 
     def convert_format(self, **_kwargs):
@@ -587,6 +596,99 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(merged["secondary_color"], "#FDE68A")
         self.assertEqual(merged["bitrate"]["fixed_kbps"]["value"], 2200)
         self.assertEqual(merged["acceleration"]["quality"], "size")
+
+    def test_build_final_export_preset_only_keeps_output_related_settings(self):
+        """最终导出预设只保留画布、码率和硬件加速，避免再次套用翻转和抽帧"""
+        preset = build_final_export_preset({
+            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep", "width": 1920, "height": 1080},
+            "bitrate": {
+                "enabled": True,
+                "mode": "fixed",
+                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+            },
+            "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+            "transform": {"enabled": True, "flip_horizontal": True},
+            "timing": {"enabled": True},
+        })
+
+        self.assertFalse(preset["adjustments"]["enabled"])
+        self.assertEqual(preset["canvas"]["resolution"], "1080p")
+        self.assertFalse(preset["transform"]["enabled"])
+        self.assertFalse(preset["timing"]["enabled"])
+        self.assertEqual(preset["bitrate"]["fixed_kbps"]["value"], 2200)
+        self.assertEqual(preset["acceleration"]["quality"], "size")
+
+    def test_should_apply_final_export_settings_only_when_effects_are_skipped(self):
+        """最终导出设置只在用户开启该选项且跳过画面处理时才额外执行"""
+        processing_preset = {
+            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep"},
+            "bitrate": {
+                "enabled": True,
+                "mode": "fixed",
+                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+            },
+        }
+
+        self.assertTrue(should_apply_final_export_settings(True, False, processing_preset))
+        self.assertFalse(should_apply_final_export_settings(False, False, processing_preset))
+        self.assertFalse(should_apply_final_export_settings(True, True, processing_preset))
+
+    def test_automation_export_stage_applies_final_export_settings_when_effects_disabled(self):
+        """关闭画面处理但开启最终导出设置时，字幕或配音完成后仍按导出设置统一输出"""
+        with tempfile.TemporaryDirectory(prefix="automation_export_render_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=1, platform="youtube", video_id="export-render", url="https://example.test/video", title="测试视频")
+            task_ids = iter(range(1, 10))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation.ensure_project_dirs", return_value={"output_dir": temp_dir, "exports_dir": temp_dir}),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        export_with_settings=True,
+                        processing_preset={
+                            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep", "width": 1920, "height": 1080},
+                            "bitrate": {
+                                "enabled": True,
+                                "mode": "fixed",
+                                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+                            },
+                            "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+                        },
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["export"].status, "completed")
+        self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
+        self.assertEqual(fake_processor.effects_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
+        self.assertFalse(fake_processor.effects_calls[0]["preset"]["transform"]["enabled"])
+        self.assertEqual(fake_processor.effects_calls[0]["preset"]["canvas"]["resolution"], "1080p")
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

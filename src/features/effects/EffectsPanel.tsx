@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { effectsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
+import { usePrefsStore } from '@/stores/prefsStore'
 import type { ProcessingConfig, ProcessingPreset, RandomRange } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -251,6 +252,8 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
   const [filterGraph, setFilterGraph] = useState('')
   const [isBusy, setIsBusy] = useState(false)
   const { tasks, addTask, addLog } = useTaskStore()
+  const exportWithSettings = usePrefsStore((state) => state.preferences.export_with_settings)
+  const updatePrefs = usePrefsStore((state) => state.update)
 
   const latestVideoPath = useMemo(() => {
     const completed = tasks.find((task) => task.status === 'completed' && task.output_path)
@@ -454,6 +457,12 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
         <AccordionItem value="output" className="rounded-lg border px-4">
           <AccordionTrigger className="text-sm">码率与输出</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
+            <SwitchField
+              label="最终按导出设置统一输出"
+              description="关闭画面处理时，也会在字幕和配音完成后按这里的分辨率、码率和加速策略收口导出"
+              checked={exportWithSettings}
+              onChange={(v) => updatePrefs({ export_with_settings: v })}
+            />
             <SwitchField label="启用码率控制" checked={config.bitrate.enabled} onChange={(v) => updateValue(['bitrate', 'enabled'], v)} />
             <SegmentedField label="码率方式" value={config.bitrate.mode} options={BITRATE_MODE_OPTIONS} onChange={(v) => updateValue(['bitrate', 'mode'], v)} />
             {config.bitrate.mode === 'fixed' ? (
