@@ -42,5 +42,25 @@
     "tailwindcss": "^4.3.0",
     "typescript": "^5.7.2",
     "vite": "^6.3.0"
+  },
+  "build": {
+    "appId": "com.youtubeprocessor.app",
+    "productName": "YouTube视频处理器",
+    "directories": { "output": "release" },
+    "files": ["out/**/*"],
+    "extraResources": [
+      { "from": "D:/tools/python-3.12.10-embed", "to": "python" },
+      { "from": "backend", "to": "backend", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!tests/**"] },
+      { "from": "build-resources/tools", "to": "tools" }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "youtube-video-processor-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }

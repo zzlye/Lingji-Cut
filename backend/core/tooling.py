@@ -25,8 +25,24 @@ class ToolStatus:
     error_message: Optional[str] = None
 
 
-def resolve_tool_command(preferred_path: str, fallback_name: str) -> tuple[str, str, bool]:
-    """解析工具命令，优先 D:\tools，失败后回退 PATH"""
+def _bundled_tool_path(exe_name: Optional[str]) -> Optional[str]:
+    """打包环境下从 Electron 通过 YTV_TOOLS_DIR 指定的随附工具目录查找"""
+    if not exe_name:
+        return None
+    base = os.environ.get("YTV_TOOLS_DIR")
+    if base:
+        candidate = os.path.join(base, exe_name)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def resolve_tool_command(preferred_path: str, fallback_name: str, bundled_exe: Optional[str] = None) -> tuple[str, str, bool]:
+    """解析工具命令：优先随包目录（打包环境），其次 D:\\tools，最后回退 PATH"""
+    bundled = _bundled_tool_path(bundled_exe)
+    if bundled:
+        return bundled, "bundled", True
+
     if os.path.exists(preferred_path):
         return preferred_path, "D:\\tools", True
 
@@ -39,17 +55,17 @@ def resolve_tool_command(preferred_path: str, fallback_name: str) -> tuple[str, 
 
 def get_yt_dlp_command() -> str:
     """获取 yt-dlp 命令路径"""
-    return resolve_tool_command(YT_DLP_PATH, "yt-dlp")[0]
+    return resolve_tool_command(YT_DLP_PATH, "yt-dlp", "yt-dlp.exe")[0]
 
 
 def get_ffmpeg_command() -> str:
     """获取 ffmpeg 命令路径"""
-    return resolve_tool_command(FFMPEG_PATH, "ffmpeg")[0]
+    return resolve_tool_command(FFMPEG_PATH, "ffmpeg", "ffmpeg.exe")[0]
 
 
-def check_tool(name: str, preferred_path: str, fallback_name: str, version_args: list[str]) -> ToolStatus:
+def check_tool(name: str, preferred_path: str, fallback_name: str, version_args: list[str], bundled_exe: Optional[str] = None) -> ToolStatus:
     """检查单个外部工具是否可执行"""
-    command, source, exists = resolve_tool_command(preferred_path, fallback_name)
+    command, source, exists = resolve_tool_command(preferred_path, fallback_name, bundled_exe)
     if not exists:
         return ToolStatus(
             name=name,
@@ -86,8 +102,8 @@ def check_tool(name: str, preferred_path: str, fallback_name: str, version_args:
 def check_required_tools() -> dict[str, ToolStatus]:
     """检查自动化流程必需的外部工具"""
     return {
-        "yt_dlp": check_tool("yt-dlp", YT_DLP_PATH, "yt-dlp", ["--version"]),
-        "ffmpeg": check_tool("ffmpeg", FFMPEG_PATH, "ffmpeg", ["-version"]),
+        "yt_dlp": check_tool("yt-dlp", YT_DLP_PATH, "yt-dlp", ["--version"], "yt-dlp.exe"),
+        "ffmpeg": check_tool("ffmpeg", FFMPEG_PATH, "ffmpeg", ["-version"], "ffmpeg.exe"),
     }
 
 

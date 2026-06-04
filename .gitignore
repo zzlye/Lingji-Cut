@@ -3,6 +3,7 @@ node_modules/
 out/
 dist/
 release/
+build-resources/
 
 # Python 缓存与虚拟环境
 __pycache__/

@@ -65,43 +65,75 @@ function createWindow(): BrowserWindow {
  * 使用 child_process.spawn 启动后端进程
  */
 function startPythonBackend(): void {
-  // 项目根目录用于启动 Python 包，避免相对导入失效
-  const projectRoot = join(__dirname, '../..')
-  const backendRunner = join(projectRoot, 'backend/run.py')
-  const pythonCommand = existsSync(TOOLS_PYTHON) ? TOOLS_PYTHON : 'py'
-  const pythonArgs = existsSync(TOOLS_PYTHON) ? [backendRunner] : ['-3', backendRunner]
+  // 公共环境变量
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' }
+  let command: string
+  let args: string[]
+  let cwd: string
+  let useShell = false
 
-  // 使用 Python 启动 FastAPI
-  pythonProcess = spawn(pythonCommand, pythonArgs, {
-    // 标准输出重定向到控制台
+  if (app.isPackaged) {
+    // 打包环境：使用随包的 embed Python、后端源码、随包工具，数据写入可写的用户数据目录
+    const resources = process.resourcesPath
+    command = join(resources, 'python', 'python.exe')
+    args = [join(resources, 'backend', 'run.py')]
+    cwd = resources
+    env.PYTHONPATH = resources
+    env.YTV_TOOLS_DIR = join(resources, 'tools')
+    env.YTV_DATA_ROOT = app.getPath('userData')
+  } else {
+    // 开发环境：优先 D:\tools 的 embed Python，回退系统 py
+    const projectRoot = join(__dirname, '../..')
+    const backendRunner = join(projectRoot, 'backend/run.py')
+    const hasEmbed = existsSync(TOOLS_PYTHON)
+    command = hasEmbed ? TOOLS_PYTHON : 'py'
+    args = hasEmbed ? [backendRunner] : ['-3', backendRunner]
+    cwd = projectRoot
+    useShell = true
+    env.PYTHONPATH = projectRoot
+  }
+
+  pythonProcess = spawn(command, args, {
     stdio: ['pipe', 'pipe', 'pipe'],
-    // Windows 下使用 shell 模式
-    shell: true,
-    // 从项目根目录启动，确保 backend 包可被 Python 找到
-    cwd: projectRoot,
-    // 环境变量
-    env: {
-      ...process.env,
-      PYTHONPATH: projectRoot,
-      PYTHONIOENCODING: 'utf-8'
-    }
+    shell: useShell,
+    cwd,
+    env,
   })
 
-  // 监听后端标准输出
   pythonProcess.stdout?.on('data', (data) => {
     console.log(`[Python] ${data.toString().trim()}`)
   })
-
-  // 监听后端错误输出
   pythonProcess.stderr?.on('data', (data) => {
     console.error(`[Python Error] ${data.toString().trim()}`)
   })
-
-  // 监听后端进程退出
   pythonProcess.on('close', (code) => {
     console.log(`[Python] 后端进程退出，退出码: ${code}`)
     pythonProcess = null
   })
+}
+
+/**
+ * 停止 Python 后端及其子进程
+ * 后端会派生 ffmpeg/yt-dlp 子进程，Windows 下用 taskkill /T 杀整棵进程树，避免遗留
+ */
+function stopPythonBackend(): void {
+  if (!pythonProcess) return
+  const pid = pythonProcess.pid
+  pythonProcess = null
+  if (!pid) return
+  if (process.platform === 'win32') {
+    try {
+      spawn('taskkill', ['/PID', String(pid), '/T', '/F'])
+    } catch {
+      // 忽略清理失败
+    }
+  } else {
+    try {
+      process.kill(pid)
+    } catch {
+      // 忽略清理失败
+    }
+  }
 }
 
 /**
@@ -210,11 +242,8 @@ app.whenReady().then(async () => {
 
 // 所有窗口关闭时退出应用（macOS 除外）
 app.on('window-all-closed', () => {
-  // 关闭 Python 后端
-  if (pythonProcess) {
-    pythonProcess.kill()
-    pythonProcess = null
-  }
+  // 关闭 Python 后端及其子进程
+  stopPythonBackend()
 
   if (process.platform !== 'darwin') {
     app.quit()
@@ -223,8 +252,5 @@ app.on('window-all-closed', () => {
 
 // 应用退出前清理
 app.on('before-quit', () => {
-  if (pythonProcess) {
-    pythonProcess.kill()
-    pythonProcess = null
-  }
+  stopPythonBackend()
 })

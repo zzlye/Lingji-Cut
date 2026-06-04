@@ -6,8 +6,9 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 import os
 
-# 数据库文件路径 - 存放在项目根目录的 data 文件夹
-DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+# 数据库文件路径 - 打包环境放在 Electron 提供的可写用户数据目录，开发环境放项目根 data
+_DATA_ROOT = os.environ.get("YTV_DATA_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+DB_DIR = os.path.join(_DATA_ROOT, "data")
 os.makedirs(DB_DIR, exist_ok=True)
 DB_PATH = os.path.join(DB_DIR, "app.db")
 

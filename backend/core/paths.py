@@ -6,11 +6,15 @@ import os
 from typing import Any
 
 
-# 应用代码所在目录，作为首次启动时的默认项目目录
-APP_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 可写数据根目录：打包环境用 Electron 通过 YTV_DATA_ROOT 传入的用户数据目录，
+# 开发环境回退到项目根目录（打包后程序目录通常只读，不能在那里建库和写配置）。
+DATA_ROOT = os.environ.get("YTV_DATA_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 设置文件固定保存在应用自身 data 目录，避免用户切换项目目录后找不到配置
-CONFIG_DIR = os.path.join(APP_ROOT, "data")
+# 首次启动时的默认项目目录
+APP_ROOT = DATA_ROOT
+
+# 设置文件固定保存在数据根目录的 data 子目录，避免用户切换项目目录后找不到配置
+CONFIG_DIR = os.path.join(DATA_ROOT, "data")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
 # 项目目录下自动创建的业务子目录
