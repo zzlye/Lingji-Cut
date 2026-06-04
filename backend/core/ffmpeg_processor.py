@@ -34,6 +34,7 @@ VIDEO_ENCODER_OPTION_FLAGS = {
     "-cq",
     "-global_quality",
     "-quality",
+    "-b:v",
     "-qp_i",
     "-qp_p",
     "-rc",
@@ -322,6 +323,7 @@ class FFmpegProcessor:
 
         # 构建 ffmpeg 命令
         preset_dict = preset or {}
+        # 字幕滤镜会把画面重新合成，这里仍优先 GPU，但编码参数会走字幕专用保守配置。
         encoder = self._resolve_video_encoder(preset_dict)
         cmd = [
             self.ffmpeg_cmd,
@@ -333,7 +335,7 @@ class FFmpegProcessor:
         cmd.extend(["-y", output_path])
 
         logger.info(f"烧录字幕: {video_path} -> {output_path}")
-        logger.info(f"视频编码器: {encoder}")
+        logger.info(f"字幕烧录视频编码器: {encoder}")
 
         return self._run_ffmpeg_with_cpu_fallback(
             cmd,
@@ -931,9 +933,10 @@ class FFmpegProcessor:
         """生成视频编码参数，GPU 不可用时回退 CPU"""
         encoder = encoder or self._resolve_video_encoder(preset)
         if encoder == "libx264":
-            args = ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+            cpu_preset = "fast" if for_subtitles else "medium"
+            args = ["-c:v", "libx264", "-preset", cpu_preset, "-pix_fmt", "yuv420p"]
             if for_subtitles:
-                args.extend(["-crf", "23"])
+                args.extend(["-crf", "20"])
             return args
 
         quality = str((preset.get("acceleration") or {}).get("quality") or "balanced")
@@ -941,7 +944,12 @@ class FFmpegProcessor:
         cq_value = "20" if quality == "quality" else "28" if quality == "size" else "24"
         args = ["-c:v", encoder, "-pix_fmt", "yuv420p"]
         if encoder == "h264_nvenc":
-            args.extend(["-preset", nvenc_preset, "-tune", "ull", "-rc", "vbr", "-cq", cq_value, "-multipass", "disabled", "-bf", "0", "-rc-lookahead", "0", "-spatial-aq", "0", "-temporal-aq", "0", "-zerolatency", "1"])
+            if for_subtitles:
+                subtitle_preset = {"quality": "p5", "balanced": "p4", "size": "p3"}.get(quality, "p4")
+                subtitle_cq = "18" if quality == "quality" else "23" if quality == "size" else "20"
+                args.extend(["-preset", subtitle_preset, "-rc", "vbr", "-cq", subtitle_cq, "-b:v", "0"])
+            else:
+                args.extend(["-preset", nvenc_preset, "-tune", "ull", "-rc", "vbr", "-cq", cq_value, "-multipass", "disabled", "-bf", "0", "-rc-lookahead", "0", "-spatial-aq", "0", "-temporal-aq", "0", "-zerolatency", "1"])
         elif encoder == "h264_qsv":
             args.extend(["-global_quality", cq_value])
         elif encoder == "h264_amf":

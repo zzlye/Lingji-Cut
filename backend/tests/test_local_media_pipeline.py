@@ -186,6 +186,56 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn("-cq", calls[0])
         self.assertNotIn("-crf", calls[0])
 
+    def test_burn_subtitles_prefers_gpu_encoder_when_available(self):
+        """字幕烧录优先使用 GPU 编码，保证有显卡的电脑速度更快"""
+        self._create_test_video()
+        SubtitleEngine().generate_ass(
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "测试字幕"}],
+            self.ass_path,
+            {"font_name": "Microsoft YaHei", "font_size": 24, "position": "bottom"},
+        )
+        output_path = os.path.join(self.temp_dir, "subtitled_cpu.mp4")
+
+        with (
+            patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)),
+            patch.object(self.processor, "_media_duration_seconds", return_value=1.0),
+            patch.object(self.processor, "_run_ffmpeg_with_cpu_fallback", return_value=output_path) as run_ffmpeg,
+        ):
+            result = self.processor.burn_subtitles(
+                video_path=self.input_video,
+                subtitle_path=self.ass_path,
+                output_path=output_path,
+                preset={"acceleration": {"enabled": True, "mode": "auto", "quality": "quality"}},
+            )
+
+        cmd = run_ffmpeg.call_args.args[0]
+        self.assertEqual(result, output_path)
+        self.assertEqual(run_ffmpeg.call_args.kwargs["encoder"], "h264_nvenc")
+        self.assertEqual(cmd[cmd.index("-c:v") + 1], "h264_nvenc")
+        self.assertIn("-cq", cmd)
+
+    def test_subtitle_cpu_encoder_uses_high_quality_crf(self):
+        """字幕烧录的 CPU 编码使用高质量 CRF，减少重编码糊块"""
+        args = self.processor._video_encoder_args({}, for_subtitles=True, encoder="libx264")
+
+        self.assertEqual(args[args.index("-preset") + 1], "fast")
+        self.assertEqual(args[args.index("-crf") + 1], "20")
+        self.assertIn("yuv420p", args)
+
+    def test_subtitle_nvenc_encoder_uses_safe_quality_args(self):
+        """字幕烧录的 NVENC 参数避免低延迟模式，减少花屏风险"""
+        args = self.processor._video_encoder_args(
+            {"acceleration": {"enabled": True, "mode": "nvidia", "quality": "balanced"}},
+            for_subtitles=True,
+            encoder="h264_nvenc",
+        )
+
+        self.assertEqual(args[args.index("-preset") + 1], "p4")
+        self.assertEqual(args[args.index("-cq") + 1], "20")
+        self.assertNotIn("ull", args)
+        self.assertNotIn("-zerolatency", args)
+        self.assertNotIn("-rc-lookahead", args)
+
     def test_default_processing_config_is_fast_1080p(self):
         """默认画面处理保持 1080p 输出，同时关闭重 CPU 滤镜"""
         preset = ProcessingConfig().model_dump()

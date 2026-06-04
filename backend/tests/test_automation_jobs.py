@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
 
@@ -75,6 +76,60 @@ class FakeSubtitleDownloader:
         return os.path.join(output_dir, f"subtitle.{language}.vtt")
 
 
+class FakeAutomationDownloader:
+    """测试用一键流程下载器，字幕下载一旦被调用就失败"""
+
+    def __init__(self, download_path: str):
+        self.download_path = download_path
+        self.subtitle_download_calls = 0
+
+    def download_video(self, **_):
+        """返回已准备好的本地视频路径"""
+        return self.download_path
+
+    def download_subtitle(self, *_args, **_kwargs):
+        """一键流程不应再下载字幕"""
+        self.subtitle_download_calls += 1
+        raise AssertionError("一键流程不应调用字幕下载")
+
+
+class FakeAutomationProcessor:
+    """测试用媒体处理器，避免真正运行 ffmpeg"""
+
+    def __init__(self, temp_dir: str):
+        self.temp_dir = temp_dir
+        self.burn_calls: list[dict] = []
+
+    def burn_subtitles(self, **kwargs):
+        """记录烧录参数并返回假输出文件"""
+        self.burn_calls.append(kwargs)
+        output_path = os.path.join(self.temp_dir, "subtitled.mp4")
+        with open(output_path, "wb") as file:
+            file.write(b"subtitled")
+        return output_path
+
+    def convert_format(self, **_kwargs):
+        """返回假导出文件"""
+        output_path = os.path.join(self.temp_dir, "exported.mp4")
+        with open(output_path, "wb") as file:
+            file.write(b"exported")
+        return output_path
+
+
+class FakeAutomationRecognizer:
+    """测试用本地识别器，返回固定字幕"""
+
+    def __init__(self):
+        self.video_paths: list[str] = []
+
+    def transcribe_video(self, video_path, progress_callback=None):
+        """记录识别输入并模拟识别进度"""
+        self.video_paths.append(video_path)
+        if progress_callback:
+            progress_callback(100)
+        return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "本地识别字幕"}], "zh")
+
+
 class AutomationJobTests(unittest.TestCase):
     def tearDown(self):
         """清理批次运行时状态，避免测试互相影响"""
@@ -110,6 +165,53 @@ class AutomationJobTests(unittest.TestCase):
         keys = [stage["key"] for stage in _default_stages()]
 
         self.assertEqual(keys, ["parse", "download", "effects", "subtitle", "voice", "export"])
+
+    def test_automation_uses_local_asr_instead_of_subtitle_download(self):
+        """一键流程字幕阶段使用本地识别，不再调用字幕下载"""
+        with tempfile.TemporaryDirectory(prefix="automation_local_asr_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=1, platform="youtube", video_id="local-asr", url="https://example.test/video", title="测试视频")
+            task_ids = iter(range(1, 10))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation.ensure_project_dirs", return_value={"output_dir": temp_dir, "exports_dir": temp_dir}),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(fake_downloader.subtitle_download_calls, 0)
+        self.assertEqual(fake_recognizer.video_paths, [downloaded_path])
+        self.assertIn("本地识别字幕", response.subtitle_text)
+        self.assertEqual(stage_by_key["subtitle"].status, "completed")
+        self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
 
     def test_retry_reset_clears_previous_runtime_state(self):
         job = AutomationJobRecord(

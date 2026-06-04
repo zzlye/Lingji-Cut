@@ -7,6 +7,7 @@ from .dedup import DedupChecker
 from .subtitle_engine import SubtitleEngine
 from .voice_engine import VoiceEngine
 from .text_engine import TextEngine
+from .local_asr import LocalSpeechRecognizer
 
 __all__ = [
     "Downloader",
@@ -15,4 +16,5 @@ __all__ = [
     "SubtitleEngine",
     "VoiceEngine",
     "TextEngine",
+    "LocalSpeechRecognizer",
 ]

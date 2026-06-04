@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, TextEngine, VoiceEngine
+from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine
 from ..core.paths import ensure_project_dirs
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
@@ -942,122 +942,115 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, subtitle_task)
             preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
-            requested_subtitle_language = request.subtitle_language or (preset.language if preset else None)
-            track = _pick_subtitle_track(video, requested_subtitle_language)
-            if not track and not preset:
-                subtitle_task.status = "completed"
-                subtitle_task.progress = 100
-                subtitle_task.error_message = "没有检测到字幕轨，已跳过字幕"
-                db.commit()
-                stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message))
-                if job:
-                    _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=subtitle_task.error_message)
-            else:
-                paths = ensure_project_dirs()
-                preset_dict = _preset_to_dict(preset)
-                subtitle_path, language, fallback_errors = _download_subtitle_with_fallback(
-                    downloader=downloader,
-                    video=video,
-                    requested_language=request.subtitle_language,
-                    preset_language=preset_dict.get("language"),
-                    output_dir=paths["output_dir"],
-                    control_keys=_control_keys(job, subtitle_task),
-                )
-                if fallback_errors:
-                    warning_messages.append(f"首选字幕下载失败，已改用 {language}: {_format_subtitle_fallback_error(fallback_errors[:2])}")
+            paths = ensure_project_dirs()
+            preset_dict = _preset_to_dict(preset)
+            engine = SubtitleEngine()
+
+            def on_asr_progress(progress: float) -> None:
+                """同步本地语音识别进度"""
                 _check_control(db, job, subtitle_task)
+                subtitle_task.progress = min(35.0, 10.0 + progress * 0.25)
+                db.commit()
                 if job:
-                    _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
-                engine = SubtitleEngine()
-                entries = _parse_subtitle_entries(engine, subtitle_path)
-                if not entries:
-                    raise RuntimeError("字幕文件为空，无法继续自动字幕处理")
-                subtitle_text = entries_to_plain_text(entries)
-                text_profile = _pick_text_profile(db, request.text_profile_id)
-                if text_profile and request.subtitle_operation != "none":
+                    _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
+
+            entries, language = LocalSpeechRecognizer().transcribe_video(
+                video_path=effects_path,
+                progress_callback=on_asr_progress,
+            )
+            subtitle_path = os.path.join(paths["output_dir"], f"{video.video_id}_{language}_local.srt")
+            engine.save_srt(entries, subtitle_path)
+            _check_control(db, job, subtitle_task)
+            if job:
+                _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
+            if not entries:
+                raise RuntimeError("本地字幕识别结果为空，无法继续自动字幕处理")
+            subtitle_text = entries_to_plain_text(entries)
+            text_profile = _pick_text_profile(db, request.text_profile_id)
+            if text_profile and request.subtitle_operation != "none":
+                try:
+                    text_settings = _load_profile_settings(text_profile)
+                    glossary_prompt = _glossary_prompt_suffix(request.glossary_terms)
+                    if glossary_prompt:
+                        text_settings["system_prompt"] = f"{text_settings.get('system_prompt') or '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。'}{glossary_prompt}"
+                    text_api_key = decrypt_api_key(text_profile.api_key_encrypted)
+                    text_engine = TextEngine()
+
+                    def on_text_progress(progress: float) -> None:
+                        """同步文本 API 批处理进度到字幕阶段"""
+                        _check_control(db, job, subtitle_task)
+                        subtitle_task.progress = 35 + progress * 0.3
+                        db.commit()
+                        if job:
+                            _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
+
                     try:
-                        text_settings = _load_profile_settings(text_profile)
-                        glossary_prompt = _glossary_prompt_suffix(request.glossary_terms)
-                        if glossary_prompt:
-                            text_settings["system_prompt"] = f"{text_settings.get('system_prompt') or '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。'}{glossary_prompt}"
-                        text_api_key = decrypt_api_key(text_profile.api_key_encrypted)
-                        text_engine = TextEngine()
-
-                        def on_text_progress(progress: float) -> None:
-                            """同步文本 API 批处理进度到字幕阶段"""
-                            _check_control(db, job, subtitle_task)
-                            subtitle_task.progress = 35 + progress * 0.3
-                            db.commit()
-                            if job:
-                                _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
-
-                        try:
-                            processed_entries = asyncio.run(text_engine.process_subtitle_entries(
-                                entries=entries,
-                                provider_type=text_profile.provider_type,
-                                api_key=text_api_key,
-                                base_url=text_profile.base_url,
-                                model=text_profile.model or "",
-                                settings=text_settings,
-                                operation=request.subtitle_operation,
-                                target_language=request.subtitle_target_language or "",
-                                progress_callback=on_text_progress,
-                            ))
-                            if processed_entries:
-                                entries = processed_entries
-                                subtitle_text = entries_to_plain_text(entries)
-                        except TaskControlRequested:
-                            raise
-                        except Exception:
-                            processed_text = asyncio.run(text_engine.process_text(
-                                text=subtitle_text,
-                                provider_type=text_profile.provider_type,
-                                api_key=text_api_key,
-                                base_url=text_profile.base_url,
-                                model=text_profile.model or "",
-                                settings=text_settings,
-                                operation=request.subtitle_operation,
-                                target_language=request.subtitle_target_language or "",
-                            ))
-                            processed_entries = map_text_to_timed_entries(processed_text, entries)
-                            if processed_entries:
-                                entries = processed_entries
-                                subtitle_text = processed_text
+                        processed_entries = asyncio.run(text_engine.process_subtitle_entries(
+                            entries=entries,
+                            provider_type=text_profile.provider_type,
+                            api_key=text_api_key,
+                            base_url=text_profile.base_url,
+                            model=text_profile.model or "",
+                            settings=text_settings,
+                            operation=request.subtitle_operation,
+                            target_language=request.subtitle_target_language or "",
+                            progress_callback=on_text_progress,
+                        ))
+                        if processed_entries:
+                            entries = processed_entries
+                            subtitle_text = entries_to_plain_text(entries)
                     except TaskControlRequested:
                         raise
                     except Exception:
-                        # 文本 API 是增强能力，失败时继续使用原始 YouTube 字幕完成主流程。
-                        pass
-                entries = _apply_glossary_terms(entries, request.glossary_terms)
-                subtitle_text = entries_to_plain_text(entries)
-                banned_hits = _find_banned_words(subtitle_text, request.banned_words)
-                if banned_hits:
-                    message = f"禁词命中: {', '.join(banned_hits)}"
-                    if request.banned_word_action == "block":
-                        raise BannedWordsDetected(message)
-                    warning_messages.append(message)
-                subtitle_entries = entries
-                if job:
-                    job.subtitle_text = subtitle_text
-                    _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
-                base_name = os.path.splitext(os.path.basename(effects_path))[0]
-                subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
-                engine.generate_ass(entries, subtitle_ass_path, preset_dict)
-                if request.burn_subtitles:
-                    video_for_export = processor.burn_subtitles(
-                        video_path=effects_path,
-                        subtitle_path=subtitle_ass_path,
-                        preset=preset_dict,
-                        control_keys=_control_keys(job, subtitle_task),
-                    )
-                _check_control(db, job, subtitle_task)
-                _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
-                if warning_messages:
-                    subtitle_task.error_message = "；".join(warning_messages)
-                    db.commit()
-                stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
-                if job:
-                    _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path, error_message="；".join(warning_messages) if warning_messages else None)
+                        processed_text = asyncio.run(text_engine.process_text(
+                            text=subtitle_text,
+                            provider_type=text_profile.provider_type,
+                            api_key=text_api_key,
+                            base_url=text_profile.base_url,
+                            model=text_profile.model or "",
+                            settings=text_settings,
+                            operation=request.subtitle_operation,
+                            target_language=request.subtitle_target_language or "",
+                        ))
+                        processed_entries = map_text_to_timed_entries(processed_text, entries)
+                        if processed_entries:
+                            entries = processed_entries
+                            subtitle_text = processed_text
+                except TaskControlRequested:
+                    raise
+                except Exception:
+                    # 文本 API 是增强能力，失败时继续使用本地识别字幕完成主流程。
+                    pass
+            entries = _apply_glossary_terms(entries, request.glossary_terms)
+            subtitle_text = entries_to_plain_text(entries)
+            banned_hits = _find_banned_words(subtitle_text, request.banned_words)
+            if banned_hits:
+                message = f"禁词命中: {', '.join(banned_hits)}"
+                if request.banned_word_action == "block":
+                    raise BannedWordsDetected(message)
+                warning_messages.append(message)
+            subtitle_entries = entries
+            if job:
+                job.subtitle_text = subtitle_text
+                _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
+            base_name = os.path.splitext(os.path.basename(effects_path))[0]
+            subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
+            engine.generate_ass(entries, subtitle_ass_path, preset_dict)
+            if request.burn_subtitles:
+                video_for_export = processor.burn_subtitles(
+                    video_path=effects_path,
+                    subtitle_path=subtitle_ass_path,
+                    preset=preset_dict,
+                    control_keys=_control_keys(job, subtitle_task),
+                )
+            _check_control(db, job, subtitle_task)
+            _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
+            if warning_messages:
+                subtitle_task.error_message = "；".join(warning_messages)
+                db.commit()
+            stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
+            if job:
+                _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path, error_message="；".join(warning_messages) if warning_messages else None)
         except TaskControlRequested as exc:
             _handle_task_control(db, subtitle_task, exc)
             raise
@@ -1067,7 +1060,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if job:
                     _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(exc))
                 raise
-            skip_message = f"{str(exc) or '字幕处理失败'}，已跳过字幕并继续导出"
+            skip_message = f"{str(exc) or '本地字幕识别失败'}，已跳过字幕并继续导出"
             _complete_task(db, subtitle_task, None)
             subtitle_task.error_message = skip_message
             db.commit()
