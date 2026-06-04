@@ -20,7 +20,7 @@ import { useAutoRun } from '@/hooks/useAutoRun'
 import { useVideoStore } from '@/stores/videoStore'
 import { useAutomationStore } from '@/stores/automationStore'
 import { usePrefsStore } from '@/stores/prefsStore'
-import type { SettingsTab } from '@/features/settings/SettingsCenter'
+import type { SettingsSection } from '@/stores/uiStore'
 import type { AutomationJob, AutomationStep, AutomationPreferences, VideoParseResult } from '@/types'
 
 /** 字幕处理方式中文文案 */
@@ -43,7 +43,7 @@ const STEP_VISUAL: Record<AutomationStep['status'], { ring: string; icon: typeof
 }
 
 interface StudioWorkspaceProps {
-  onOpenSettings: (tab?: SettingsTab) => void
+  onOpenSettings: (tab?: SettingsSection) => void
 }
 
 export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
@@ -117,7 +117,7 @@ function AutoRunConfirm({
   isStarting: boolean
   preferences: AutomationPreferences
   onConfirm: () => void
-  onOpenSettings: (tab?: SettingsTab) => void
+  onOpenSettings: (tab?: SettingsSection) => void
 }) {
   const [open, setOpen] = useState(false)
   return (
@@ -266,9 +266,9 @@ function ConfigSummary({
   onOpenSettings,
 }: {
   preferences: AutomationPreferences
-  onOpenSettings: (tab?: SettingsTab) => void
+  onOpenSettings: (tab?: SettingsSection) => void
 }) {
-  const rows: Array<{ icon: typeof Film; label: string; value: string; tab: SettingsTab }> = [
+  const rows: Array<{ icon: typeof Film; label: string; value: string; tab: SettingsSection }> = [
     { icon: Film, label: '画面处理', value: preferences.enable_effects ? '已开启' : '已关闭', tab: 'effects' },
     { icon: Captions, label: '字幕', value: SUBTITLE_OP_LABEL[preferences.subtitle_operation], tab: 'subtitle' },
     { icon: Mic, label: '配音', value: preferences.enable_voice ? '已开启' : '已关闭', tab: 'voice' },
