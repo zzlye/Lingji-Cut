@@ -3,11 +3,18 @@
 
 import os
 import re
+import html
 from typing import Optional, List
 from ..utils import get_logger
 
 # 日志记录器
 logger = get_logger("subtitle")
+
+# YouTube 自动字幕 VTT 会包含内联时间戳和样式标签，烧录前必须清理。
+INLINE_VTT_TIMESTAMP_RE = re.compile(r"<\d{2}:\d{2}:\d{2}\.\d{3}>")
+VTT_TAG_RE = re.compile(r"</?[^>]+>")
+WHITESPACE_RE = re.compile(r"\s+")
+MIN_VTT_CUE_DURATION_MS = 250
 
 
 class SubtitleEngine:
@@ -92,6 +99,9 @@ class SubtitleEngine:
         normalized = content.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if is_vtt and normalized.startswith("WEBVTT"):
             normalized = normalized.split("\n", 1)[1] if "\n" in normalized else ""
+        if is_vtt:
+            # YouTube VTT 有时会在时间轴后放一个空格行，先移除它再按空行切块。
+            normalized = re.sub(r"(-->\s*[^\n]*\n)[ \t]+\n", r"\1", normalized)
 
         entries: list[dict] = []
         blocks = re.split(r"\n\s*\n", normalized)
@@ -109,7 +119,7 @@ class SubtitleEngine:
             timing = lines[timing_index]
             start_raw, end_raw = [part.strip() for part in timing.split("-->", 1)]
             end_raw = end_raw.split()[0]
-            text_lines = lines[timing_index + 1:]
+            text_lines = self._normalize_vtt_text_lines(lines[timing_index + 1:]) if is_vtt else lines[timing_index + 1:]
             if not text_lines:
                 continue
 
@@ -117,9 +127,76 @@ class SubtitleEngine:
                 "index": len(entries) + 1,
                 "start": self.normalize_srt_time(start_raw),
                 "end": self.normalize_srt_time(end_raw),
-                "text": "\n".join(text_lines).strip(),
+                "text": self._join_vtt_text_lines(text_lines) if is_vtt else "\n".join(text_lines).strip(),
             })
-        return entries
+        return self._dedupe_vtt_rolling_entries(entries) if is_vtt else entries
+
+    def _normalize_vtt_text_lines(self, lines: list[str]) -> list[str]:
+        """清理 VTT 文本行，移除 YouTube 内联时间戳、样式标签和多余空白"""
+        normalized: list[str] = []
+        for line in lines:
+            cleaned = html.unescape(line)
+            cleaned = INLINE_VTT_TIMESTAMP_RE.sub("", cleaned)
+            cleaned = VTT_TAG_RE.sub("", cleaned)
+            cleaned = WHITESPACE_RE.sub(" ", cleaned).strip()
+            if cleaned:
+                normalized.append(cleaned)
+        return normalized
+
+    def _join_vtt_text_lines(self, lines: list[str]) -> str:
+        """合并 VTT 多行文本，中文/日文不断词，英文数字之间保留空格"""
+        text = ""
+        for line in lines:
+            if not text:
+                text = line
+                continue
+            separator = " " if self._needs_word_separator(text[-1], line[0]) else ""
+            text = f"{text}{separator}{line}"
+        return text.strip()
+
+    def _needs_word_separator(self, left: str, right: str) -> bool:
+        """判断两段字幕拼接时是否需要空格"""
+        if not left or not right:
+            return False
+        if re.match(r"[\w\]]", left, re.ASCII) and re.match(r"[\w\[]", right, re.ASCII):
+            return True
+        return False
+
+    def _dedupe_vtt_rolling_entries(self, entries: list[dict]) -> list[dict]:
+        """去除 YouTube 滚动字幕的短碎片和重复前缀，只保留新增内容"""
+        deduped: list[dict] = []
+        previous_text = ""
+        for entry in entries:
+            start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+            end_ms = self._time_to_milliseconds(str(entry.get("end") or "00:00:00,000"))
+            text = str(entry.get("text") or "").strip()
+            if not text or end_ms - start_ms < MIN_VTT_CUE_DURATION_MS:
+                continue
+
+            text = self._remove_rolling_prefix(text, previous_text)
+            if not text:
+                continue
+
+            next_entry = dict(entry)
+            next_entry["index"] = len(deduped) + 1
+            next_entry["text"] = text
+            deduped.append(next_entry)
+            previous_text = text
+        return deduped
+
+    def _remove_rolling_prefix(self, text: str, previous_text: str) -> str:
+        """当前 VTT cue 以前一条完整或尾部文本开头时，只保留新增部分"""
+        if not previous_text:
+            return text
+        if text == previous_text or previous_text.startswith(text):
+            return ""
+        if text.startswith(previous_text):
+            return text[len(previous_text):].strip()
+        max_overlap = min(len(previous_text), len(text))
+        for size in range(max_overlap, 2, -1):
+            if text.startswith(previous_text[-size:]):
+                return text[size:].strip()
+        return text
 
     def _time_to_milliseconds(self, value: str) -> int:
         """把 SRT/VTT 时间码转换为毫秒"""
@@ -200,7 +277,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for entry in entries:
             start = self._srt_time_to_ass(entry["start"])
             end = self._srt_time_to_ass(entry["end"])
-            text = entry["text"].replace("\n", "\\N")
+            text = self._format_ass_dialogue_text(str(entry.get("text") or ""), preset)
             ass_content += f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n"
 
         # 写入文件
@@ -210,6 +287,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         logger.info(f"生成 ASS 字幕: {output_path}")
         return output_path
+
+    def _format_ass_dialogue_text(self, text: str, preset: dict) -> str:
+        """格式化 ASS 单条字幕，自动清理空白并给长句换行"""
+        normalized = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
+        if not normalized:
+            return ""
+        font_size = int(preset.get("font_size") or 48)
+        max_chars = max(18, min(34, int(1400 / max(font_size, 1))))
+        return "\\N".join(self._wrap_subtitle_text(normalized, max_chars))
+
+    def _wrap_subtitle_text(self, text: str, max_chars: int) -> list[str]:
+        """按显示宽度拆字幕行，优先在标点或空格处断行"""
+        if len(text) <= max_chars:
+            return [text]
+
+        lines: list[str] = []
+        remaining = text
+        break_chars = "，。、！？；,.!?; "
+        while len(remaining) > max_chars:
+            split_at = max((remaining.rfind(char, 0, max_chars + 1) for char in break_chars), default=-1)
+            if split_at < max_chars // 2:
+                split_at = max_chars
+            line = remaining[:split_at].strip(" ，。、！？；,.!?;")
+            if line:
+                lines.append(line)
+            remaining = remaining[split_at:].strip()
+        if remaining:
+            lines.append(remaining)
+        return lines
 
     def _srt_time_to_ass(self, srt_time: str) -> str:
         """将 SRT 时间格式转换为 ASS 格式"""

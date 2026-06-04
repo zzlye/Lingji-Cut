@@ -55,6 +55,44 @@ class SubtitleCorrectionTests(unittest.TestCase):
         self.assertEqual(entries[1]["end"], "00:00:04,250")
         self.assertEqual(entries[0]["text"], "第一句字幕")
 
+    def test_parse_youtube_vtt_cleans_inline_timestamps_and_rolling_duplicates(self):
+        """YouTube 自动 VTT 会清理内联标签，并去掉滚动字幕重复前缀"""
+        content = """WEBVTT
+Kind: captions
+Language: ja
+
+00:00:00.799 --> 00:00:00.990 align:start position:0%
+5
+
+00:00:01.000 --> 00:00:11.669 align:start position:0%
+5
+月スタートは関東で大雨となる恐れがあります。
+
+00:00:21.279 --> 00:00:21.750 align:start position:0%
+""" + " \nはい。\n\n" + """00:00:21.760 --> 00:00:23.910 align:start position:0%
+はい。
+え、まずは気圧地です。<00:00:23.080><c>こちら</c><00:00:23.480><c>5</c><00:00:23.599><c>月</c><00:00:23.840><c>1</c>
+
+00:00:23.920 --> 00:00:24.830 align:start position:0%
+え、まずは気圧地です。こちら5月1
+日金曜日午前<00:00:24.720><c>9</c>
+
+00:00:24.840 --> 00:00:29.870 align:start position:0%
+日金曜日午前9
+時の総点記ですけども
+"""
+
+        entries = SubtitleEngine().parse_vtt_content(content)
+        texts = [entry["text"] for entry in entries]
+
+        self.assertEqual(texts[0], "5月スタートは関東で大雨となる恐れがあります。")
+        self.assertEqual(texts[1], "はい。")
+        self.assertEqual(texts[2], "え、まずは気圧地です。こちら5月1")
+        self.assertEqual(texts[3], "日金曜日午前9")
+        self.assertEqual(texts[4], "時の総点記ですけども")
+        self.assertNotIn("<00:", "\n".join(texts))
+        self.assertNotIn("<c>", "\n".join(texts))
+
     def test_save_srt_then_parse_keeps_text_and_time(self):
         """保存校对后的 SRT 后再次解析，时间轴和文本保持一致"""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,6 +132,23 @@ class SubtitleCorrectionTests(unittest.TestCase):
                 content = file.read()
             self.assertIn("Dialogue:", content)
             self.assertIn("ASS 字幕", content)
+
+    def test_generate_ass_wraps_long_subtitle_lines(self):
+        """生成 ASS 时长句会自动换行，避免字幕横向铺满画面"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "wrapped.ass")
+            long_text = "午前中というところがメインかなと思うんですが、時々こう激しく降る時間帯があるという風に見ておいてください。"
+
+            SubtitleEngine().generate_ass(
+                [{"index": 1, "start": "00:00:01,000", "end": "00:00:05,000", "text": long_text}],
+                output_path,
+                {"font_size": 48},
+            )
+
+            with open(output_path, "r", encoding="utf-8") as file:
+                content = file.read()
+            self.assertIn("\\N", content)
+            self.assertNotIn(long_text + "\n", content)
 
 
 if __name__ == "__main__":
