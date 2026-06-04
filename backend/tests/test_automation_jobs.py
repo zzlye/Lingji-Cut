@@ -543,7 +543,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(segments[1]["text"], "放技能")
 
     def test_combine_original_and_translated_entries_for_double_line_display(self):
-        """双行翻译显示用原文加译文，但不改变译文时间轴"""
+        """双行翻译显示用译文加原文，但不改变译文时间轴"""
         original = [
             {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "hello"},
             {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "world"},
@@ -556,8 +556,8 @@ class AutomationJobTests(unittest.TestCase):
         combined = combine_original_and_translated_entries(original, translated)
 
         self.assertEqual(combined[0]["start"], "00:00:01,100")
-        self.assertEqual(combined[0]["text"], "hello\n你好")
-        self.assertEqual(combined[1]["text"], "world\n世界")
+        self.assertEqual(combined[0]["text"], "你好\nhello")
+        self.assertEqual(combined[1]["text"], "世界\nworld")
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

@@ -14,6 +14,9 @@ import type { RandomRange } from '@/types'
 /** 选项类型：[值, 显示文案] */
 export type FieldOption = [string, string]
 
+/** Radix Select 不允许空字符串选项值，这里用占位值在组件内部转换 */
+const EMPTY_SELECT_SENTINEL = '__EMPTY_SELECT_OPTION__'
+
 /** 字段外壳：标签 + 可选说明 + 控件，纵向排布 */
 export function Field({ label, description, children, className }: { label: ReactNode; description?: string; children: ReactNode; className?: string }) {
   return (
@@ -54,12 +57,16 @@ export function NumberField({ label, value, onChange, min, max, step, descriptio
 export function SelectField({ label, value, options, onChange, description, placeholder }: {
   label: string; value: string; options: FieldOption[]; onChange: (v: string) => void; description?: string; placeholder?: string
 }) {
+  const hasEmptyOption = options.some(([optionValue]) => optionValue === '')
+  const normalizedOptions = options.map(([optionValue, optionLabel]) => [optionValue === '' ? EMPTY_SELECT_SENTINEL : optionValue, optionLabel] as FieldOption)
+  const normalizedValue = value === '' ? (hasEmptyOption ? EMPTY_SELECT_SENTINEL : undefined) : value
+
   return (
     <Field label={label} description={description}>
-      <Select value={value} onValueChange={onChange}>
+      <Select value={normalizedValue} onValueChange={(nextValue) => onChange(nextValue === EMPTY_SELECT_SENTINEL ? '' : nextValue)}>
         <SelectTrigger className="w-full"><SelectValue placeholder={placeholder} /></SelectTrigger>
         <SelectContent>
-          {options.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+          {normalizedOptions.map(([optionValue, optionLabel]) => <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>)}
         </SelectContent>
       </Select>
     </Field>

@@ -781,7 +781,7 @@ def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[d
 
 
 def combine_original_and_translated_entries(original_entries: list[dict], translated_entries: list[dict]) -> list[dict]:
-    """把原文和译文合成双行显示字幕，配音仍可单独使用译文条目"""
+    """把译文放到主字幕、原文放到第二行，配音仍单独使用译文条目"""
     if not original_entries or not translated_entries:
         return translated_entries
 
@@ -792,7 +792,7 @@ def combine_original_and_translated_entries(original_entries: list[dict], transl
         translated_text = " ".join(str(translated.get("text") or "").replace("\\N", " ").split())
         next_entry = dict(translated)
         if original_text and translated_text and original_text != translated_text:
-            next_entry["text"] = f"{original_text}\n{translated_text}"
+            next_entry["text"] = f"{translated_text}\n{original_text}"
         elif translated_text:
             next_entry["text"] = translated_text
         else:
