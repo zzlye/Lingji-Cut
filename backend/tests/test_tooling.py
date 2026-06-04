@@ -166,6 +166,8 @@ class ToolingTests(unittest.TestCase):
 
         self.assertIn("字幕下载完成但未找到文件", str(context.exception))
         self.assertIn("--force-overwrites", captured_cmd)
+        self.assertIn("--socket-timeout", captured_cmd)
+        self.assertIn("20", captured_cmd)
         self.assertIn("zh-Hans", captured_cmd)
 
 

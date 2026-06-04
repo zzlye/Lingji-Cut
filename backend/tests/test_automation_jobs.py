@@ -345,6 +345,8 @@ class AutomationJobTests(unittest.TestCase):
                 {"language": "zh-Hans", "type": "auto", "ext": "json3"},
                 {"language": "zh-Hans", "type": "auto", "ext": "vtt"},
                 {"language": "en", "type": "original", "ext": "vtt"},
+                {"language": "ja", "type": "auto", "ext": "vtt"},
+                {"language": "fil", "type": "auto", "ext": "vtt"},
             ], ensure_ascii=False),
         )
 
@@ -353,6 +355,8 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertEqual(pairs.count(("zh-Hans", "auto")), 1)
         self.assertIn(("en", "original"), pairs)
+        self.assertIn(("ja", "auto"), pairs)
+        self.assertNotIn(("fil", "auto"), pairs)
         self.assertLess(pairs.index(("zh-Hans", "auto")), pairs.index(("en", "original")))
 
     def test_subtitle_download_falls_back_after_preferred_language_rate_limit(self):

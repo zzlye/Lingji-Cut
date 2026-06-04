@@ -285,6 +285,7 @@ class Downloader:
             "-o", output_template,
             "--no-warnings",
             "--force-overwrites",   # 强制刷新同语言字幕，避免复用旧文件误判成功
+            "--socket-timeout", "20", # 单个字幕请求网络卡住时尽快进入下一个候选
         ]
 
         # 自动字幕
@@ -309,7 +310,7 @@ class Downloader:
                 creationflags=subprocess_creation_flags(),
             )
             register_process(control_keys, process, cmd)
-            stdout, stderr = process.communicate(timeout=300)
+            stdout, stderr = process.communicate(timeout=120)
             raise_if_control_requested(control_keys)
 
             if process.returncode != 0:
@@ -333,7 +334,7 @@ class Downloader:
         except subprocess.TimeoutExpired:
             if process:
                 terminate_process(process)
-            raise RuntimeError("字幕下载超时")
+            raise RuntimeError("字幕下载超时（120秒）")
         except TaskControlRequested:
             raise
         finally:

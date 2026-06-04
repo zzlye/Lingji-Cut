@@ -50,6 +50,10 @@ STAGE_WEIGHTS = {
     "export": 18,
 }
 
+# 字幕降级只尝试高价值语言，避免 YouTube 自动翻译列表过长导致任务长时间卡住。
+SUBTITLE_FALLBACK_LANGUAGES = ("zh-CN", "zh-Hans", "zh", "en", "ja", "ko")
+SUBTITLE_MAX_DOWNLOAD_CANDIDATES = 12
+
 
 class BannedWordsDetected(RuntimeError):
     """禁词命中异常，用于区分普通字幕失败和策略拦截"""
@@ -496,7 +500,7 @@ def _build_subtitle_download_candidates(
     primary_languages = (
         _subtitle_language_variants(requested_language)
         + _subtitle_language_variants(preset_language)
-        + ["zh-CN", "zh-Hans", "zh", "en"]
+        + list(SUBTITLE_FALLBACK_LANGUAGES)
     )
     for language in primary_languages:
         if not add_matching_tracks(language):
@@ -505,9 +509,10 @@ def _build_subtitle_download_candidates(
     # 已上传字幕通常比自动翻译字幕更稳定，首选语言失败后优先尝试这些轨道。
     sorted_tracks = sorted(tracks, key=lambda track: 0 if track.get("type") == "original" else 1)
     for track in sorted_tracks:
-        add_candidate(track.get("language"), track.get("type"))
+        if track.get("type") == "original" or track.get("language") in SUBTITLE_FALLBACK_LANGUAGES:
+            add_candidate(track.get("language"), track.get("type"))
 
-    return candidates
+    return candidates[:SUBTITLE_MAX_DOWNLOAD_CANDIDATES]
 
 
 def _format_subtitle_fallback_error(errors: list[str]) -> str:
