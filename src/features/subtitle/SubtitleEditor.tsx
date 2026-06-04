@@ -81,7 +81,7 @@ function presetToForm(preset: SubtitlePreset): SubtitlePresetForm {
 }
 
 const SUBTITLE_OP_OPTIONS: FieldOption[] = [['none', '不处理'], ['polish', '润色字幕'], ['translate', '翻译字幕'], ['generate', '生成字幕文案']]
-const TARGET_LANG_OPTIONS: FieldOption[] = [['', '跟随字幕'], ['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语']]
+const TARGET_LANG_OPTIONS: FieldOption[] = [['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语'], ['', '跟随字幕']]
 
 /**
  * 字幕预设配置面板

@@ -166,14 +166,15 @@ class TextEngine:
             model=model,
             settings=settings,
         )
-        return self._merge_processed_entries(chunk, response_text)
+        return self._merge_processed_entries(chunk, response_text, require_all=operation == "translate")
 
     def _build_prompt(self, text: str, operation: str, target_language: str, settings: dict[str, Any]) -> str:
         """生成字幕处理提示词"""
         system_prompt = settings.get("system_prompt") or "你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。"
+        language = self._target_language_label(target_language)
         operation_map = {
             "generate": "请根据以下视频字幕或文本生成一份适合短视频硬字幕和配音的字幕文案。",
-            "translate": f"请将以下字幕翻译成{target_language or '目标语言'}，保留原意，表达自然。",
+            "translate": f"请将以下字幕翻译成{language}，保留原意，表达自然。",
             "polish": "请润色以下字幕，使其更适合短视频观看和口播，不要添加无关内容。",
         }
         instruction = operation_map.get(operation, operation_map["polish"])
@@ -182,9 +183,10 @@ class TextEngine:
     def _build_subtitle_entries_prompt(self, entries: list[dict[str, Any]], operation: str, target_language: str, settings: dict[str, Any]) -> str:
         """生成保留字幕编号的批处理提示词"""
         system_prompt = settings.get("system_prompt") or "你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。"
+        language = self._target_language_label(target_language)
         operation_map = {
             "generate": "请基于每条原字幕生成更适合短视频硬字幕和配音的字幕文案。",
-            "translate": f"请将每条字幕翻译成{target_language or '目标语言'}，保留原意，表达自然。",
+            "translate": f"请将每条字幕翻译成{language}，保留原意，表达自然。",
             "polish": "请逐条润色字幕，使其更适合短视频观看和口播，不要添加无关信息。",
         }
         instruction = operation_map.get(operation, operation_map["polish"])
@@ -202,13 +204,16 @@ class TextEngine:
             f"原字幕 JSON：\n{json.dumps(payload, ensure_ascii=False)}"
         )
 
-    def _merge_processed_entries(self, original_entries: list[dict[str, Any]], response_text: str) -> list[dict[str, Any]]:
+    def _merge_processed_entries(self, original_entries: list[dict[str, Any]], response_text: str, require_all: bool = False) -> list[dict[str, Any]]:
         """将模型返回内容按 id 合并回原字幕时间轴"""
         processed_map = self._parse_processed_subtitle_response(response_text)
         if not processed_map:
             lines = [line.strip() for line in response_text.splitlines() if line.strip()]
             if len(lines) == len(original_entries):
                 processed_map = {index + 1: line for index, line in enumerate(lines)}
+
+        if require_all and len(processed_map) < len(original_entries):
+            raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
 
         merged: list[dict[str, Any]] = []
         for index, entry in enumerate(original_entries, 1):
@@ -420,6 +425,28 @@ class TextEngine:
         if not text:
             raise RuntimeError("Anthropic 未返回正文")
         return text
+
+    def _target_language_label(self, target_language: str) -> str:
+        """把前端语言代码转换成清晰的目标语言名称"""
+        value = str(target_language or "").strip()
+        language_map = {
+            "zh": "简体中文",
+            "zh-cn": "简体中文",
+            "zh-hans": "简体中文",
+            "cn": "简体中文",
+            "中文": "简体中文",
+            "chinese": "简体中文",
+            "en": "英文",
+            "english": "英文",
+            "ja": "日文",
+            "jp": "日文",
+            "japanese": "日文",
+            "ko": "韩文",
+            "korean": "韩文",
+            "es": "西班牙语",
+            "spanish": "西班牙语",
+        }
+        return language_map.get(value.lower(), value or "简体中文")
 
     def _timeout(self, settings: dict[str, Any]) -> float:
         """读取超时时间"""

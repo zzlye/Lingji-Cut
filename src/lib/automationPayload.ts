@@ -10,6 +10,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
   const preferences = loadAutomationPreferences()
   const textProfileId = preferences.text_profile_id || undefined
   const voiceProfileId = preferences.enable_voice ? preferences.voice_profile_id || undefined : undefined
+  const subtitleTargetLanguage = preferences.subtitle_target_language || (preferences.subtitle_operation === 'translate' ? 'zh-CN' : undefined)
   const speakerVoiceMap = preferences.enable_voice && preferences.multi_speaker_enabled
     ? Object.fromEntries(
       preferences.voice_speakers
@@ -29,7 +30,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
       : undefined,
     text_profile_id: textProfileId,
     subtitle_operation: preferences.subtitle_operation,
-    subtitle_target_language: preferences.subtitle_target_language || undefined,
+    subtitle_target_language: subtitleTargetLanguage,
     burn_subtitles: preferences.burn_subtitles,
     enable_voice: preferences.enable_voice,
     voice_profile_id: voiceProfileId,

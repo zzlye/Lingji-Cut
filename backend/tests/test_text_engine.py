@@ -61,6 +61,42 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(result[1]["text"], "第二句")
         self.assertEqual(result[1]["end"], "00:00:03,000")
 
+    def test_translate_prompt_defaults_to_simplified_chinese(self):
+        """翻译未选择输出语言时默认翻译成简体中文"""
+        engine = TextEngine()
+
+        prompt = engine._build_subtitle_entries_prompt(
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "テスト"}],
+            operation="translate",
+            target_language="",
+            settings={},
+        )
+
+        self.assertIn("翻译成简体中文", prompt)
+        self.assertNotIn("目标语言", prompt)
+
+    def test_translate_requires_all_entries_to_avoid_untranslated_leftovers(self):
+        """翻译批次返回不完整时抛错，避免部分原文混入结果"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"第一条"}]',
+        ])
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "one"},
+            {"index": 2, "start": "00:00:01,000", "end": "00:00:02,000", "text": "two"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "条数不完整"):
+            asyncio.run(engine.process_subtitle_entries(
+                entries=entries,
+                provider_type="openai",
+                api_key="test",
+                base_url="https://example.com/v1",
+                model="model",
+                settings={"subtitle_batch_size": 2, "retry_count": 0},
+                operation="translate",
+                target_language="zh-CN",
+            ))
+
     def test_process_subtitle_entries_parses_numbered_lines(self):
         """编号行返回也能合并回原字幕条目"""
         engine = FakeTextEngine([

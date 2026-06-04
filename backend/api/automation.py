@@ -968,6 +968,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             subtitle_text = entries_to_plain_text(entries)
             text_profile = _pick_text_profile(db, request.text_profile_id)
             if text_profile and request.subtitle_operation != "none":
+                target_language = request.subtitle_target_language or ("zh-CN" if request.subtitle_operation == "translate" else "")
                 try:
                     text_settings = _load_profile_settings(text_profile)
                     glossary_prompt = _glossary_prompt_suffix(request.glossary_terms)
@@ -993,7 +994,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             model=text_profile.model or "",
                             settings=text_settings,
                             operation=request.subtitle_operation,
-                            target_language=request.subtitle_target_language or "",
+                            target_language=target_language,
                             progress_callback=on_text_progress,
                         ))
                         if processed_entries:
@@ -1010,7 +1011,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             model=text_profile.model or "",
                             settings=text_settings,
                             operation=request.subtitle_operation,
-                            target_language=request.subtitle_target_language or "",
+                            target_language=target_language,
                         ))
                         processed_entries = map_text_to_timed_entries(processed_text, entries)
                         if processed_entries:
@@ -1018,8 +1019,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             subtitle_text = processed_text
                 except TaskControlRequested:
                     raise
-                except Exception:
+                except Exception as text_exc:
                     # 文本 API 是增强能力，失败时继续使用本地识别字幕完成主流程。
+                    warning_messages.append(f"文本 API 处理失败，已使用本地识别字幕: {text_exc}")
                     pass
             entries = _apply_glossary_terms(entries, request.glossary_terms)
             subtitle_text = entries_to_plain_text(entries)

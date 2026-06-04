@@ -17,7 +17,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_language: 'auto',
   text_profile_id: null,
   subtitle_operation: 'polish',
-  subtitle_target_language: '',
+  subtitle_target_language: 'zh-CN',
   burn_subtitles: true,
   enable_voice: false,
   voice_profile_id: null,
