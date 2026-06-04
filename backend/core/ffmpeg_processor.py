@@ -323,6 +323,7 @@ class FFmpegProcessor:
 
         # 构建 ffmpeg 命令
         preset_dict = preset or {}
+        bitrate = self._resolve_bitrate(preset_dict)
         # 字幕滤镜会把画面重新合成，这里仍优先 GPU，但编码参数会走字幕专用保守配置。
         encoder = self._resolve_video_encoder(preset_dict)
         cmd = [
@@ -332,6 +333,8 @@ class FFmpegProcessor:
             "-c:a", "copy",             # 音频直接复制
         ]
         cmd.extend(self._video_encoder_args(preset_dict, for_subtitles=True, encoder=encoder))
+        if bitrate:
+            cmd.extend(["-b:v", bitrate])
         cmd.extend(["-y", output_path])
 
         logger.info(f"烧录字幕: {video_path} -> {output_path}")
@@ -941,11 +944,13 @@ class FFmpegProcessor:
     def _video_encoder_args(self, preset: dict[str, Any], for_subtitles: bool, encoder: Optional[str] = None) -> list[str]:
         """生成视频编码参数，GPU 不可用时回退 CPU"""
         encoder = encoder or self._resolve_video_encoder(preset)
+        bitrate = self._resolve_bitrate(preset)
         if encoder == "libx264":
             cpu_preset = "fast" if for_subtitles else "medium"
             args = ["-c:v", "libx264", "-preset", cpu_preset, "-pix_fmt", "yuv420p"]
-            if for_subtitles:
-                args.extend(["-crf", "20"])
+            if for_subtitles and not bitrate:
+                # 字幕烧录必须重编码，但默认不应该把体积顶得比原片大很多。
+                args.extend(["-crf", "23"])
             return args
 
         quality = str((preset.get("acceleration") or {}).get("quality") or "balanced")
@@ -955,8 +960,10 @@ class FFmpegProcessor:
         if encoder == "h264_nvenc":
             if for_subtitles:
                 subtitle_preset = {"quality": "p5", "balanced": "p4", "size": "p3"}.get(quality, "p4")
-                subtitle_cq = "18" if quality == "quality" else "23" if quality == "size" else "20"
-                args.extend(["-preset", subtitle_preset, "-rc", "vbr", "-cq", subtitle_cq, "-b:v", "0"])
+                subtitle_cq = "20" if quality == "quality" else "26" if quality == "size" else "23"
+                args.extend(["-preset", subtitle_preset, "-rc", "vbr", "-cq", subtitle_cq])
+                if not bitrate:
+                    args.extend(["-b:v", "0"])
             else:
                 args.extend(["-preset", nvenc_preset, "-tune", "ull", "-rc", "vbr", "-cq", cq_value, "-multipass", "disabled", "-bf", "0", "-rc-lookahead", "0", "-spatial-aq", "0", "-temporal-aq", "0", "-zerolatency", "1"])
         elif encoder == "h264_qsv":

@@ -245,12 +245,12 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn("force_style=", subtitle_filter)
         self.assertIn("PrimaryColour=&H00FFFFFF", subtitle_filter)
 
-    def test_subtitle_cpu_encoder_uses_high_quality_crf(self):
-        """字幕烧录的 CPU 编码使用高质量 CRF，减少重编码糊块"""
+    def test_subtitle_cpu_encoder_uses_smaller_default_crf(self):
+        """字幕烧录默认 CPU 编码略偏体积优先，避免没做画面处理时成品暴涨"""
         args = self.processor._video_encoder_args({}, for_subtitles=True, encoder="libx264")
 
         self.assertEqual(args[args.index("-preset") + 1], "fast")
-        self.assertEqual(args[args.index("-crf") + 1], "20")
+        self.assertEqual(args[args.index("-crf") + 1], "23")
         self.assertIn("yuv420p", args)
 
     def test_subtitle_nvenc_encoder_uses_safe_quality_args(self):
@@ -262,10 +262,28 @@ class LocalMediaPipelineTest(unittest.TestCase):
         )
 
         self.assertEqual(args[args.index("-preset") + 1], "p4")
-        self.assertEqual(args[args.index("-cq") + 1], "20")
+        self.assertEqual(args[args.index("-cq") + 1], "23")
         self.assertNotIn("ull", args)
         self.assertNotIn("-zerolatency", args)
         self.assertNotIn("-rc-lookahead", args)
+
+    def test_subtitle_nvenc_encoder_uses_requested_bitrate_when_present(self):
+        """字幕烧录如果带了输出码率策略，就不要再强制 b:v 0 放任码率飙升"""
+        args = self.processor._video_encoder_args(
+            {
+                "bitrate": {
+                    "enabled": True,
+                    "mode": "fixed",
+                    "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+                },
+                "acceleration": {"enabled": True, "mode": "nvidia", "quality": "size"},
+            },
+            for_subtitles=True,
+            encoder="h264_nvenc",
+        )
+
+        self.assertEqual(args[args.index("-cq") + 1], "26")
+        self.assertNotIn("-b:v", args)
 
     def test_default_processing_config_is_fast_1080p(self):
         """默认画面处理保持 1080p 输出，同时关闭重 CPU 滤镜"""

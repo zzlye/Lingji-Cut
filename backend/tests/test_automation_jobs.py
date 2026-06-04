@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, combine_original_and_translated_entries, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, combine_original_and_translated_entries, merge_subtitle_burn_preset, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
@@ -209,6 +209,14 @@ class AutomationJobTests(unittest.TestCase):
                     AutomationRunRequest(
                         url=video.url,
                         enable_effects=False,
+                        processing_preset={
+                            "bitrate": {
+                                "enabled": True,
+                                "mode": "fixed",
+                                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+                            },
+                            "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+                        },
                         enable_voice=False,
                         burn_subtitles=True,
                         output_format="mp4",
@@ -222,6 +230,8 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIn("本地识别字幕", response.subtitle_text)
         self.assertEqual(stage_by_key["subtitle"].status, "completed")
         self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
+        self.assertEqual(fake_processor.burn_calls[0]["preset"]["bitrate"]["fixed_kbps"]["value"], 2200)
+        self.assertEqual(fake_processor.burn_calls[0]["preset"]["acceleration"]["quality"], "size")
 
     def test_retry_reset_clears_previous_runtime_state(self):
         job = AutomationJobRecord(
@@ -558,6 +568,25 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(combined[0]["start"], "00:00:01,100")
         self.assertEqual(combined[0]["text"], "你好\nhello")
         self.assertEqual(combined[1]["text"], "世界\nworld")
+
+    def test_merge_subtitle_burn_preset_keeps_style_and_output_quality(self):
+        """字幕烧录应同时保留字幕样式和一键流程的输出码率策略"""
+        merged = merge_subtitle_burn_preset(
+            {"font_name": "Microsoft YaHei", "font_size": 44, "secondary_color": "#FDE68A"},
+            {
+                "bitrate": {
+                    "enabled": True,
+                    "mode": "fixed",
+                    "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
+                },
+                "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+            },
+        )
+
+        self.assertEqual(merged["font_name"], "Microsoft YaHei")
+        self.assertEqual(merged["secondary_color"], "#FDE68A")
+        self.assertEqual(merged["bitrate"]["fixed_kbps"]["value"], 2200)
+        self.assertEqual(merged["acceleration"]["quality"], "size")
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

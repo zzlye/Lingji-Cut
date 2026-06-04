@@ -801,6 +801,17 @@ def combine_original_and_translated_entries(original_entries: list[dict], transl
     return combined
 
 
+def merge_subtitle_burn_preset(subtitle_preset: dict[str, Any], processing_preset: dict[str, Any]) -> dict[str, Any]:
+    """把字幕样式和导出质量参数合并，保证跳过画面处理时字幕烧录仍按输出策略控体积"""
+    merged = dict(subtitle_preset or {})
+    if isinstance(processing_preset, dict):
+        if isinstance(processing_preset.get("bitrate"), dict):
+            merged["bitrate"] = processing_preset["bitrate"]
+        if isinstance(processing_preset.get("acceleration"), dict):
+            merged["acceleration"] = processing_preset["acceleration"]
+    return merged
+
+
 def _plain_text_to_entries(text: str) -> list[dict[str, str | int]]:
     """没有原时间轴时，把纯文本转换成可渲染字幕条目"""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -835,6 +846,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     subtitle_text = ""
     subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
+    subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
     audio_path: Optional[str] = None
     warning_messages: list[str] = []
 
@@ -1066,6 +1078,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 else entries
             )
             display_entries = engine.normalize_entries_for_display(display_source_entries, preset_dict)
+            subtitle_burn_preset = merge_subtitle_burn_preset(preset_dict, request.processing_preset)
             subtitle_entries = entries
             if job:
                 job.subtitle_text = subtitle_text
@@ -1077,7 +1090,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 video_for_export = processor.burn_subtitles(
                     video_path=effects_path,
                     subtitle_path=subtitle_ass_path,
-                    preset=preset_dict,
+                    preset=subtitle_burn_preset,
                     control_keys=_control_keys(job, subtitle_task),
                 )
             _check_control(db, job, subtitle_task)
@@ -1213,9 +1226,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         _check_control(db, job, export_task)
         working_video = video_for_export
         if subtitle_ass_path and not request.burn_subtitles:
+            subtitle_burn_preset = merge_subtitle_burn_preset(preset_dict, request.processing_preset)
             working_video = processor.burn_subtitles(
                 video_path=working_video,
                 subtitle_path=subtitle_ass_path,
+                preset=subtitle_burn_preset,
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 15.0 + progress * 0.4)),
             )
