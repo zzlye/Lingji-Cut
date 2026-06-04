@@ -5,6 +5,7 @@ import os
 import re
 import json
 import subprocess
+import time
 from typing import Optional, Callable
 from ..utils import get_logger
 from .paths import ensure_project_dirs
@@ -273,6 +274,7 @@ class Downloader:
 
         # 输出模板
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+        start_time = time.time()
 
         cmd = [
             self.yt_dlp_cmd,
@@ -282,6 +284,7 @@ class Downloader:
             "--sub-format", "vtt/srt/best",
             "-o", output_template,
             "--no-warnings",
+            "--force-overwrites",   # 强制刷新同语言字幕，避免复用旧文件误判成功
         ]
 
         # 自动字幕
@@ -312,10 +315,11 @@ class Downloader:
             if process.returncode != 0:
                 raise RuntimeError(f"字幕下载失败: {stderr or stdout}")
 
-            # 查找下载的字幕文件
+            # 只查找本次语言对应的字幕，避免下载失败时误拿输出目录里的旧字幕文件。
+            expected_suffixes = tuple(f".{language}.{ext}" for ext in ("vtt", "srt", "ass"))
             files = sorted(
                 [os.path.join(output_dir, f) for f in os.listdir(output_dir)
-                 if f.endswith(('.vtt', '.srt', '.ass'))],
+                 if f.endswith(expected_suffixes) and os.path.getmtime(os.path.join(output_dir, f)) >= start_time - 1],
                 key=os.path.getmtime,
                 reverse=True
             )

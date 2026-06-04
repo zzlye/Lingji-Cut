@@ -440,6 +440,120 @@ def _pick_subtitle_track(video: VideoSource, requested_language: Optional[str]) 
     return tracks[0]
 
 
+def _normalize_subtitle_language(language: Optional[str]) -> str:
+    """清理字幕语言代码，auto 表示交给候选逻辑处理"""
+    value = str(language or "").strip()
+    return "" if value == "auto" else value
+
+
+def _subtitle_language_variants(language: Optional[str]) -> list[str]:
+    """扩展常见中文字幕语言代码，避免 zh-Hans 和 zh-CN 互相漏选"""
+    value = _normalize_subtitle_language(language)
+    if not value:
+        return []
+
+    variants = [value]
+    if value.lower().startswith("zh"):
+        variants.extend(["zh-CN", "zh-Hans", "zh"])
+
+    result: list[str] = []
+    for item in variants:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def _build_subtitle_download_candidates(
+    video: VideoSource,
+    requested_language: Optional[str],
+    preset_language: Optional[str],
+) -> list[dict[str, str]]:
+    """生成字幕下载候选，按语言和字幕类型去重并保留降级顺序"""
+    tracks = _load_subtitle_tracks(video)
+    candidates: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(language: Optional[str], sub_type: Optional[str] = None) -> None:
+        """加入一个候选语言，重复项只保留第一次出现的优先级"""
+        normalized_language = _normalize_subtitle_language(language)
+        if not normalized_language:
+            return
+        normalized_type = str(sub_type or "auto").strip() or "auto"
+        key = (normalized_language, normalized_type)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({"language": normalized_language, "sub_type": normalized_type})
+
+    def add_matching_tracks(language: str) -> bool:
+        """优先加入解析阶段已确认存在的同语言字幕轨"""
+        matched = [track for track in tracks if track.get("language") == language]
+        matched.sort(key=lambda track: 0 if track.get("type") == "original" else 1)
+        for track in matched:
+            add_candidate(track.get("language"), track.get("type"))
+        return bool(matched)
+
+    primary_languages = (
+        _subtitle_language_variants(requested_language)
+        + _subtitle_language_variants(preset_language)
+        + ["zh-CN", "zh-Hans", "zh", "en"]
+    )
+    for language in primary_languages:
+        if not add_matching_tracks(language):
+            add_candidate(language, "auto")
+
+    # 已上传字幕通常比自动翻译字幕更稳定，首选语言失败后优先尝试这些轨道。
+    sorted_tracks = sorted(tracks, key=lambda track: 0 if track.get("type") == "original" else 1)
+    for track in sorted_tracks:
+        add_candidate(track.get("language"), track.get("type"))
+
+    return candidates
+
+
+def _format_subtitle_fallback_error(errors: list[str]) -> str:
+    """压缩字幕下载降级错误，避免前端被 yt-dlp 长日志刷屏"""
+    if not errors:
+        return "未知错误"
+    preview = errors[:4]
+    if len(errors) > len(preview):
+        preview.append(f"还有 {len(errors) - len(preview)} 个候选失败")
+    return "；".join(preview)
+
+
+def _download_subtitle_with_fallback(
+    downloader: Downloader,
+    video: VideoSource,
+    requested_language: Optional[str],
+    preset_language: Optional[str],
+    output_dir: str,
+    control_keys: Optional[list[str]],
+) -> tuple[str, str, list[str]]:
+    """按候选字幕轨逐个下载，首选语言被限流时自动降级到其它可用轨"""
+    candidates = _build_subtitle_download_candidates(video, requested_language, preset_language)
+    errors: list[str] = []
+
+    for candidate in candidates:
+        language = candidate["language"]
+        sub_type = candidate["sub_type"]
+        try:
+            subtitle_path = downloader.download_subtitle(
+                url=video.url,
+                language=language,
+                output_dir=output_dir,
+                sub_type=sub_type,
+                control_keys=control_keys,
+            )
+            return subtitle_path, language, errors
+        except TaskControlRequested:
+            raise
+        except Exception as exc:
+            message = " ".join(str(exc).split())
+            errors.append(f"{language}/{sub_type}: {message}")
+
+    attempted = "、".join(dict.fromkeys(candidate["language"] for candidate in candidates))
+    raise RuntimeError(f"字幕下载失败，已尝试 {attempted or '无可用候选'}: {_format_subtitle_fallback_error(errors)}")
+
+
 def _pick_subtitle_preset(db: Session, preset_id: Optional[int]) -> Optional[SubtitlePreset]:
     """选择指定、默认或首个字幕预设"""
     if preset_id:
@@ -823,7 +937,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, subtitle_task)
             preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
-            track = _pick_subtitle_track(video, request.subtitle_language or (preset.language if preset else None))
+            requested_subtitle_language = request.subtitle_language or (preset.language if preset else None)
+            track = _pick_subtitle_track(video, requested_subtitle_language)
             if not track and not preset:
                 subtitle_task.status = "completed"
                 subtitle_task.progress = 100
@@ -835,16 +950,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             else:
                 paths = ensure_project_dirs()
                 preset_dict = _preset_to_dict(preset)
-                language = request.subtitle_language or (track or {}).get("language") or preset_dict.get("language") or "en"
-                if language == "auto":
-                    language = "en"
-                subtitle_path = downloader.download_subtitle(
-                    url=video.url,
-                    language=language,
+                subtitle_path, language, fallback_errors = _download_subtitle_with_fallback(
+                    downloader=downloader,
+                    video=video,
+                    requested_language=request.subtitle_language,
+                    preset_language=preset_dict.get("language"),
                     output_dir=paths["output_dir"],
-                    sub_type=(track or {}).get("type", "auto"),
                     control_keys=_control_keys(job, subtitle_task),
                 )
+                if fallback_errors:
+                    warning_messages.append(f"首选字幕下载失败，已改用 {language}: {_format_subtitle_fallback_error(fallback_errors[:2])}")
                 _check_control(db, job, subtitle_task)
                 if job:
                     _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)

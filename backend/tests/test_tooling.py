@@ -44,6 +44,17 @@ class FakeBinaryOutputProcess:
         return self.returncode
 
 
+class FakeSubtitleProcess:
+    """测试用字幕进程，模拟 yt-dlp 成功退出但没有产出目标语言字幕"""
+
+    def __init__(self):
+        self.returncode = 0
+
+    def communicate(self, timeout=None):
+        """返回空输出，避免真实调用 yt-dlp"""
+        return "", ""
+
+
 class ToolingTests(unittest.TestCase):
     """外部工具检测测试"""
 
@@ -129,6 +140,33 @@ class ToolingTests(unittest.TestCase):
 
         self.assertEqual(result, output_path)
         self.assertIn("bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best", captured_cmd)
+
+    def test_download_subtitle_does_not_return_unrelated_old_subtitle(self):
+        """目标语言没有新字幕文件时，不会误返回输出目录里的旧字幕"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_subtitle = os.path.join(temp_dir, "old.en.vtt")
+            with open(old_subtitle, "w", encoding="utf-8") as file:
+                file.write("WEBVTT\n")
+            captured_cmd: list[str] = []
+
+            def fake_popen(cmd, **_):
+                """记录命令并返回没有产物的字幕进程"""
+                captured_cmd.extend(cmd)
+                return FakeSubtitleProcess()
+
+            with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                with self.assertRaises(RuntimeError) as context:
+                    downloader.download_subtitle(
+                        url="https://youtube.com/watch?v=test",
+                        output_dir=temp_dir,
+                        language="zh-Hans",
+                    )
+
+        self.assertIn("字幕下载完成但未找到文件", str(context.exception))
+        self.assertIn("--force-overwrites", captured_cmd)
+        self.assertIn("zh-Hans", captured_cmd)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _cancel_job, _create_automation_job, _default_stages, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
 
 class FakeQuery:
@@ -58,6 +58,21 @@ class FakeTaskDb(FakeDb):
         if model is DownloadTask:
             return FakeQuery(self.tasks)
         return FakeQuery(self.jobs)
+
+
+class FakeSubtitleDownloader:
+    """测试用字幕下载器，模拟首选语言被限流后其它语言成功"""
+
+    def __init__(self, success_language: str):
+        self.success_language = success_language
+        self.calls: list[dict[str, str]] = []
+
+    def download_subtitle(self, url, language, output_dir, sub_type, control_keys):
+        """记录下载参数，只有指定语言返回成功"""
+        self.calls.append({"url": url, "language": language, "sub_type": sub_type, "control": ",".join(control_keys or [])})
+        if language != self.success_language:
+            raise RuntimeError("HTTP Error 429: Too Many Requests")
+        return os.path.join(output_dir, f"subtitle.{language}.vtt")
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -321,6 +336,49 @@ class AutomationJobTests(unittest.TestCase):
         profile = _pick_text_profile(db, None)
 
         self.assertEqual(profile.id, 3)
+
+    def test_subtitle_download_candidates_are_deduplicated_by_language_and_type(self):
+        """字幕候选会去重同语言多格式轨道，并保留首选语言优先级"""
+        video = VideoSource(
+            url="https://youtube.com/watch?v=test",
+            subtitles=json.dumps([
+                {"language": "zh-Hans", "type": "auto", "ext": "json3"},
+                {"language": "zh-Hans", "type": "auto", "ext": "vtt"},
+                {"language": "en", "type": "original", "ext": "vtt"},
+            ], ensure_ascii=False),
+        )
+
+        candidates = _build_subtitle_download_candidates(video, "zh-Hans", "zh-Hans")
+        pairs = [(candidate["language"], candidate["sub_type"]) for candidate in candidates]
+
+        self.assertEqual(pairs.count(("zh-Hans", "auto")), 1)
+        self.assertIn(("en", "original"), pairs)
+        self.assertLess(pairs.index(("zh-Hans", "auto")), pairs.index(("en", "original")))
+
+    def test_subtitle_download_falls_back_after_preferred_language_rate_limit(self):
+        """首选字幕语言下载失败时会继续尝试候选轨道"""
+        video = VideoSource(
+            url="https://youtube.com/watch?v=test",
+            subtitles=json.dumps([
+                {"language": "en", "type": "original", "ext": "vtt"},
+            ], ensure_ascii=False),
+        )
+        downloader = FakeSubtitleDownloader(success_language="en")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path, language, errors = _download_subtitle_with_fallback(
+                downloader=downloader,
+                video=video,
+                requested_language="zh-Hans",
+                preset_language="zh-Hans",
+                output_dir=temp_dir,
+                control_keys=["task:1"],
+            )
+
+        self.assertEqual(language, "en")
+        self.assertTrue(path.endswith("subtitle.en.vtt"))
+        self.assertGreater(len(errors), 0)
+        self.assertEqual([call["language"] for call in downloader.calls[:4]], ["zh-Hans", "zh-CN", "zh", "en"])
 
     def test_restore_batch_runtime_state_keeps_paused_batches(self):
         jobs = [
