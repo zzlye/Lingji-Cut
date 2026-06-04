@@ -353,6 +353,11 @@ class FFmpegProcessor:
         """构建字幕滤镜字符串"""
         # 转义路径中的特殊字符
         escaped_path = subtitle_path.replace("\\", "/").replace(":", "\\:")
+        subtitle_ext = os.path.splitext(subtitle_path)[1].lower()
+
+        # ASS 已经带完整样式，不能再用 force_style 覆盖，否则双行颜色/字号会被主样式抹掉。
+        if subtitle_ext == ".ass":
+            return f"subtitles='{escaped_path}'"
 
         if preset is None:
             # 默认字幕样式

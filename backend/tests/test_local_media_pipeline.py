@@ -214,6 +214,37 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-c:v") + 1], "h264_nvenc")
         self.assertIn("-cq", cmd)
 
+    def test_ass_subtitle_filter_preserves_embedded_styles(self):
+        """ASS 字幕烧录不能再注入 force_style，否则第二行颜色和字号会被覆盖"""
+        subtitle_filter = self.processor._build_subtitle_filter(
+            os.path.join(self.temp_dir, "double_line.ass"),
+            {
+                "font_name": "Microsoft YaHei",
+                "font_size": 44,
+                "secondary_font_size": 42,
+                "font_color": "#FFFFFF",
+                "secondary_color": "#FDE68A",
+            },
+        )
+
+        self.assertEqual(subtitle_filter, f"subtitles='{self.temp_dir.replace('\\', '/').replace(':', '\\:')}/double_line.ass'")
+        self.assertNotIn("force_style", subtitle_filter)
+
+    def test_srt_subtitle_filter_still_uses_force_style(self):
+        """普通字幕文件仍通过 force_style 注入基础样式"""
+        subtitle_filter = self.processor._build_subtitle_filter(
+            os.path.join(self.temp_dir, "plain.srt"),
+            {
+                "font_name": "Microsoft YaHei",
+                "font_size": 44,
+                "font_color": "#FFFFFF",
+                "secondary_color": "#FDE68A",
+            },
+        )
+
+        self.assertIn("force_style=", subtitle_filter)
+        self.assertIn("PrimaryColour=&H00FFFFFF", subtitle_filter)
+
     def test_subtitle_cpu_encoder_uses_high_quality_crf(self):
         """字幕烧录的 CPU 编码使用高质量 CRF，减少重编码糊块"""
         args = self.processor._video_encoder_args({}, for_subtitles=True, encoder="libx264")
