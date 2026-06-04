@@ -6,7 +6,7 @@ import { TitleBar } from './TitleBar'
 import { NavRail } from './NavRail'
 import { ActivityDrawer } from './ActivityDrawer'
 import { StudioWorkspace } from '@/features/studio/StudioWorkspace'
-import { TaskPanel } from '@/features/tasks/TaskPanel'
+import { QueueWorkspace } from '@/features/queue/QueueWorkspace'
 import { LibraryPanel } from '@/features/library/LibraryPanel'
 import { HistoryPanel } from '@/features/history/HistoryPanel'
 import { SettingsCenter, type SettingsTab } from '@/features/settings/SettingsCenter'
@@ -36,7 +36,7 @@ export function AppShell() {
           <NavRail onOpenSettings={() => openSettings('effects')} />
           <main className="min-w-0 flex-1 overflow-auto">
             {workspace === 'queue' ? (
-              <TaskPanel />
+              <QueueWorkspace />
             ) : workspace === 'library' ? (
               <LibraryPanel />
             ) : workspace === 'history' ? (
