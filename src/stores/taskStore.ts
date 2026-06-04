@@ -3,6 +3,7 @@
 
 import { create } from 'zustand'
 import type { AutomationJob, AutomationStep, DownloadTask, LogEntry, VideoParseResult } from '@/types'
+import { useLogStore } from './logStore'
 
 /** 自动处理默认步骤 */
 const AUTOMATION_STEPS: AutomationStep[] = [
@@ -158,17 +159,10 @@ export const useTaskStore = create<TaskState>((set) => ({
   setCurrentVideo: (video) =>
     set({ currentVideo: video }),
 
-  addLog: (level, message) =>
-    set((state) => ({
-      logs: [
-        ...state.logs,
-        {
-          timestamp: new Date().toISOString(),
-          level,
-          message,
-        },
-      ].slice(-100), // 只保留最近 100 条日志
-    })),
+  addLog: (level, message) => {
+    // 转发到统一日志/Toast 系统，让仍在使用本 store 的旧设置面板也能即时反馈（弹 Toast + 进入活动抽屉）
+    useLogStore.getState().addLog(level, message)
+  },
 
   setParsing: (isParsing) =>
     set({ isParsing }),

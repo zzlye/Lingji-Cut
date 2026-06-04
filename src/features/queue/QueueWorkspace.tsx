@@ -303,25 +303,30 @@ function JobCard({
             </span>
           ))}
         </div>
+        {/* 失败或跳过的阶段显示具体原因，便于判断是否需要单独续跑 */}
+        {job.steps.filter((s) => (s.status === 'failed' || s.status === 'skipped') && s.error_message).map((s) => (
+          <p key={s.key} className={cn('text-xs', s.status === 'failed' ? 'text-destructive' : 'text-warning')}>
+            {s.label}：{s.error_message}
+          </p>
+        ))}
         <Separator />
         <div className="flex flex-wrap gap-2">
-          {(job.status === 'running' || job.status === 'pending') && (
+          {job.can_pause && (
             <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onPause}><Pause className="size-3.5" /> 暂停</Button>
           )}
-          {(job.status === 'running' || job.status === 'pending') && isEffectsRunning && (
+          {job.can_pause && isEffectsRunning && (
             <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onSkip}><SkipForward className="size-3.5" /> 跳过画面</Button>
           )}
-          {(job.status === 'running' || job.status === 'pending') && (
+          {job.can_resume && (
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onResume}>
+              <Play className="size-3.5" /> {job.status === 'paused' ? '继续' : '断点续跑'}
+            </Button>
+          )}
+          {job.can_retry && (
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onRetry}><RotateCcw className="size-3.5" /> 全部重跑</Button>
+          )}
+          {job.can_cancel && (
             <Button variant="outline" size="sm" className="gap-1.5 text-destructive" disabled={busy} onClick={onCancel}><X className="size-3.5" /> 取消</Button>
-          )}
-          {job.can_resume && job.status === 'paused' && (
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onResume}><Play className="size-3.5" /> 继续</Button>
-          )}
-          {(job.status === 'failed' || job.status === 'completed' || job.status === 'cancelled') && (
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onRetry}><RotateCcw className="size-3.5" /> 重试</Button>
-          )}
-          {job.status === 'paused' && !job.can_resume && (
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onResume}><Play className="size-3.5" /> 继续</Button>
           )}
         </div>
       </CardContent>

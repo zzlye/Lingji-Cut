@@ -20,7 +20,7 @@ import { useAutoRun } from '@/hooks/useAutoRun'
 import { useVideoStore } from '@/stores/videoStore'
 import { useAutomationStore } from '@/stores/automationStore'
 import { usePrefsStore } from '@/stores/prefsStore'
-import type { SettingsSection } from '@/stores/uiStore'
+import { useUiStore, type SettingsSection } from '@/stores/uiStore'
 import type { AutomationJob, AutomationStep, AutomationPreferences, VideoParseResult } from '@/types'
 
 /** 字幕处理方式中文文案 */
@@ -229,6 +229,7 @@ function ParseHint() {
 
 /** 当前任务实时进度卡 */
 function JobProgressCard({ job }: { job: AutomationJob }) {
+  const setWorkspace = useUiStore((s) => s.setWorkspace)
   return (
     <Card>
       <CardHeader>
@@ -248,13 +249,18 @@ function JobProgressCard({ job }: { job: AutomationJob }) {
             <div key={step.key} className="flex items-center gap-2.5 text-xs">
               <Icon className={cn('size-4 shrink-0', visual.ring.split(' ').find((c) => c.startsWith('text-')), step.status === 'running' && 'animate-spin')} />
               <span className="w-16 shrink-0 text-foreground">{step.label}</span>
-              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+              <span className={cn('min-w-0 flex-1 truncate', step.error_message ? (step.status === 'failed' ? 'text-destructive' : 'text-warning') : 'text-muted-foreground')}>
                 {step.error_message || step.description}
               </span>
               {step.status === 'running' && <span className="tabular-nums text-info">{step.progress}%</span>}
             </div>
           )
         })}
+        {(job.status === 'failed' || job.status === 'paused' || job.status === 'cancelled') && (
+          <Button variant="outline" size="sm" className="mt-1 w-full" onClick={() => setWorkspace('queue')}>
+            前往任务队列重试或断点续跑
+          </Button>
+        )}
       </CardContent>
     </Card>
   )

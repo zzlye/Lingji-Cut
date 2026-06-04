@@ -6,6 +6,7 @@ import { profileApi } from '@/lib/api'
 import { saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
+import { toast } from 'sonner'
 
 /** 文本 API 渠道配置 */
 const TEXT_PROVIDERS = [
@@ -266,16 +267,19 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   /** 测试文本 API 配置 */
   const handleTestProfile = async () => {
     if (!selectedProfileId) {
-      addLog('warn', '请先保存并选择文本 API 配置')
+      toast.warning('请先保存并选择文本 API 配置后再测试')
       return
     }
 
     setIsTesting(true)
     try {
       const result = await profileApi.test('text', selectedProfileId)
+      toast.success(result.message || '文本 API 连接正常，可以使用')
       addLog('info', result.message)
     } catch (error) {
-      addLog('error', `测试文本 API 失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = `测试文本 API 失败: ${error instanceof Error ? error.message : '未知错误'}`
+      toast.error(message)
+      addLog('error', message)
     } finally {
       setIsTesting(false)
     }
