@@ -5,7 +5,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { effectsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
-import { usePrefsStore } from '@/stores/prefsStore'
 import type { ProcessingConfig, ProcessingPreset, RandomRange } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -252,8 +251,6 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
   const [filterGraph, setFilterGraph] = useState('')
   const [isBusy, setIsBusy] = useState(false)
   const { tasks, addTask, addLog } = useTaskStore()
-  const exportWithSettings = usePrefsStore((state) => state.preferences.export_with_settings)
-  const updatePrefs = usePrefsStore((state) => state.update)
 
   const latestVideoPath = useMemo(() => {
     const completed = tasks.find((task) => task.status === 'completed' && task.output_path)
@@ -381,7 +378,7 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
     <div className="mx-auto max-w-3xl space-y-5 p-6">
       <div>
         <h2 className="text-base font-semibold">画面处理</h2>
-        <p className="text-sm text-muted-foreground">差异化、画布和输出参数会被一键完成流程自动复用。先选预设，需要时再展开高级微调。</p>
+        <p className="text-sm text-muted-foreground">这里只处理差异化、画布和处理码率。最终导出的格式、分辨率和成品码率请到单独的“最终导出”设置里调整。</p>
       </div>
 
       {/* 快捷预设卡片 */}
@@ -402,7 +399,7 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
       <Card>
         <CardHeader><CardTitle className="text-sm">常用</CardTitle></CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
-          <SelectField label="输出分辨率" value={config.canvas.resolution} options={RESOLUTION_OPTIONS} onChange={(v) => updateValue(['canvas', 'resolution'], v)} />
+          <SelectField label="处理画布分辨率" value={config.canvas.resolution} options={RESOLUTION_OPTIONS} onChange={(v) => updateValue(['canvas', 'resolution'], v)} />
           <SelectField label="硬件加速" value={config.acceleration?.mode ?? 'auto'} options={ACCEL_MODE_OPTIONS} onChange={(v) => updateValue(['acceleration', 'mode'], v)} description="自动选择可用 GPU，失败会回退 CPU" />
           {config.canvas.resolution === 'custom' && (
             <>
@@ -455,14 +452,11 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
         </AccordionItem>
 
         <AccordionItem value="output" className="rounded-lg border px-4">
-          <AccordionTrigger className="text-sm">码率与输出</AccordionTrigger>
+          <AccordionTrigger className="text-sm">码率与处理输出</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
-            <SwitchField
-              label="最终按导出设置统一输出"
-              description="关闭画面处理时，也会在字幕和配音完成后按这里的分辨率、码率和加速策略收口导出"
-              checked={exportWithSettings}
-              onChange={(v) => updatePrefs({ export_with_settings: v })}
-            />
+            <p className="rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+              这里的码率只影响画面处理阶段。最终成品的导出格式、分辨率和码率，请到“最终导出”里单独设置。
+            </p>
             <SwitchField label="启用码率控制" checked={config.bitrate.enabled} onChange={(v) => updateValue(['bitrate', 'enabled'], v)} />
             <SegmentedField label="码率方式" value={config.bitrate.mode} options={BITRATE_MODE_OPTIONS} onChange={(v) => updateValue(['bitrate', 'mode'], v)} />
             {config.bitrate.mode === 'fixed' ? (

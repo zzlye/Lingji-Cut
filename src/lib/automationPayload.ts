@@ -25,6 +25,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     processing_preset: loadAutomationConfig(),
     output_format: preferences.output_format,
     export_with_settings: preferences.export_with_settings,
+    export_settings: preferences.export_settings,
     subtitle_preset_id: preferences.subtitle_preset_id || undefined,
     subtitle_language: preferences.subtitle_language && preferences.subtitle_language !== 'auto'
       ? preferences.subtitle_language

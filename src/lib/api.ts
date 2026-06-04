@@ -353,6 +353,7 @@ export type AutomationStartParams = {
   format_id?: string
   output_format?: string
   export_with_settings?: boolean
+  export_settings?: import('@/types').AutomationExportSettings
   subtitle_preset_id?: number
   subtitle_language?: string
   text_profile_id?: number

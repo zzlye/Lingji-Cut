@@ -86,7 +86,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            粘贴链接后点「解析」预览信息，或直接「一键完成」自动跑完 解析 → 下载 → 画面处理 → 字幕 → 配音 → 导出。
+            粘贴链接后可先「解析」预览信息，也可以直接「一键完成」；软件会先自动解析，再继续跑完整流程。
           </p>
         </CardContent>
       </Card>
@@ -97,7 +97,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       {/* 双栏：左信息+进度，右配置摘要 */}
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
-          {currentVideo ? <VideoInfoCard video={currentVideo} /> : <ParseHint />}
+          {currentVideo ? <VideoInfoCard video={currentVideo} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
           {activeJob && <JobProgressCard job={activeJob} />}
         </div>
         <ConfigSummary preferences={preferences} onOpenSettings={onOpenSettings} />
@@ -160,8 +160,8 @@ function AutoRunConfirm({
             <li className="flex justify-between"><span>最终导出</span><span className="text-foreground">{preferences.export_with_settings ? '按导出设置' : '直接输出'}</span></li>
           </ul>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" className="flex-1" onClick={() => { setOpen(false); onOpenSettings('effects') }}>
-              调整设置
+            <Button variant="outline" size="sm" className="flex-1" onClick={() => { setOpen(false); onOpenSettings('export') }}>
+              打开设置
             </Button>
             <Button
               size="sm"
@@ -232,6 +232,22 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
   )
 }
 
+/** 一键完成已启动但前端暂无解析结果时的占位卡片 */
+function AutoRunPendingCard({ job }: { job: AutomationJob }) {
+  return (
+    <Card className="border-dashed">
+      <CardContent className="space-y-2 py-8">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <Loader2 className="size-4 animate-spin text-info" />
+          正在准备视频信息
+        </div>
+        <p className="text-sm text-muted-foreground">一键完成已启动，左侧会在解析完成后显示标题、时长和缩略图。</p>
+        <p className="truncate text-xs text-muted-foreground select-text">{job.source_url}</p>
+      </CardContent>
+    </Card>
+  )
+}
+
 /** 解析前的引导提示 */
 function ParseHint() {
   return (
@@ -294,7 +310,7 @@ function ConfigSummary({
 }) {
   const rows: Array<{ icon: typeof Film; label: string; value: string; tab: SettingsSection }> = [
     { icon: Film, label: '画面处理', value: preferences.enable_effects ? '已开启' : '已关闭', tab: 'effects' },
-    { icon: SlidersHorizontal, label: '最终导出', value: preferences.export_with_settings ? '按导出设置' : '直接输出', tab: 'effects' },
+    { icon: SlidersHorizontal, label: '最终导出', value: preferences.export_with_settings ? '按导出设置' : '直接输出', tab: 'export' },
     { icon: Captions, label: '字幕', value: SUBTITLE_OP_LABEL[preferences.subtitle_operation], tab: 'subtitle' },
     { icon: Mic, label: '配音', value: preferences.enable_voice ? '已开启' : '已关闭', tab: 'voice' },
     { icon: BookMarked, label: '术语字库', value: `${preferences.glossary_terms.length} 条`, tab: 'glossary' },

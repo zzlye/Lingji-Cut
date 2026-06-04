@@ -1,9 +1,10 @@
 // src/features/settings/SettingsWorkspace.tsx
 // 设置工作区 - 左侧分组导航 + 右侧内容，取代原先挤在一个弹窗里的 9 个页签
-import { Film, Captions, Cpu, Mic, BookMarked, ShieldAlert, FolderCog } from 'lucide-react'
+import { Film, Captions, Cpu, Mic, BookMarked, ShieldAlert, FolderCog, Download } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useUiStore, type SettingsSection } from '@/stores/uiStore'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
+import { ExportSettingsPanel } from '@/features/export/ExportSettingsPanel'
 import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
 import { ApiConfigPanel } from './ApiConfigPanel'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
@@ -15,6 +16,7 @@ import { FileLocationPanel } from './FileLocationPanel'
 const SECTION_GROUPS: Array<{ group: string; items: Array<{ id: SettingsSection; label: string; icon: typeof Film }> }> = [
   { group: '处理', items: [
     { id: 'effects', label: '画面处理', icon: Film },
+    { id: 'export', label: '最终导出', icon: Download },
     { id: 'subtitle', label: '字幕样式', icon: Captions },
   ] },
   { group: '文本与配音', items: [
@@ -64,6 +66,7 @@ export function SettingsWorkspace() {
 
       <div className="min-w-0 flex-1 overflow-auto">
         {section === 'effects' && <EffectsSettingsPanel variant="compact" />}
+        {section === 'export' && <ExportSettingsPanel />}
         {section === 'subtitle' && <SubtitleEditor compact />}
         {section === 'api' && <ApiConfigPanel compact />}
         {section === 'voice' && <VoiceConfigPanel compact />}

@@ -6,7 +6,7 @@ import { create } from 'zustand'
 export type Workspace = 'studio' | 'queue' | 'library' | 'history' | 'settings'
 
 /** 设置分组 */
-export type SettingsSection = 'effects' | 'subtitle' | 'api' | 'voice' | 'glossary' | 'banned' | 'paths'
+export type SettingsSection = 'effects' | 'export' | 'subtitle' | 'api' | 'voice' | 'glossary' | 'banned' | 'paths'
 
 interface UiState {
   /** 当前工作区 */

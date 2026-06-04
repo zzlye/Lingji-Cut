@@ -100,6 +100,7 @@ class AutomationRunRequest(BaseModel):
     format_id: Optional[str] = None
     output_format: str = "mp4"
     export_with_settings: bool = True
+    export_settings: dict[str, Any] = Field(default_factory=dict)
     subtitle_preset_id: Optional[int] = None
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
@@ -813,14 +814,28 @@ def merge_subtitle_burn_preset(subtitle_preset: dict[str, Any], processing_prese
     return merged
 
 
-def build_final_export_preset(processing_preset: dict[str, Any]) -> dict[str, Any]:
-    """生成最终导出专用预设，只保留分辨率、码率和硬件加速，不重复套视觉效果"""
-    canvas = processing_preset.get("canvas") if isinstance(processing_preset.get("canvas"), dict) else {"enabled": False}
-    bitrate = processing_preset.get("bitrate") if isinstance(processing_preset.get("bitrate"), dict) else {"enabled": False}
-    acceleration = processing_preset.get("acceleration") if isinstance(processing_preset.get("acceleration"), dict) else {"enabled": True, "mode": "auto", "quality": "balanced"}
+def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]:
+    """生成最终导出专用预设，只保留导出阶段需要的分辨率和码率参数"""
+    resolution = str(export_settings.get("resolution") or "original")
+    canvas_enabled = resolution != "original"
+    canvas = {
+        "enabled": canvas_enabled,
+        "resolution": resolution if resolution in {"720p", "1080p", "custom"} else "original",
+        "mode": "keep",
+        "width": int(export_settings.get("width") or 1920),
+        "height": int(export_settings.get("height") or 1080),
+    }
+    bitrate_enabled = bool(export_settings.get("bitrate_enabled"))
+    bitrate_kbps = max(0, int(export_settings.get("bitrate_kbps") or 0))
+    bitrate = {
+        "enabled": bitrate_enabled,
+        "mode": "fixed",
+        "fixed_kbps": {"enabled": bitrate_enabled, "random": False, "value": bitrate_kbps, "min": bitrate_kbps, "max": bitrate_kbps},
+    }
+    acceleration = {"enabled": True, "mode": "auto", "quality": "size"}
     return {
         "adjustments": {"enabled": False},
-        "canvas": dict(canvas),
+        "canvas": canvas,
         "transform": {
             "enabled": False,
             "rotate_mode": "none",
@@ -836,26 +851,23 @@ def build_final_export_preset(processing_preset: dict[str, Any]) -> dict[str, An
             "drop_frame": {"enabled": False, "interval": {"enabled": False, "random": False, "value": 25, "min": 25, "max": 25}},
             "dynamic_zoom": {"enabled": False, "random": False, "value": 0, "min": 0, "max": 0},
         },
-        "bitrate": dict(bitrate),
-        "acceleration": dict(acceleration),
+        "bitrate": bitrate,
+        "acceleration": acceleration,
     }
 
 
-def should_apply_final_export_settings(export_with_settings: bool, enable_effects: bool, processing_preset: dict[str, Any]) -> bool:
+def should_apply_final_export_settings(export_with_settings: bool, export_settings: dict[str, Any]) -> bool:
     """判断是否需要在导出末尾再按导出设置统一输出一次"""
-    if not export_with_settings or enable_effects or not isinstance(processing_preset, dict):
+    if not export_with_settings or not isinstance(export_settings, dict):
         return False
 
-    bitrate = processing_preset.get("bitrate")
-    if isinstance(bitrate, dict) and bitrate.get("enabled", True):
+    if bool(export_settings.get("bitrate_enabled")) and int(export_settings.get("bitrate_kbps") or 0) > 0:
         return True
 
-    canvas = processing_preset.get("canvas")
-    if not isinstance(canvas, dict) or canvas.get("enabled") is False:
-        return False
-    resolution = str(canvas.get("resolution") or "720p")
-    mode = str(canvas.get("mode") or "keep")
-    return resolution != "original" or mode != "keep"
+    resolution = str(export_settings.get("resolution") or "original")
+    if resolution in {"720p", "1080p"}:
+        return True
+    return resolution == "custom" and int(export_settings.get("width") or 0) > 0 and int(export_settings.get("height") or 0) > 0
 
 
 def _plain_text_to_entries(text: str) -> list[dict[str, str | int]]:
@@ -894,7 +906,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
     subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
-    final_export_preset: dict[str, Any] = build_final_export_preset(request.processing_preset)
+    final_export_preset: dict[str, Any] = build_final_export_preset(request.export_settings)
     audio_path: Optional[str] = None
     warning_messages: list[str] = []
     preset_dict: dict[str, Any] = {}
@@ -1301,7 +1313,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             db.commit()
             if job:
                 _update_job_stage(db, job, "export", "running", progress=70, task_id=export_task.id)
-        if should_apply_final_export_settings(request.export_with_settings, request.enable_effects, request.processing_preset):
+        if should_apply_final_export_settings(request.export_with_settings, request.export_settings):
             render_start = max(15.0, float(export_task.progress or 15.0))
             working_video = processor.apply_effects(
                 video_path=working_video,

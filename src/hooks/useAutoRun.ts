@@ -2,15 +2,18 @@
 // 一键完成动作 - 启动后台自动流程并把任务交给全局 SSE 流接管进度
 import { useCallback, useState } from 'react'
 import { toast } from 'sonner'
-import { automationApi } from '@/lib/api'
+import { automationApi, videoApi } from '@/lib/api'
 import { buildAutomationPayload } from '@/lib/automationPayload'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useLogStore } from '@/stores/logStore'
+import { useVideoStore } from '@/stores/videoStore'
 
 export function useAutoRun() {
   const [isStarting, setIsStarting] = useState(false)
   const syncBackendJob = useAutomationStore((s) => s.syncBackendJob)
   const addLog = useLogStore((s) => s.addLog)
+  const setCurrentVideo = useVideoStore((s) => s.setCurrentVideo)
+  const setParsing = useVideoStore((s) => s.setParsing)
 
   /** 启动一键完成流程；进度由 useAutomationStream 实时推进 */
   const start = useCallback(async (url: string): Promise<boolean> => {
@@ -18,6 +21,19 @@ export function useAutoRun() {
     setIsStarting(true)
     addLog('info', '提交一键完成流程')
     try {
+      // 一键完成前先做一次前端解析，避免工作台左侧没有任何视频信息。
+      setCurrentVideo(null)
+      setParsing(true)
+      try {
+        const parsedVideo = await videoApi.parse(url)
+        setCurrentVideo(parsedVideo)
+        addLog('info', `启动前解析完成: ${parsedVideo.title ?? url}`)
+      } catch (error) {
+        addLog('warn', `启动前解析失败，继续提交后台任务: ${error instanceof Error ? error.message : '未知错误'}`)
+      } finally {
+        setParsing(false)
+      }
+
       const { job_id } = await automationApi.start(buildAutomationPayload(url))
       addLog('info', `自动处理任务已进入队列: ${job_id}`)
       toast.success('已加入处理队列，进度将实时显示')
@@ -33,9 +49,10 @@ export function useAutoRun() {
       addLog('error', `一键完成失败: ${error instanceof Error ? error.message : '未知错误'}`)
       return false
     } finally {
+      setParsing(false)
       setIsStarting(false)
     }
-  }, [isStarting, syncBackendJob, addLog])
+  }, [isStarting, syncBackendJob, addLog, setCurrentVideo, setParsing])
 
   return { start, isStarting }
 }

@@ -276,10 +276,20 @@ export interface GlossaryTerm {
   note: string
 }
 
+/** 最终导出设置 */
+export interface AutomationExportSettings {
+  resolution: 'original' | '720p' | '1080p' | 'custom'
+  width: number
+  height: number
+  bitrate_enabled: boolean
+  bitrate_kbps: number
+}
+
 /** 一键自动化偏好 */
 export interface AutomationPreferences {
   output_format: 'mp4' | 'mkv' | 'mov' | 'webm'
   export_with_settings: boolean
+  export_settings: AutomationExportSettings
   enable_effects: boolean
   subtitle_preset_id: number | null
   subtitle_language: string

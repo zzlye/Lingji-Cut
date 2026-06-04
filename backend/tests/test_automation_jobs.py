@@ -598,40 +598,36 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(merged["acceleration"]["quality"], "size")
 
     def test_build_final_export_preset_only_keeps_output_related_settings(self):
-        """最终导出预设只保留画布、码率和硬件加速，避免再次套用翻转和抽帧"""
+        """最终导出预设只保留导出分辨率和码率，不重复套用画面处理效果"""
         preset = build_final_export_preset({
-            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep", "width": 1920, "height": 1080},
-            "bitrate": {
-                "enabled": True,
-                "mode": "fixed",
-                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
-            },
-            "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
-            "transform": {"enabled": True, "flip_horizontal": True},
-            "timing": {"enabled": True},
+            "resolution": "1080p",
+            "width": 1920,
+            "height": 1080,
+            "bitrate_enabled": True,
+            "bitrate_kbps": 2200,
         })
 
         self.assertFalse(preset["adjustments"]["enabled"])
         self.assertEqual(preset["canvas"]["resolution"], "1080p")
+        self.assertTrue(preset["canvas"]["enabled"])
         self.assertFalse(preset["transform"]["enabled"])
         self.assertFalse(preset["timing"]["enabled"])
         self.assertEqual(preset["bitrate"]["fixed_kbps"]["value"], 2200)
-        self.assertEqual(preset["acceleration"]["quality"], "size")
+        self.assertEqual(preset["acceleration"]["mode"], "auto")
 
-    def test_should_apply_final_export_settings_only_when_effects_are_skipped(self):
-        """最终导出设置只在用户开启该选项且跳过画面处理时才额外执行"""
-        processing_preset = {
-            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep"},
-            "bitrate": {
-                "enabled": True,
-                "mode": "fixed",
-                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
-            },
+    def test_should_apply_final_export_settings_only_when_export_settings_are_effective(self):
+        """最终导出设置只在用户开启且设置了分辨率或码率时才额外执行"""
+        export_settings = {
+            "resolution": "1080p",
+            "width": 1920,
+            "height": 1080,
+            "bitrate_enabled": True,
+            "bitrate_kbps": 2200,
         }
 
-        self.assertTrue(should_apply_final_export_settings(True, False, processing_preset))
-        self.assertFalse(should_apply_final_export_settings(False, False, processing_preset))
-        self.assertFalse(should_apply_final_export_settings(True, True, processing_preset))
+        self.assertTrue(should_apply_final_export_settings(True, export_settings))
+        self.assertFalse(should_apply_final_export_settings(False, export_settings))
+        self.assertFalse(should_apply_final_export_settings(True, {"resolution": "original", "bitrate_enabled": False, "bitrate_kbps": 0}))
 
     def test_automation_export_stage_applies_final_export_settings_when_effects_disabled(self):
         """关闭画面处理但开启最终导出设置时，字幕或配音完成后仍按导出设置统一输出"""
@@ -667,14 +663,12 @@ class AutomationJobTests(unittest.TestCase):
                         url=video.url,
                         enable_effects=False,
                         export_with_settings=True,
-                        processing_preset={
-                            "canvas": {"enabled": True, "resolution": "1080p", "mode": "keep", "width": 1920, "height": 1080},
-                            "bitrate": {
-                                "enabled": True,
-                                "mode": "fixed",
-                                "fixed_kbps": {"enabled": True, "random": False, "value": 2200, "min": 2200, "max": 2200},
-                            },
-                            "acceleration": {"enabled": True, "mode": "auto", "quality": "size"},
+                        export_settings={
+                            "resolution": "1080p",
+                            "width": 1920,
+                            "height": 1080,
+                            "bitrate_enabled": True,
+                            "bitrate_kbps": 2200,
                         },
                         enable_voice=False,
                         burn_subtitles=True,

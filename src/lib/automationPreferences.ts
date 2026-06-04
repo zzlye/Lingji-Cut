@@ -13,6 +13,13 @@ const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
 export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   output_format: 'mp4',
   export_with_settings: true,
+  export_settings: {
+    resolution: 'original',
+    width: 1920,
+    height: 1080,
+    bitrate_enabled: false,
+    bitrate_kbps: 2200,
+  },
   enable_effects: true,
   subtitle_preset_id: null,
   subtitle_language: 'auto',
@@ -90,6 +97,21 @@ function normalizeBannedWords(value: unknown): string[] {
   return Array.from(new Set(raw.map((item) => String(item).trim()).filter(Boolean)))
 }
 
+/** 规范最终导出设置，保证旧缓存升级后仍有完整默认值 */
+function normalizeExportSettings(value: unknown): AutomationPreferences['export_settings'] {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const resolution = ['original', '720p', '1080p', 'custom'].includes(String(raw.resolution || ''))
+    ? String(raw.resolution) as AutomationPreferences['export_settings']['resolution']
+    : DEFAULT_AUTOMATION_PREFERENCES.export_settings.resolution
+  return {
+    resolution,
+    width: Math.max(320, Number(raw.width ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.width) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.width),
+    height: Math.max(180, Number(raw.height ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.height) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.height),
+    bitrate_enabled: Boolean(raw.bitrate_enabled),
+    bitrate_kbps: Math.min(20000, Math.max(200, Number(raw.bitrate_kbps ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.bitrate_kbps) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.bitrate_kbps)),
+  }
+}
+
 /** 读取一键自动化偏好 */
 export function loadAutomationPreferences(): AutomationPreferences {
   if (typeof localStorage === 'undefined') {
@@ -104,6 +126,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
       ...DEFAULT_AUTOMATION_PREFERENCES,
       ...parsed,
       export_with_settings: parsed.export_with_settings !== false,
+      export_settings: normalizeExportSettings(parsed.export_settings),
       enable_effects: parsed.enable_effects !== false,
       subtitle_preset_id: normalizeId(parsed.subtitle_preset_id),
       text_profile_id: normalizeId(parsed.text_profile_id),
