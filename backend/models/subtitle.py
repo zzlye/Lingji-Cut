@@ -19,7 +19,7 @@ class SubtitlePreset(Base):
     # 是否为默认预设
     is_default = Column(Boolean, default=False)
     # 单行/双行模式（single、double）
-    line_mode = Column(String(20), default="double")
+    line_mode = Column(String(20), default="single")
     # 字幕语言代码或自定义语言名称
     language = Column(String(50), default="auto")
     # 字体名称

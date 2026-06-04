@@ -47,7 +47,7 @@ const POSITION_GRID_OPTIONS: FieldOption[] = POSITION_OPTIONS.map((p) => [p.valu
 
 /** 快速样式模板 */
 const STYLE_TEMPLATES: Array<{ name: string; description: string; patch: Partial<SubtitlePresetForm> }> = [
-  { name: '短视频清晰', description: '白字黑边，底部双行', patch: { line_mode: 'double', font_name: 'Source Han Sans SC', font_size: 48, font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48 } },
+  { name: '短视频清晰', description: '白字黑边，底部单行', patch: { line_mode: 'single', font_name: 'Source Han Sans SC', font_size: 48, font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48 } },
   { name: '电影双语', description: '主副字幕分色，底部留白', patch: { line_mode: 'double', font_name: 'Noto Sans SC', font_size: 42, font_color: '#FFFFFF', secondary_color: '#D1D5DB', outline_color: '#111827', outline_width: 3, shadow_enabled: true, shadow_color: '#000000', shadow_x: 1, shadow_y: 2, background_alpha: 0, position: 'bottom', margin_v: 62 } },
   { name: '知识讲解', description: '黄字高亮，适合解说', patch: { line_mode: 'single', font_name: 'Alibaba PuHuiTi', font_size: 50, font_color: '#FACC15', secondary_color: '#FFFFFF', outline_color: '#1F2937', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 46 } },
   { name: '干净信息条', description: '半透明背景，低描边', patch: { line_mode: 'single', font_name: 'HarmonyOS Sans SC', font_size: 40, font_color: '#FFFFFF', secondary_color: '#BAE6FD', outline_color: '#000000', outline_width: 1, shadow_enabled: false, background_alpha: 128, position: 'bottom', margin_v: 36 } },
@@ -56,7 +56,7 @@ const STYLE_TEMPLATES: Array<{ name: string; description: string; patch: Partial
 /** 字幕预设默认值 */
 function createDefaultForm(name = '短视频清晰字幕'): SubtitlePresetForm {
   return {
-    name, is_default: false, line_mode: 'double', language: 'zh-CN', font_name: 'Source Han Sans SC', font_size: 48,
+    name, is_default: false, line_mode: 'single', language: 'zh-CN', font_name: 'Source Han Sans SC', font_size: 48,
     font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4,
     shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48,
   }
@@ -71,7 +71,7 @@ function normalizePosition(position: string): SubtitlePosition {
 /** 将后端预设转换成完整表单，兼容旧数据 */
 function presetToForm(preset: SubtitlePreset): SubtitlePresetForm {
   return {
-    name: preset.name || '未命名预设', is_default: Boolean(preset.is_default), line_mode: preset.line_mode || 'double',
+    name: preset.name || '未命名预设', is_default: Boolean(preset.is_default), line_mode: preset.line_mode || 'single',
     language: preset.language || 'auto', font_name: preset.font_name || 'Source Han Sans SC', font_size: preset.font_size || 48,
     font_color: preset.font_color || '#FFFFFF', secondary_color: preset.secondary_color || '#FDE68A', outline_color: preset.outline_color || '#000000',
     outline_width: preset.outline_width ?? 4, shadow_enabled: preset.shadow_enabled ?? true, shadow_color: preset.shadow_color || '#000000',

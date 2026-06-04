@@ -282,6 +282,57 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(progress_values[-1], 100)
         self.assertTrue(any(value > 0 for value in progress_values))
 
+    def test_mix_audio_uses_video_audio_duration(self):
+        """混合配音时按原视频音频时长输出，避免 voice 较短导致音画截断"""
+        self._create_test_video()
+        voice_path = os.path.join(self.temp_dir, "voice.wav")
+        output_path = os.path.join(self.temp_dir, "mixed.mp4")
+        self._create_test_audio(voice_path, 440)
+        calls: list[list[str]] = []
+
+        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None, progress_callback=None, progress_total_seconds=None):
+            calls.append(cmd)
+            return output_path
+
+        with patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run_ffmpeg):
+            result = self.processor.merge_audio_video(
+                video_path=self.input_video,
+                audio_path=voice_path,
+                output_path=output_path,
+                mode="mix",
+                volume_ratio=0.25,
+            )
+
+        self.assertEqual(result, output_path)
+        self.assertTrue(any("duration=first" in part for part in calls[0]))
+
+    def test_replace_audio_does_not_use_shortest(self):
+        """替换配音不使用 shortest，避免配音短于视频时直接截短画面"""
+        self._create_test_video()
+        voice_path = os.path.join(self.temp_dir, "voice.wav")
+        output_path = os.path.join(self.temp_dir, "replaced.mp4")
+        self._create_test_audio(voice_path, 440)
+        calls: list[list[str]] = []
+
+        def fake_run_ffmpeg(cmd, action_name, timeout=600, control_keys=None, progress_callback=None, progress_total_seconds=None):
+            calls.append(cmd)
+            return output_path
+
+        with (
+            patch.object(self.processor, "_media_duration_seconds", return_value=1.0),
+            patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run_ffmpeg),
+        ):
+            result = self.processor.merge_audio_video(
+                video_path=self.input_video,
+                audio_path=voice_path,
+                output_path=output_path,
+                mode="replace",
+            )
+
+        self.assertEqual(result, output_path)
+        self.assertNotIn("-shortest", calls[0])
+        self.assertIn("-t", calls[0])
+
     def _create_test_video(self):
         """用 ffmpeg 生成短测试视频"""
         cmd = [

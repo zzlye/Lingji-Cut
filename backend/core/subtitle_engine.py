@@ -233,6 +233,7 @@ class SubtitleEngine:
 
         font_name = preset.get("font_name", "Microsoft YaHei")
         font_size = preset.get("font_size", 48)
+        line_mode = str(preset.get("line_mode") or "single").lower()
         font_color = self._color_to_ass(preset.get("font_color", "&H00FFFFFF"))
         secondary_color = self._color_to_ass(preset.get("secondary_color", "&H000000FF"))
         outline_color = self._color_to_ass(preset.get("outline_color", "&H00000000"))
@@ -256,10 +257,11 @@ class SubtitleEngine:
         alignment = alignment_map.get(position, 2)
 
         # 生成 ASS 文件内容
+        wrap_style = 2 if line_mode == "single" else 0
         ass_content = f"""[Script Info]
 Title: YouTube Video Subtitle
 ScriptType: v4.00+
-WrapStyle: 0
+WrapStyle: {wrap_style}
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.601
 PlayResX: 1920
@@ -288,17 +290,54 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         logger.info(f"生成 ASS 字幕: {output_path}")
         return output_path
 
+    def normalize_entries_for_display(self, entries: List[dict], preset: Optional[dict] = None) -> List[dict]:
+        """把长字幕拆成短字幕条目，避免单条字幕显示两行并改善时间轴贴合度"""
+        preset = preset or {}
+        max_chars = self._max_display_chars(preset)
+        normalized_entries: list[dict] = []
+        for entry in entries:
+            text = WHITESPACE_RE.sub(" ", str(entry.get("text") or "").replace("\\N", " ").replace("\n", " ")).strip()
+            if not text:
+                continue
+            parts = self._split_subtitle_text(text, max_chars)
+            start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+            end_ms = self._time_to_milliseconds(str(entry.get("end") or "00:00:00,000"))
+            if end_ms <= start_ms:
+                end_ms = start_ms + 1000
+            duration = max(1, end_ms - start_ms)
+            weights = [max(1, len(part)) for part in parts]
+            total_weight = max(1, sum(weights))
+            elapsed_weight = 0
+            for index, part in enumerate(parts):
+                next_weight = elapsed_weight + weights[index]
+                part_start = start_ms + int(duration * elapsed_weight / total_weight)
+                part_end = start_ms + int(duration * next_weight / total_weight)
+                elapsed_weight = next_weight
+                normalized_entries.append({
+                    **entry,
+                    "index": len(normalized_entries) + 1,
+                    "start": self._milliseconds_to_srt_time(part_start),
+                    "end": self._milliseconds_to_srt_time(max(part_start + 1, part_end)),
+                    "text": part,
+                })
+        return normalized_entries
+
     def _format_ass_dialogue_text(self, text: str, preset: dict) -> str:
-        """格式化 ASS 单条字幕，自动清理空白并给长句换行"""
+        """格式化 ASS 单条字幕，单行模式不再写入换行符"""
         normalized = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
         if not normalized:
             return ""
-        font_size = int(preset.get("font_size") or 48)
-        max_chars = max(18, min(34, int(1400 / max(font_size, 1))))
-        return "\\N".join(self._wrap_subtitle_text(normalized, max_chars))
+        if str(preset.get("line_mode") or "single").lower() == "single":
+            return normalized
+        return "\\N".join(self._split_subtitle_text(normalized, self._max_display_chars(preset)))
 
-    def _wrap_subtitle_text(self, text: str, max_chars: int) -> list[str]:
-        """按显示宽度拆字幕行，优先在标点或空格处断行"""
+    def _max_display_chars(self, preset: dict) -> int:
+        """根据字号估算单行可读字符数"""
+        font_size = int(preset.get("font_size") or 48)
+        return max(12, min(30, int(1150 / max(font_size, 1))))
+
+    def _split_subtitle_text(self, text: str, max_chars: int) -> list[str]:
+        """按显示宽度拆字幕文本，优先在标点或空格处断开"""
         if len(text) <= max_chars:
             return [text]
 
@@ -306,16 +345,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         remaining = text
         break_chars = "，。、！？；,.!?; "
         while len(remaining) > max_chars:
-            split_at = max((remaining.rfind(char, 0, max_chars + 1) for char in break_chars), default=-1)
+            candidates = [(remaining.rfind(char, 0, max_chars + 1), char) for char in break_chars]
+            split_at, split_char = max(candidates, key=lambda item: item[0], default=(-1, ""))
             if split_at < max_chars // 2:
-                split_at = max_chars
-            line = remaining[:split_at].strip(" ，。、！？；,.!?;")
+                line_end = max_chars
+                next_start = max_chars
+            elif split_char == " ":
+                line_end = split_at
+                next_start = split_at + 1
+            else:
+                line_end = split_at + 1
+                next_start = split_at + 1
+            line = remaining[:line_end].strip()
             if line:
                 lines.append(line)
-            remaining = remaining[split_at:].strip()
+            remaining = remaining[next_start:].strip()
         if remaining:
             lines.append(remaining)
         return lines
+
+    def _milliseconds_to_srt_time(self, milliseconds: int) -> str:
+        """把毫秒转换成 SRT 时间码"""
+        milliseconds = max(0, int(milliseconds))
+        hours = milliseconds // 3600000
+        minutes = (milliseconds % 3600000) // 60000
+        seconds = (milliseconds % 60000) // 1000
+        millis = milliseconds % 1000
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
     def _srt_time_to_ass(self, srt_time: str) -> str:
         """将 SRT 时间格式转换为 ASS 格式"""

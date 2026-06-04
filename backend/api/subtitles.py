@@ -17,12 +17,14 @@ from ..utils import decrypt_api_key
 # 创建路由器
 router = APIRouter(prefix="/subtitles", tags=["subtitles"])
 
+LEGACY_SINGLE_LINE_PRESET_NAMES = {"默认字幕", "醒目大字", "短视频清晰", "短视频清晰字幕"}
+
 
 class SubtitlePresetCreate(BaseModel):
     """创建字幕预设请求"""
     name: str
     is_default: bool = False
-    line_mode: str = "double"
+    line_mode: str = "single"
     language: str = "auto"
     font_name: str = "Microsoft YaHei"
     font_size: int = 48
@@ -282,10 +284,21 @@ def _default_subtitle_presets() -> list[SubtitlePresetCreate]:
     """内置字幕样式预设，保证字幕设置页和一键流程开箱即用"""
     return [
         # 默认：白字黑边、底部居中，适配绝大多数横屏短视频
-        SubtitlePresetCreate(name="默认字幕", is_default=True),
+        SubtitlePresetCreate(name="默认字幕", is_default=True, line_mode="single"),
         # 醒目大字：字号更大、描边更粗、上移边距，适合强调或竖屏
-        SubtitlePresetCreate(name="醒目大字", font_size=56, outline_width=3, margin_v=48),
+        SubtitlePresetCreate(name="醒目大字", line_mode="single", font_size=56, outline_width=3, margin_v=48),
     ]
+
+
+def _repair_legacy_single_line_presets(db: Session) -> None:
+    """修正旧版本内置预设的双行默认值，保留用户明确选择的双语模板"""
+    changed = False
+    for preset in db.query(SubtitlePreset).all():
+        if preset.name in LEGACY_SINGLE_LINE_PRESET_NAMES and str(preset.line_mode or "").lower() != "single":
+            preset.line_mode = "single"
+            changed = True
+    if changed:
+        db.commit()
 
 
 def ensure_default_subtitle_presets(db: Session) -> None:
@@ -295,6 +308,7 @@ def ensure_default_subtitle_presets(db: Session) -> None:
     因此后端启动时也会调用本函数，避免新用户未进设置页就一键完成时拿不到统一字幕样式。
     """
     if db.query(SubtitlePreset).first():
+        _repair_legacy_single_line_presets(db)
         return
     for item in _default_subtitle_presets():
         db.add(SubtitlePreset(**item.model_dump()))
@@ -443,11 +457,13 @@ async def save_corrected_ass(request: SubtitleCorrectionSaveAssRequest, db: Sess
     engine = SubtitleEngine()
     entries = _normalize_correction_entries(engine, request.entries)
     preset = _pick_subtitle_preset(db, request.preset_id)
+    preset_dict = _preset_to_dict(preset)
+    display_entries = engine.normalize_entries_for_display(entries, preset_dict)
     output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "ass")
-    engine.generate_ass(entries, output_path, _preset_to_dict(preset))
+    engine.generate_ass(display_entries, output_path, preset_dict)
 
     return SubtitleCorrectionResponse(
-        message=f"已生成 ASS 字幕 {len(entries)} 条",
+        message=f"已生成 ASS 字幕 {len(display_entries)} 条",
         entries=_entry_payloads(entries),
         plain_text=entries_to_plain_text(entries),
         output_path=output_path,
@@ -501,7 +517,8 @@ def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_d
 
         base_name = os.path.splitext(os.path.basename(request.video_path))[0]
         ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
-        engine.generate_ass(entries, ass_path, preset_dict)
+        display_entries = engine.normalize_entries_for_display(entries, preset_dict)
+        engine.generate_ass(display_entries, ass_path, preset_dict)
 
         output_path = None
         if request.burn_in:

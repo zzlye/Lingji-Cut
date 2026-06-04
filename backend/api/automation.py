@@ -1031,13 +1031,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if request.banned_word_action == "block":
                     raise BannedWordsDetected(message)
                 warning_messages.append(message)
+            display_entries = engine.normalize_entries_for_display(entries, preset_dict)
             subtitle_entries = entries
             if job:
                 job.subtitle_text = subtitle_text
                 _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
             base_name = os.path.splitext(os.path.basename(effects_path))[0]
             subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
-            engine.generate_ass(entries, subtitle_ass_path, preset_dict)
+            engine.generate_ass(display_entries, subtitle_ass_path, preset_dict)
             if request.burn_subtitles:
                 video_for_export = processor.burn_subtitles(
                     video_path=effects_path,

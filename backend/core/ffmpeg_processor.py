@@ -433,6 +433,7 @@ class FFmpegProcessor:
 
         if mode == "replace":
             # 替换原声
+            duration_seconds = self._media_duration_seconds(video_path)
             cmd = [
                 self.ffmpeg_cmd,
                 "-i", video_path,
@@ -440,10 +441,13 @@ class FFmpegProcessor:
                 "-c:v", "copy",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
-                "-shortest",
+            ]
+            if duration_seconds:
+                cmd.extend(["-t", f"{duration_seconds:.3f}"])
+            cmd.extend([
                 "-y",
                 output_path
-            ]
+            ])
         elif mode == "mix":
             # 混合音频
             cmd = [
@@ -451,7 +455,7 @@ class FFmpegProcessor:
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:a]volume={volume_ratio}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=shortest[out]",
+                f"[0:a]volume={volume_ratio}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[out]",
                 "-map", "0:v:0",
                 "-map", "[out]",
                 "-c:v", "copy",
