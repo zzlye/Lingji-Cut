@@ -416,6 +416,92 @@ def _latest_matching_file(directory: str, pattern: str) -> Optional[str]:
     return candidates[0]
 
 
+def _legacy_stage_paths_from_media(media_path: Optional[str]) -> Optional[dict[str, str]]:
+    """兼容旧版平铺目录任务，从 downloads/output/exports 路径回推出旧项目目录结构"""
+    raw_path = str(media_path or "").strip()
+    if not raw_path:
+        return None
+    normalized = os.path.abspath(os.path.expanduser(raw_path))
+    stage_dir = os.path.dirname(normalized)
+    stage_name = os.path.basename(stage_dir).lower()
+    if stage_name not in {"downloads", "output", "exports"}:
+        return None
+    project_root = os.path.dirname(stage_dir)
+    if not project_root:
+        return None
+    return {
+        "project_root": project_root,
+        "downloads_dir": os.path.join(project_root, "downloads"),
+        "output_dir": os.path.join(project_root, "output"),
+        "exports_dir": os.path.join(project_root, "exports"),
+    }
+
+
+def _subtitle_search_dirs(job: Optional[AutomationJobRecord], db: Optional[Session], source_video_path: Optional[str], subtitle_stage_output: Optional[str]) -> list[str]:
+    """收集可编辑字幕的候选目录，兼容新工作目录和旧版平铺 output 目录"""
+    directories: list[str] = []
+
+    def add_directory(path: Optional[str]) -> None:
+        """去重追加候选目录，只保留真实存在的目录"""
+        normalized = str(path or "").strip()
+        if not normalized:
+            return
+        directory = os.path.abspath(os.path.expanduser(normalized))
+        if not os.path.isdir(directory) or directory in directories:
+            return
+        directories.append(directory)
+
+    workspace_paths = _job_workspace_paths(job, db)
+    if workspace_paths:
+        add_directory(workspace_paths.get("output_dir"))
+
+    for candidate in (
+        subtitle_stage_output,
+        source_video_path,
+        _stage_output_if_reusable(job, "download"),
+        _stage_output_if_reusable(job, "effects"),
+        _stage_output_if_reusable(job, "export"),
+    ):
+        if not candidate:
+            continue
+        detected = detect_video_workspace(candidate)
+        if detected:
+            add_directory(detected.get("output_dir"))
+        legacy_paths = _legacy_stage_paths_from_media(candidate)
+        if legacy_paths:
+            add_directory(legacy_paths.get("output_dir"))
+        parent_dir = os.path.dirname(os.path.abspath(os.path.expanduser(candidate)))
+        if os.path.basename(parent_dir).lower() == "output":
+            add_directory(parent_dir)
+
+    add_directory(ensure_project_dirs().get("output_dir"))
+    return directories
+
+
+def _subtitle_search_basenames(source_video_path: Optional[str], subtitle_stage_output: Optional[str]) -> list[str]:
+    """生成字幕回溯时使用的基础文件名，兼容 subtitled/final 等旧后缀"""
+    basenames: list[str] = []
+
+    def add_basename(name: Optional[str]) -> None:
+        value = str(name or "").strip()
+        if value and value not in basenames:
+            basenames.append(value)
+
+    if source_video_path:
+        add_basename(os.path.splitext(os.path.basename(source_video_path))[0])
+
+    if subtitle_stage_output:
+        subtitle_base = os.path.splitext(os.path.basename(subtitle_stage_output))[0]
+        add_basename(subtitle_base)
+        lowered = subtitle_base.lower()
+        for suffix in ("_subtitled", "_voiced", "_manual_final", "_final", "_enhanced", "_preview"):
+            if lowered.endswith(suffix):
+                add_basename(subtitle_base[: -len(suffix)].rstrip("._- "))
+                break
+
+    return basenames
+
+
 def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
     """推导重新合成导出要使用的源视频，优先画面处理产物，再回退下载原片"""
     params = _get_job_params(job) if job else {}
@@ -457,22 +543,25 @@ def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Opt
             return candidate
 
     source_video_path = _find_job_source_video_path(job)
-    workspace_paths = _job_workspace_paths(job, db)
-    if workspace_paths:
-        output_dir = workspace_paths["output_dir"]
-    elif source_video_path:
-        detected = detect_video_workspace(source_video_path)
-        output_dir = detected["output_dir"] if detected else None
-    else:
-        output_dir = None
-    if not source_video_path or not output_dir:
+    subtitle_stage_output = _existing_file(str((subtitle_stage or {}).get("output_path") or ""))
+    search_dirs = _subtitle_search_dirs(job, db, source_video_path, subtitle_stage_output)
+    search_basenames = _subtitle_search_basenames(source_video_path, subtitle_stage_output)
+    if not search_dirs or not search_basenames:
         return None
 
-    base_name = os.path.splitext(os.path.basename(source_video_path))[0]
-    for pattern in (f"{base_name}_*.ass", f"{base_name}_*.srt", f"{base_name}_*.vtt"):
-        matched = _latest_matching_file(output_dir, pattern)
-        if matched:
-            return matched
+    for directory in search_dirs:
+        for base_name in search_basenames:
+            for pattern in (
+                f"{base_name}.ass",
+                f"{base_name}.srt",
+                f"{base_name}.vtt",
+                f"{base_name}_*.ass",
+                f"{base_name}_*.srt",
+                f"{base_name}_*.vtt",
+            ):
+                matched = _latest_matching_file(directory, pattern)
+                if matched:
+                    return matched
     return None
 
 

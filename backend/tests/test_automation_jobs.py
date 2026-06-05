@@ -231,6 +231,51 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.source_video_path, download_path)
         self.assertEqual(response.voice_asset_path, voice_path)
 
+    def test_job_response_recovers_legacy_flat_subtitle_asset_path(self):
+        """旧版平铺目录任务即使没保存字幕参数，也能从 output 目录回推出可编辑字幕"""
+        with tempfile.TemporaryDirectory(prefix="automation_legacy_assets_") as temp_dir:
+            downloads_dir = os.path.join(temp_dir, "downloads")
+            output_dir = os.path.join(temp_dir, "output")
+            exports_dir = os.path.join(temp_dir, "exports")
+            os.makedirs(downloads_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+            os.makedirs(exports_dir, exist_ok=True)
+
+            download_path = os.path.join(downloads_dir, "100 Days in Minecraft Bedrock Edition.mp4")
+            subtitle_ass_path = os.path.join(output_dir, "100 Days in Minecraft Bedrock Edition_en.ass")
+            subtitled_video_path = os.path.join(output_dir, "100 Days in Minecraft Bedrock Edition_subtitled.mp4")
+            exported_video_path = os.path.join(exports_dir, "100 Days in Minecraft Bedrock Edition_subtitled.mp4")
+            for path in (download_path, subtitle_ass_path, subtitled_video_path, exported_video_path):
+                with open(path, "wb") as file:
+                    file.write(b"ok")
+
+            job = AutomationJobRecord(
+                id="auto-legacy-assets",
+                source_url="https://youtube.com/watch?v=test",
+                title="100 Days in Minecraft Bedrock Edition",
+                status="completed",
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": download_path, "error_message": None},
+                    {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 2, "output_path": subtitled_video_path, "error_message": None},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 3, "output_path": exported_video_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            subtitle_task = DownloadTask(
+                id=2,
+                video_id=1,
+                task_type="subtitle",
+                status="completed",
+                progress=100,
+                output_path=subtitled_video_path,
+                params="{}",
+                parent_job_id="auto-legacy-assets",
+            )
+
+            response = _job_to_response(job, FakeTaskDb([job], [subtitle_task]))
+
+        self.assertEqual(response.subtitle_asset_path, subtitle_ass_path)
+        self.assertEqual(response.source_video_path, download_path)
+
     def test_default_stages_include_full_automation_flow(self):
         keys = [stage["key"] for stage in _default_stages()]
 

@@ -1,7 +1,7 @@
 // src/features/subtitle/StudioSubtitleWorkbench.tsx
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 润色/翻译/生成，并保留时间轴
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Captions, FileText, Film, History, Languages, ListChecks, Settings2, Sparkles, Volume2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { useAutomationStore } from '@/stores/automationStore'
@@ -80,6 +80,8 @@ export function StudioSubtitleWorkbench({
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
   const [isReExporting, setIsReExporting] = useState(false)
+  const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
+  const autoLoadKeyRef = useRef('')
 
   const selectedEntry = entries[selectedIndex] || null
   const plainText = useMemo(
@@ -101,15 +103,17 @@ export function StudioSubtitleWorkbench({
     },
     [suggestedSubtitlePath],
   )
-  const selectedJobSubtitleFile = useMemo(
-    () => {
-      const value = (selectedJob?.subtitle_asset_path || '').trim()
-      return /\.(srt|vtt|ass)$/i.test(value) ? value : ''
-    },
-    [selectedJob?.subtitle_asset_path],
+  const selectedJobResolvedSubtitle = selectedJob?.id ? (resolvedJobSubtitlePaths[selectedJob.id] || '').trim() : ''
+  const selectedJobSourceVideo = useMemo(() => resolveJobSourceVideo(selectedJob), [selectedJob])
+  const selectedJobSubtitleCandidates = useMemo(
+    () => buildJobSubtitleCandidates(selectedJob, selectedJobSourceVideo, selectedJobResolvedSubtitle),
+    [selectedJob, selectedJobSourceVideo, selectedJobResolvedSubtitle],
   )
-  const selectedJobSourceVideo = (selectedJob?.source_video_path || '').trim()
-  const selectedJobVoicePath = (selectedJob?.voice_asset_path || '').trim()
+  const selectedJobSubtitleFile = useMemo(
+    () => resolveExplicitSubtitlePath(selectedJob, selectedJobResolvedSubtitle),
+    [selectedJob, selectedJobResolvedSubtitle],
+  )
+  const selectedJobVoicePath = useMemo(() => resolveJobVoicePath(selectedJob), [selectedJob])
   const jobOptions = useMemo<FieldOption[]>(
     () => [
       ['', '不绑定任务，仅手动处理'],
@@ -124,6 +128,16 @@ export function StudioSubtitleWorkbench({
       setSubtitlePath(suggestedSubtitleFile)
     }
   }, [subtitlePath, suggestedSubtitleFile])
+
+  useEffect(() => {
+    const autoLoadKey = `${selectedJob?.id || ''}|${selectedJobSubtitleCandidates.join('|')}`
+    if (!selectedJob?.id || !selectedJobSubtitleCandidates.length || autoLoadKeyRef.current === autoLoadKey) {
+      return
+    }
+    autoLoadKeyRef.current = autoLoadKey
+    void loadSubtitleCandidates(selectedJobSubtitleCandidates, { jobId: selectedJob.id, silent: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJob?.id, selectedJobSubtitleCandidates.join('|')])
 
   useEffect(() => {
     const loadTextProfiles = async () => {
@@ -152,29 +166,61 @@ export function StudioSubtitleWorkbench({
     }
   }
 
-  const handleParseFile = async (pathOverride?: string) => {
-    const rawPath = (pathOverride ?? subtitlePath).trim()
-    if (!rawPath) {
-      setNotice({ type: 'warning', message: '请先填写 SRT / VTT / ASS 字幕文件路径。' })
-      return
+  const loadSubtitleCandidates = async (rawCandidates: string[], options?: { jobId?: string; silent?: boolean }) => {
+    const candidates = Array.from(new Set(rawCandidates.map((item) => item.trim()).filter(Boolean)))
+    if (!candidates.length) {
+      if (!options?.silent) {
+        setNotice({ type: 'warning', message: '请先填写 SRT / VTT / ASS 字幕文件路径。' })
+      }
+      return false
     }
 
     setIsLoading(true)
-    setNotice({ type: 'info', message: '正在读取字幕文件...' })
+    if (!options?.silent) {
+      setNotice({ type: 'info', message: '正在读取字幕文件...' })
+    }
+    let lastErrorMessage = ''
     try {
-      const result = await subtitleApi.parseFile(rawPath)
-      applyParsedEntries(result.entries, result.message, result.output_path)
-      if (result.output_path) {
-        setFileName(result.output_path.split(/[\\/]/).pop() || 'manual_subtitle.srt')
+      for (const path of candidates) {
+        try {
+          const result = await subtitleApi.parseFile(path)
+          applyParsedEntries(result.entries, result.message, result.output_path)
+          if (options?.jobId && result.output_path) {
+            setResolvedJobSubtitlePaths((current) => (
+              current[options.jobId!] === result.output_path
+                ? current
+                : { ...current, [options.jobId!]: result.output_path }
+            ))
+          }
+          addLog('info', result.message)
+          return true
+        } catch (error) {
+          lastErrorMessage = error instanceof Error ? error.message : '未知错误'
+        }
       }
-      addLog('info', result.message)
-    } catch (error) {
-      const message = `读取字幕失败: ${error instanceof Error ? error.message : '未知错误'}`
-      setNotice({ type: 'error', message })
-      addLog('error', message)
+
+      if (!options?.silent) {
+        const message = candidates.length > 1
+          ? `读取字幕失败：已尝试 ${candidates.length} 个候选文件，最后错误：${lastErrorMessage || '未知错误'}`
+          : `读取字幕失败: ${lastErrorMessage || '未知错误'}`
+        setNotice({ type: 'error', message })
+        addLog('error', message)
+      }
+      return false
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const handleParseFile = async (pathOverride?: string | string[]) => {
+    const candidates = Array.isArray(pathOverride)
+      ? pathOverride
+      : [(pathOverride ?? subtitlePath).trim()]
+    if (!candidates.some((item) => item.trim())) {
+      setNotice({ type: 'warning', message: '请先填写 SRT / VTT / ASS 字幕文件路径。' })
+      return
+    }
+    await loadSubtitleCandidates(candidates, { jobId: selectedJob?.id, silent: false })
   }
 
   const handleParseText = async () => {
@@ -468,11 +514,22 @@ export function StudioSubtitleWorkbench({
                     </div>
                     <p className="mt-2 font-medium text-foreground">{selectedJob.title}</p>
                     <div className="mt-3 space-y-2 text-muted-foreground">
-                      <PathRow icon={FileText} label="可编辑字幕" path={selectedJobSubtitleFile} emptyText="这个任务还没找到可编辑字幕文件" />
+                      <PathRow
+                        icon={FileText}
+                        label="可编辑字幕"
+                        path={selectedJobSubtitleFile}
+                        emptyText={selectedJobSubtitleCandidates.length ? '这是旧任务，点击下方按钮会自动尝试匹配字幕文件' : '这个任务还没找到可编辑字幕文件'}
+                      />
                       <PathRow icon={Film} label="重导出源视频" path={selectedJobSourceVideo} emptyText="没有可复用源视频" />
                       <PathRow icon={Volume2} label="配音音轨" path={selectedJobVoicePath} emptyText="没有配音音轨，将只合成视频和字幕" />
                     </div>
-                    <Button variant="outline" size="sm" className="mt-3 w-full" onClick={() => handleParseFile(selectedJobSubtitleFile)} disabled={!selectedJobSubtitleFile || isLoading}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3 w-full"
+                      onClick={() => handleParseFile(selectedJobSubtitleCandidates)}
+                      disabled={!selectedJobSubtitleCandidates.length || isLoading}
+                    >
                       载入这个任务的字幕
                     </Button>
                   </div>
@@ -763,6 +820,119 @@ function pickSubtitleWorkspaceSource(...candidates: Array<string | null | undefi
     if (value) return value
   }
   return undefined
+}
+
+function resolveExplicitSubtitlePath(job: AutomationJob | null, resolvedPath = '') {
+  const directPath = (job?.subtitle_asset_path || '').trim()
+  if (isEditableSubtitlePath(directPath)) return directPath
+  if (isEditableSubtitlePath(resolvedPath)) return resolvedPath
+  const stagePath = (job?.steps.find((step) => step.key === 'subtitle')?.output_path || '').trim()
+  return isEditableSubtitlePath(stagePath) ? stagePath : ''
+}
+
+function resolveJobSourceVideo(job: AutomationJob | null) {
+  const directPath = (job?.source_video_path || '').trim()
+  if (isMediaPath(directPath)) return directPath
+  for (const key of ['effects', 'download'] as const) {
+    const stagePath = (job?.steps.find((step) => step.key === key)?.output_path || '').trim()
+    if (isMediaPath(stagePath)) return stagePath
+  }
+  return ''
+}
+
+function resolveJobVoicePath(job: AutomationJob | null) {
+  const directPath = (job?.voice_asset_path || '').trim()
+  if (isMediaPath(directPath)) return directPath
+  const stagePath = (job?.steps.find((step) => step.key === 'voice')?.output_path || '').trim()
+  return isMediaPath(stagePath) ? stagePath : ''
+}
+
+function buildJobSubtitleCandidates(job: AutomationJob | null, sourceVideoPath: string, resolvedPath = '') {
+  const candidates = new Set<string>()
+  const directPath = resolveExplicitSubtitlePath(job, resolvedPath)
+  if (directPath) {
+    candidates.add(directPath)
+  }
+
+  const subtitleStagePath = (job?.steps.find((step) => step.key === 'subtitle')?.output_path || '').trim()
+  if (isEditableSubtitlePath(subtitleStagePath)) {
+    candidates.add(subtitleStagePath)
+  }
+
+  const legacyCandidates = buildLegacySubtitleCandidates(subtitleStagePath, sourceVideoPath)
+  for (const candidate of legacyCandidates) {
+    candidates.add(candidate)
+  }
+
+  return Array.from(candidates)
+}
+
+function buildLegacySubtitleCandidates(subtitleStagePath: string, sourceVideoPath: string) {
+  const candidates: string[] = []
+  const baseNames = new Set<string>()
+  const outputDirectories = new Set<string>()
+
+  if (sourceVideoPath) {
+    baseNames.add(stripStageSuffix(sourceVideoPath))
+    const sourceOutputDir = siblingOutputDirectory(sourceVideoPath)
+    if (sourceOutputDir) outputDirectories.add(sourceOutputDir)
+  }
+
+  if (subtitleStagePath) {
+    baseNames.add(stripStageSuffix(subtitleStagePath))
+    const subtitleOutputDir = outputDirectoryFromPath(subtitleStagePath)
+    if (subtitleOutputDir) outputDirectories.add(subtitleOutputDir)
+  }
+
+  for (const outputDirectory of outputDirectories) {
+    for (const baseName of baseNames) {
+      if (!baseName) continue
+      candidates.push(
+        `${outputDirectory}\\${baseName}.ass`,
+        `${outputDirectory}\\${baseName}.srt`,
+        `${outputDirectory}\\${baseName}.vtt`,
+      )
+      for (const language of ['zh', 'zh-CN', 'zh_Hans', 'en', 'ja', 'ko']) {
+        candidates.push(
+          `${outputDirectory}\\${baseName}_${language}.ass`,
+          `${outputDirectory}\\${baseName}_${language}.srt`,
+          `${outputDirectory}\\${baseName}_${language}.vtt`,
+        )
+      }
+    }
+  }
+
+  return candidates.filter(Boolean)
+}
+
+function stripStageSuffix(path: string) {
+  const baseName = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || ''
+  return baseName.replace(/_(subtitled|voiced|manual_final|final|enhanced|preview)$/i, '').trim()
+}
+
+function outputDirectoryFromPath(path: string) {
+  const normalized = path.trim()
+  if (!normalized) return ''
+  const parent = normalized.replace(/[\\/][^\\/]+$/, '')
+  return /[\\/]output$/i.test(parent) ? parent : ''
+}
+
+function siblingOutputDirectory(path: string) {
+  const normalized = path.trim()
+  if (!normalized) return ''
+  const parent = normalized.replace(/[\\/][^\\/]+$/, '')
+  if (/[\\/]downloads$/i.test(parent) || /[\\/]exports$/i.test(parent)) {
+    return parent.replace(/[\\/]([^\\/]+)$/i, '\\output')
+  }
+  return /[\\/]output$/i.test(parent) ? parent : ''
+}
+
+function isEditableSubtitlePath(path: string | null | undefined) {
+  return Boolean(path && /\.(srt|vtt|ass)$/i.test(path))
+}
+
+function isMediaPath(path: string | null | undefined) {
+  return Boolean(path && /\.(mp4|mov|mkv|webm|avi|m4v|mp3|wav|m4a|aac|flac)$/i.test(path))
 }
 
 function SectionTitle({ title, description }: { title: string; description: string }) {
