@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 
 # 嵌入式 Python 直接运行测试时手动加入项目根目录。
@@ -19,11 +20,15 @@ from backend.api.subtitles import (  # noqa: E402
     ensure_default_subtitle_presets,
     SubtitleCorrectionSaveAssRequest,
     SubtitleCorrectionSaveRequest,
+    SubtitleEntriesProcessRequest,
     SubtitleEntryPayload,
+    process_subtitle_entries,
     save_corrected_ass,
     save_corrected_subtitle,
 )
 from backend.core.subtitle_engine import SubtitleEngine  # noqa: E402
+from backend.models import TextProviderProfile  # noqa: E402
+from backend.utils import encrypt_api_key  # noqa: E402
 
 
 class EmptyQuery:
@@ -68,6 +73,31 @@ class PresetListDb:
 
     def commit(self):
         self.commit_count += 1
+
+
+class ProfileQuery:
+    """测试用文本配置查询对象"""
+
+    def __init__(self, profile):
+        self.profile = profile
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def first(self):
+        return self.profile
+
+
+class TextProfileDb:
+    """测试用文本配置数据库会话"""
+
+    def __init__(self, profile):
+        self.profile = profile
+
+    def query(self, model):
+        if model is TextProviderProfile:
+            return ProfileQuery(self.profile)
+        return ProfileQuery(None)
 
 
 class SubtitleCorrectionTests(unittest.TestCase):
@@ -186,6 +216,23 @@ Language: ja
             self.assertNotIn("\\N", content)
             self.assertIn("WrapStyle: 2", content)
 
+    def test_parse_ass_file_restores_editable_entries(self):
+        """ASS 字幕可重新解析成可编辑条目，方便主界面继续校对"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "generated.ass")
+            SubtitleEngine().generate_ass(
+                [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "主字幕\n副字幕"}],
+                output_path,
+                {"font_size": 48, "secondary_font_size": 32, "line_mode": "double"},
+            )
+
+            entries = SubtitleEngine().parse_ass(output_path)
+
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["start"], "00:00:01,000")
+            self.assertEqual(entries[0]["end"], "00:00:03,000")
+            self.assertEqual(entries[0]["text"], "主字幕\n副字幕")
+
     def test_default_subtitle_presets_are_single_line(self):
         """内置默认预设必须是单行，避免新用户一键流程生成双行字幕"""
         presets = _default_subtitle_presets()
@@ -259,6 +306,38 @@ Language: ja
         self.assertTrue(entries[0]["text"].endswith("，"))
         self.assertGreater(entries[0]["end"], "00:00:03,000")
         self.assertEqual(entries[-1]["end"], "00:00:04,000")
+
+    def test_process_subtitle_entries_keeps_original_timeline(self):
+        """字幕条目 AI 处理接口返回后仍保持原始时间轴"""
+        profile = SimpleNamespace(
+            id=1,
+            provider_type="openai",
+            api_key_encrypted=encrypt_api_key("sk-test"),
+            base_url="https://example.com/v1",
+            model="gpt-4.1-mini",
+            extra_params='{"subtitle_batch_size": 12}',
+        )
+        db = TextProfileDb(profile)
+        request = SubtitleEntriesProcessRequest(
+            profile_id=1,
+            operation="translate",
+            target_language="zh-CN",
+            entries=[
+                SubtitleEntryPayload(index=1, start="00:00:01,000", end="00:00:02,500", text="hello"),
+                SubtitleEntryPayload(index=2, start="00:00:02,500", end="00:00:04,000", text="world"),
+            ],
+        )
+
+        with patch("backend.api.subtitles.TextEngine.process_subtitle_entries", new=AsyncMock(return_value=[
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,500", "text": "你好"},
+            {"index": 2, "start": "00:00:02,500", "end": "00:00:04,000", "text": "世界"},
+        ])):
+            response = asyncio.run(process_subtitle_entries(request, db))
+
+        self.assertEqual(response.operation, "translate")
+        self.assertEqual(response.entries[0].start, "00:00:01,000")
+        self.assertEqual(response.entries[1].end, "00:00:04,000")
+        self.assertEqual([entry.text for entry in response.entries], ["你好", "世界"])
 
 
 if __name__ == "__main__":

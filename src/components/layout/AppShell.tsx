@@ -9,6 +9,7 @@ import { QueueWorkspace } from '@/features/queue/QueueWorkspace'
 import { LibraryPanel } from '@/features/library/LibraryPanel'
 import { HistoryPanel } from '@/features/history/HistoryPanel'
 import { SettingsWorkspace } from '@/features/settings/SettingsWorkspace'
+import { SubtitleWorkbenchPage } from '@/features/subtitle/SubtitleWorkbenchPage'
 import { useUiStore } from '@/stores/uiStore'
 import { useAutomationStream } from '@/hooks/useAutomationStream'
 
@@ -29,6 +30,8 @@ export function AppShell() {
               <QueueWorkspace />
             ) : workspace === 'library' ? (
               <LibraryPanel />
+            ) : workspace === 'subtitle' ? (
+              <SubtitleWorkbenchPage />
             ) : workspace === 'history' ? (
               <HistoryPanel />
             ) : workspace === 'settings' ? (

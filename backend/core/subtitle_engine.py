@@ -15,6 +15,7 @@ INLINE_VTT_TIMESTAMP_RE = re.compile(r"<\d{2}:\d{2}:\d{2}\.\d{3}>")
 VTT_TAG_RE = re.compile(r"</?[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
 MIN_VTT_CUE_DURATION_MS = 250
+ASS_OVERRIDE_TAG_RE = re.compile(r"\{[^}]*\}")
 
 
 class SubtitleEngine:
@@ -63,6 +64,48 @@ class SubtitleEngine:
         # 跳过 WEBVTT 头部
         entries = self.parse_vtt_content(content)
         logger.info(f"解析 VTT 完成: {len(entries)} 条字幕")
+        return entries
+
+    def parse_ass_content(self, content: str) -> List[dict]:
+        """
+        解析 ASS 字幕文本
+        仅提取 Dialogue 行，兼容本项目生成的单行/双行字幕。
+        """
+        normalized = content.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
+        entries: list[dict] = []
+        for raw_line in normalized.split("\n"):
+            line = raw_line.strip()
+            if not line.startswith("Dialogue:"):
+                continue
+            parts = line.split(",", 9)
+            if len(parts) < 10:
+                continue
+
+            text = self._normalize_ass_text(parts[9])
+            if not text:
+                continue
+
+            entries.append({
+                "index": len(entries) + 1,
+                "start": self._ass_time_to_srt(parts[1]),
+                "end": self._ass_time_to_srt(parts[2]),
+                "text": text,
+            })
+        return entries
+
+    def parse_ass(self, ass_path: str) -> List[dict]:
+        """
+        解析 ASS 字幕文件
+        返回字幕条目列表：[{index, start, end, text}, ...]
+        """
+        if not os.path.exists(ass_path):
+            raise FileNotFoundError(f"ASS 文件不存在: {ass_path}")
+
+        with open(ass_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        entries = self.parse_ass_content(content)
+        logger.info(f"解析 ASS 完成: {len(entries)} 条字幕")
         return entries
 
     def entries_to_srt_content(self, entries: List[dict]) -> str:
@@ -216,6 +259,37 @@ class SubtitleEngine:
         except ValueError:
             return 0
         return max(0, int(round((hours * 3600 + minutes * 60 + seconds) * 1000)))
+
+    def _ass_time_to_srt(self, value: str) -> str:
+        """把 ASS 时间码转换为 SRT 时间码"""
+        value = value.strip()
+        parts = value.split(":")
+        if len(parts) != 3:
+            return "00:00:00,000"
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds_and_centis = parts[2].split(".", 1)
+            seconds = int(seconds_and_centis[0])
+            centis = int(seconds_and_centis[1]) if len(seconds_and_centis) > 1 else 0
+        except ValueError:
+            return "00:00:00,000"
+
+        milliseconds = ((hours * 3600 + minutes * 60 + seconds) * 1000) + centis * 10
+        hours = milliseconds // 3600000
+        minutes = (milliseconds % 3600000) // 60000
+        seconds = (milliseconds % 60000) // 1000
+        millis = milliseconds % 1000
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+    def _normalize_ass_text(self, text: str) -> str:
+        """清理 ASS 文本中的样式标记，恢复成可编辑的普通字幕"""
+        normalized = text.replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
+        normalized = ASS_OVERRIDE_TAG_RE.sub("", normalized)
+        normalized = html.unescape(normalized)
+        normalized = "\n".join(line.strip() for line in normalized.splitlines())
+        normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+        return normalized.strip()
 
     def generate_ass(
         self,

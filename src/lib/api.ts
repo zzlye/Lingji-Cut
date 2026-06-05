@@ -187,7 +187,19 @@ export const subtitleApi = {
       body: JSON.stringify(params),
     }),
 
-  /** 读取本地字幕文件并转换成可编辑条目 */
+  /** 使用文本 API 按字幕条目执行润色、翻译或生成，并保留时间轴 */
+  processEntries: (params: {
+    entries: import('@/types').SubtitleEntry[]
+    profile_id: number
+    operation?: 'generate' | 'translate' | 'polish'
+    target_language?: string
+  }) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; operation: string }>('/subtitles/process-entries', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
+  /** 读取本地字幕文件并转换成可编辑条目，支持 SRT/VTT/ASS */
   parseFile: (subtitlePath: string) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path?: string; format?: string }>('/subtitles/parse-file', {
       method: 'POST',

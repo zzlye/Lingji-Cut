@@ -1,6 +1,6 @@
 // src/components/layout/NavRail.tsx
 // 左侧导航栏 - 在工作区间切换，毛玻璃质感
-import { LayoutDashboard, ListChecks, FolderOpen, History, Settings } from 'lucide-react'
+import { LayoutDashboard, ListChecks, FolderOpen, Captions, History, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useUiStore, type Workspace } from '@/stores/uiStore'
 
@@ -9,6 +9,7 @@ const NAV_ITEMS: Array<{ key: Workspace; label: string; icon: typeof LayoutDashb
   { key: 'studio', label: '工作台', icon: LayoutDashboard },
   { key: 'queue', label: '任务队列', icon: ListChecks },
   { key: 'library', label: '素材库', icon: FolderOpen },
+  { key: 'subtitle', label: '字幕调整', icon: Captions },
   { key: 'history', label: '历史记录', icon: History },
 ]
 

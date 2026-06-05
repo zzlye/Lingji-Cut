@@ -111,6 +111,22 @@ class SubtitleEntryPayload(BaseModel):
     text: str
 
 
+class SubtitleEntriesProcessRequest(BaseModel):
+    """按字幕条目执行 AI 润色/翻译/生成"""
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    profile_id: int
+    operation: str = "polish"
+    target_language: Optional[str] = None
+
+
+class SubtitleEntriesProcessResponse(BaseModel):
+    """字幕条目 AI 处理响应"""
+    message: str
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    plain_text: str = ""
+    operation: str
+
+
 class SubtitleCorrectionParseFileRequest(BaseModel):
     """读取本地字幕文件请求"""
     subtitle_path: str
@@ -189,6 +205,8 @@ def _parse_subtitle_entries(engine: SubtitleEngine, subtitle_path: str) -> list[
         return engine.parse_srt(subtitle_path)
     if ext == ".vtt":
         return engine.parse_vtt(subtitle_path)
+    if ext == ".ass":
+        return engine.parse_ass(subtitle_path)
     raise HTTPException(status_code=400, detail=f"暂不支持的字幕格式: {ext}")
 
 
@@ -374,6 +392,38 @@ async def process_subtitle_text(request: SubtitleTextProcessRequest, db: Session
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/process-entries", response_model=SubtitleEntriesProcessResponse)
+async def process_subtitle_entries(request: SubtitleEntriesProcessRequest, db: Session = Depends(get_db)):
+    """按字幕条目执行 AI 处理，并保持原有时间轴"""
+    profile = db.query(TextProviderProfile).filter(TextProviderProfile.id == request.profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="文本 API 配置不存在")
+
+    engine = SubtitleEngine()
+    entries = _normalize_correction_entries(engine, request.entries)
+
+    try:
+        processed_entries = await TextEngine().process_subtitle_entries(
+            entries=entries,
+            provider_type=profile.provider_type,
+            api_key=decrypt_api_key(profile.api_key_encrypted),
+            base_url=profile.base_url,
+            model=profile.model or "",
+            settings=_load_text_settings(profile),
+            operation=request.operation,
+            target_language=request.target_language or "",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return SubtitleEntriesProcessResponse(
+        message="字幕条目处理完成",
+        entries=_entry_payloads(processed_entries),
+        plain_text=entries_to_plain_text(processed_entries),
+        operation=request.operation,
+    )
 
 
 @router.post("/parse-file", response_model=SubtitleCorrectionResponse)

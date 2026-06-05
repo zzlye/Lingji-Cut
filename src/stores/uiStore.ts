@@ -3,7 +3,7 @@
 import { create } from 'zustand'
 
 /** 主工作区 */
-export type Workspace = 'studio' | 'queue' | 'library' | 'history' | 'settings'
+export type Workspace = 'studio' | 'queue' | 'library' | 'subtitle' | 'history' | 'settings'
 
 /** 设置分组 */
 export type SettingsSection = 'effects' | 'export' | 'subtitle' | 'api' | 'voice' | 'glossary' | 'banned' | 'paths'
