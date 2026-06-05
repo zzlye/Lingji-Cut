@@ -2,8 +2,6 @@
 // 独立字幕页面 - 从左侧导航直接进入，集中处理字幕校对、翻译和导出
 
 import { useEffect, useMemo } from 'react'
-import { Captions, FilePenLine, Sparkles } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { StudioSubtitleWorkbench } from '@/features/subtitle/StudioSubtitleWorkbench'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useUiStore } from '@/stores/uiStore'
@@ -29,40 +27,14 @@ export function SubtitleWorkbenchPage() {
   }, [selectedJob?.id, setSubtitleJobId, subtitleJobId])
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-3">
-      <section className="glass shrink-0 rounded-2xl border p-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-medium text-primary">
-              <Captions className="size-4" />
-              独立字幕调整页面
-            </div>
-            <h1 className="mt-1 truncate text-lg font-semibold tracking-tight">字幕校对、AI 处理、单独导出都在这里完成</h1>
-            <p className="mt-1 text-xs text-muted-foreground">从任务队列或历史记录选任务，校对后可保存字幕并重新合并导出。</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="secondary">
-              <FilePenLine className="mr-1 size-3.5" />
-              手动校对
-            </Badge>
-            <Badge variant="outline">
-              <Sparkles className="mr-1 size-3.5" />
-              AI 单独处理
-            </Badge>
-            <Badge variant="outline">独立页面</Badge>
-          </div>
-        </div>
-      </section>
-
-      <div className="min-h-0 flex-1">
-        <StudioSubtitleWorkbench
-          availableJobs={selectableJobs}
-          selectedJob={selectedJob}
-          onSelectJob={setSubtitleJobId}
-          suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
-          onOpenTextSettings={() => openSettings('api')}
-        />
-      </div>
+    <div className="h-full min-h-0 p-3">
+      <StudioSubtitleWorkbench
+        availableJobs={selectableJobs}
+        selectedJob={selectedJob}
+        onSelectJob={setSubtitleJobId}
+        suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
+        onOpenTextSettings={() => openSettings('api')}
+      />
     </div>
   )
 }

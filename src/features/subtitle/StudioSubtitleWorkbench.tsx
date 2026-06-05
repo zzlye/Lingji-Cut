@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
-import { TextField, SelectField, SegmentedField, type FieldOption } from '@/components/fields'
+import { SelectField, SegmentedField, type FieldOption } from '@/components/fields'
 
 const SAMPLE_SUBTITLE_TEXT = `1
 00:00:01,000 --> 00:00:03,000
@@ -24,6 +24,9 @@ const SAMPLE_SUBTITLE_TEXT = `1
 
 const TARGET_LANG_OPTIONS: FieldOption[] = [['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语']]
 const AI_SCOPE_OPTIONS: FieldOption[] = [['checked', '已勾选'], ['current', '当前条'], ['all', '全部']]
+const SUBTITLE_LIST_ROW_HEIGHT = 68
+const SUBTITLE_LIST_OVERSCAN = 8
+const SUBTITLE_LIST_VISIBLE_COUNT = 18
 const AI_OPERATION_LABEL: Record<Exclude<SubtitleTextOperation, 'none'>, string> = {
   polish: 'AI 润色',
   translate: 'AI 翻译',
@@ -76,7 +79,7 @@ export function StudioSubtitleWorkbench({
   const [isSaving, setIsSaving] = useState(false)
   const [textProfiles, setTextProfiles] = useState<ApiProfile[]>([])
   const [selectedProfileId, setSelectedProfileId] = useState<number | null>(preferences.text_profile_id)
-  const [targetLanguage, setTargetLanguage] = useState(preferences.subtitle_target_language || 'zh-CN')
+  const [targetLanguage, setTargetLanguage] = useState('zh-CN')
   const [aiScope, setAiScope] = useState<'checked' | 'current' | 'all'>('checked')
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
@@ -85,13 +88,14 @@ export function StudioSubtitleWorkbench({
   const [checkedEntryIndexes, setCheckedEntryIndexes] = useState<number[]>([])
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
   const [showPasteImport, setShowPasteImport] = useState(false)
+  const [listScrollTop, setListScrollTop] = useState(0)
   const autoLoadKeyRef = useRef('')
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
   const selectedEntry = entries[selectedIndex] || null
-  const selectedEntryLines = useMemo(() => splitSubtitleLines(selectedEntry?.text || ''), [selectedEntry?.text])
-  const selectedOriginalText = selectedEntryLines.secondary || selectedEntryLines.primary
-  const selectedTranslationText = selectedEntryLines.secondary ? selectedEntryLines.primary : ''
+  const selectedEntryParts = useMemo(() => splitSubtitleByLanguage(selectedEntry?.text || ''), [selectedEntry?.text])
+  const selectedOriginalText = selectedEntryParts.original
+  const selectedTranslationText = selectedEntryParts.translation
   const invalidCount = useMemo(
     () => entries.filter((entry) => timeToMs(entry.end) <= timeToMs(entry.start)).length,
     [entries],
@@ -145,8 +149,21 @@ export function StudioSubtitleWorkbench({
     () => checkedEntryIndexes.filter((index) => index >= 0 && index < entries.length),
     [checkedEntryIndexes, entries.length],
   )
+  const validCheckedEntryIndexSet = useMemo(() => new Set(validCheckedEntryIndexes), [validCheckedEntryIndexes])
   const allVisibleChecked = filteredEntryIndexes.length > 0
-    && filteredEntryIndexes.every((index) => validCheckedEntryIndexes.includes(index))
+    && filteredEntryIndexes.every((index) => validCheckedEntryIndexSet.has(index))
+  const maxVisibleListStart = Math.max(0, filteredEntryIndexes.length - SUBTITLE_LIST_VISIBLE_COUNT)
+  const visibleListStart = Math.min(
+    maxVisibleListStart,
+    Math.max(0, Math.floor(listScrollTop / SUBTITLE_LIST_ROW_HEIGHT) - SUBTITLE_LIST_OVERSCAN),
+  )
+  const visibleListEnd = Math.min(
+    filteredEntryIndexes.length,
+    visibleListStart + SUBTITLE_LIST_VISIBLE_COUNT + SUBTITLE_LIST_OVERSCAN * 2,
+  )
+  const visibleEntryIndexes = filteredEntryIndexes.slice(visibleListStart, visibleListEnd)
+  const listTopSpacer = visibleListStart * SUBTITLE_LIST_ROW_HEIGHT
+  const listBottomSpacer = Math.max(0, (filteredEntryIndexes.length - visibleListEnd) * SUBTITLE_LIST_ROW_HEIGHT)
 
   useEffect(() => {
     if (!subtitlePath && suggestedSubtitleFile) {
@@ -290,9 +307,11 @@ export function StudioSubtitleWorkbench({
   }
 
   const updateEntry = <K extends keyof SubtitleEntry>(index: number, key: K, value: SubtitleEntry[K]) => {
-    setEntries((current) => normalizeEntries(current.map((entry, itemIndex) => (
-      itemIndex === index ? { ...entry, [key]: value } : entry
-    ))))
+    setEntries((current) => current.map((entry, itemIndex) => {
+      if (itemIndex !== index) return entry
+      const nextEntry = { ...entry, [key]: value }
+      return normalizeEntry(nextEntry, itemIndex, true)
+    }))
   }
 
   const updateSelectedOriginalText = (value: string) => {
@@ -332,8 +351,8 @@ export function StudioSubtitleWorkbench({
   const cleanupEntries = () => {
     const nextEntries = normalizeEntries(entries
       .map((entry) => {
-        const { primary, secondary } = splitSubtitleLines(entry.text)
-        return { ...entry, text: joinSubtitleLines(primary, secondary) }
+        const { original, translation } = splitSubtitleByLanguage(entry.text)
+        return { ...entry, text: joinSubtitleLines(translation, original) }
       })
       .filter((entry) => entry.text.trim()))
     setEntries(nextEntries)
@@ -576,6 +595,9 @@ export function StudioSubtitleWorkbench({
         original_volume: preferences.original_volume,
       })
       syncBackendJob(await automationApi.getJob(selectedJob.id))
+      if (result.output_path) {
+        setLastSavedPath(result.output_path)
+      }
       setNotice({ type: 'success', message: result.message })
       addLog('info', `重新导出完成: ${result.output_path}`)
     } catch (error) {
@@ -592,8 +614,8 @@ export function StudioSubtitleWorkbench({
       <CardContent className="flex h-full min-h-0 flex-col gap-3 p-3">
         {notice && <NoticeBox notice={notice} />}
 
-        <section className="shrink-0 rounded-xl border bg-background/60 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <section className="shrink-0 rounded-xl border bg-background/60 p-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <SectionTitle title="路径与任务选择" description="读取后进入下方校对工作区。" />
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary">{entries.length ? `${entries.length} 条字幕` : '未载入字幕'}</Badge>
@@ -605,15 +627,9 @@ export function StudioSubtitleWorkbench({
             </div>
           </div>
 
-          <div className="mt-2 grid gap-2 xl:grid-cols-[minmax(220px,320px)_minmax(0,1fr)_auto]">
-            <SelectField
-              label="任务队列 / 历史"
-              value={selectedJob?.id || ''}
-              options={jobOptions}
-              onChange={handleSelectJob}
-              placeholder={availableJobs.length ? '选择任务' : '暂无可选任务'}
-            />
-            <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\\项目\\output\\subtitle.ass" onChange={setSubtitlePath} />
+          <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(220px,300px)_minmax(0,1fr)_auto]">
+            <CompactSelect value={selectedJob?.id || ''} options={jobOptions} onChange={handleSelectJob} placeholder={availableJobs.length ? '选择任务' : '暂无可选任务'} />
+            <Input value={subtitlePath} placeholder="字幕文件路径：D:\\项目\\output\\subtitle.ass" onChange={(event) => setSubtitlePath(event.target.value)} />
             <div className="flex items-end gap-2">
               <Button className="h-10" onClick={() => handleParseFile()} disabled={isLoading}>
                 {isLoading ? '读取中…' : '读取路径'}
@@ -629,11 +645,35 @@ export function StudioSubtitleWorkbench({
             </div>
           </div>
 
+          <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(180px,240px)_minmax(0,1fr)_auto]">
+            <Input value={fileName} placeholder="文件名" onChange={(event) => setFileName(event.target.value)} />
+            <Input value={outputPath} placeholder="SRT 输出路径（可选，留空自动保存到当前视频目录）" onChange={(event) => setOutputPath(event.target.value)} />
+            <div className="flex items-end gap-2">
+              <Button className="h-10" onClick={saveSrt} disabled={isSaving || !entries.length}>保存 SRT</Button>
+              <Button variant="outline" className="h-10" onClick={saveAss} disabled={isSaving || !entries.length}>生成 ASS</Button>
+              <Button
+                variant="secondary"
+                className="h-10"
+                onClick={reExport}
+                disabled={isReExporting || !entries.length || !selectedJob?.id || !selectedJobSourceVideo}
+              >
+                {isReExporting ? '合并中…' : '重新合并'}
+              </Button>
+            </div>
+          </div>
+
           {selectedJob && (
-            <div className="mt-2 grid gap-1.5 rounded-lg border border-primary/20 bg-primary/5 p-1.5 text-[11px] text-muted-foreground lg:grid-cols-3">
+            <div className="mt-2 grid gap-1 rounded-lg border border-primary/20 bg-primary/5 p-1.5 text-[11px] text-muted-foreground lg:grid-cols-3">
               <PathRow icon={FileText} label="字幕" path={selectedJobSubtitleFile} emptyText="未找到可编辑字幕" />
               <PathRow icon={Film} label="源视频" path={selectedJobSourceVideo} emptyText="未找到源视频" />
               <PathRow icon={Volume2} label="配音" path={selectedJobVoicePath} emptyText="无配音音轨" />
+            </div>
+          )}
+
+          {lastSavedPath && (
+            <div className="mt-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs">
+              <span className="font-medium text-success">最近完成：</span>
+              <span className="ml-2 break-all text-muted-foreground">{lastSavedPath}</span>
             </div>
           )}
 
@@ -663,7 +703,7 @@ export function StudioSubtitleWorkbench({
           )}
         </section>
 
-        <div className="grid min-h-0 flex-1 gap-3 grid-cols-[250px_minmax(0,1fr)_320px] max-lg:grid-cols-1">
+        <div className="grid min-h-0 flex-1 gap-3 grid-cols-[250px_minmax(0,1fr)_300px] max-lg:grid-cols-1">
           <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60">
             <div className="shrink-0 border-b p-3">
               <div className="flex items-center justify-between gap-2">
@@ -695,12 +735,16 @@ export function StudioSubtitleWorkbench({
                 先在顶部选择路径或任务并读取字幕。
               </div>
             ) : (
-              <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
-                {filteredEntryIndexes.length ? filteredEntryIndexes.map((index) => {
+              <div className="min-h-0 flex-1 overflow-auto p-3" onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}>
+                {filteredEntryIndexes.length ? (
+                  <>
+                    <div style={{ height: listTopSpacer }} />
+                    <div className="space-y-2">
+                      {visibleEntryIndexes.map((index) => {
                   const entry = entries[index]
-                  const lines = splitSubtitleLines(entry.text)
+                  const lines = splitSubtitleByLanguage(entry.text)
                   const isInvalid = timeToMs(entry.end) <= timeToMs(entry.start)
-                  const checked = validCheckedEntryIndexes.includes(index)
+                  const checked = validCheckedEntryIndexSet.has(index)
                   return (
                     <div
                       key={`${entry.index}-${index}`}
@@ -723,13 +767,17 @@ export function StudioSubtitleWorkbench({
                             <span className="text-xs font-medium">#{index + 1}</span>
                             <span className="font-mono text-[10px] opacity-75">{entry.start}</span>
                           </div>
-                          <p className="mt-1 line-clamp-2 text-sm leading-5">{lines.secondary || lines.primary || '空字幕'}</p>
-                          {lines.secondary && <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{lines.primary}</p>}
+                          <p className="mt-1 line-clamp-2 text-sm leading-5">{lines.translation || lines.original || '空字幕'}</p>
+                          {lines.original && <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{lines.original}</p>}
                         </button>
                       </div>
                     </div>
                   )
-                }) : (
+                      })}
+                    </div>
+                    <div style={{ height: listBottomSpacer }} />
+                  </>
+                ) : (
                   <div className="grid min-h-[240px] place-items-center rounded-xl border border-dashed p-4 text-center text-xs text-muted-foreground">
                     没有匹配到字幕条目。
                   </div>
@@ -789,15 +837,14 @@ export function StudioSubtitleWorkbench({
             </div>
           </section>
 
-          <aside className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60 p-3">
-            <div className="mb-3 shrink-0">
+          <aside className="rounded-xl border bg-background/60 p-3">
+            <div className="mb-2 shrink-0">
               <h3 className="text-sm font-medium">操作栏</h3>
-              <p className="mt-1 text-xs text-muted-foreground">AI、保存和重新合并都在这里执行；AI 可按勾选字幕批量处理。</p>
+              <p className="mt-1 text-xs text-muted-foreground">AI 单独处理。</p>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-3 overflow-auto pr-1">
-              <section className="space-y-3 rounded-xl border bg-background p-3">
-                <SectionTitle title="AI 单独处理" description="默认处理左侧已勾选字幕；没有勾选时可切到当前条或全部。" />
+            <div className="space-y-2">
+              <section className="space-y-2 rounded-xl border bg-background p-2.5">
                 <SelectField
                   label="文本 API 配置"
                   value={selectedProfileId ? String(selectedProfileId) : ''}
@@ -808,7 +855,7 @@ export function StudioSubtitleWorkbench({
                 />
                 <SegmentedField label="处理范围" value={aiScope} options={AI_SCOPE_OPTIONS} onChange={(value) => setAiScope(value as 'checked' | 'current' | 'all')} />
                 <SelectField label="翻译目标语言" value={targetLanguage} options={TARGET_LANG_OPTIONS} onChange={handleTargetLanguageChange} />
-                <div className="grid gap-2">
+                <div className="grid gap-1.5">
                   <Button onClick={() => handleAiProcess('translate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Languages className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.translate ? 'AI 翻译中…' : 'AI 翻译'}
@@ -827,43 +874,6 @@ export function StudioSubtitleWorkbench({
                     <Settings2 className="mr-2 size-4" />
                     去配置文本 API
                   </Button>
-                )}
-              </section>
-
-              <section className="space-y-3 rounded-xl border bg-background p-3">
-                <SectionTitle title="当前字幕" description="手动增删和时间轴调整。" />
-                <div className="grid grid-cols-2 gap-2">
-                  <TextField label="开始时间" value={selectedEntry?.start || ''} onChange={(value) => updateEntry(selectedIndex, 'start', value)} />
-                  <TextField label="结束时间" value={selectedEntry?.end || ''} onChange={(value) => updateEntry(selectedIndex, 'end', value)} />
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" onClick={addEntry}>新增字幕</Button>
-                  <Button variant="outline" onClick={() => selectedEntry && removeEntry(selectedIndex)} disabled={!selectedEntry}>删除当前</Button>
-                </div>
-                <Button variant="outline" className="w-full" onClick={cleanupEntries} disabled={!entries.length}>清理空白和无效条目</Button>
-              </section>
-
-              <section className="space-y-3 rounded-xl border bg-background p-3">
-                <SectionTitle title="保存与合并" description="先保存 SRT/ASS，或绑定任务后重新合并导出。" />
-                <TextField label="文件名" value={fileName} onChange={setFileName} />
-                <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动保存到当前视频目录" onChange={setOutputPath} />
-                <div className="grid grid-cols-2 gap-2">
-                  <Button onClick={saveSrt} disabled={isSaving || !entries.length}>保存 SRT</Button>
-                  <Button variant="outline" onClick={saveAss} disabled={isSaving || !entries.length}>生成 ASS</Button>
-                </div>
-                <Button
-                  variant="secondary"
-                  className="w-full"
-                  onClick={reExport}
-                  disabled={isReExporting || !entries.length || !selectedJob?.id || !selectedJobSourceVideo}
-                >
-                  {isReExporting ? '重新合并中…' : '重新合并导出'}
-                </Button>
-                {lastSavedPath && (
-                  <div className="rounded-lg border border-success/30 bg-success/10 p-3">
-                    <div className="text-xs font-medium text-success">最近保存</div>
-                    <p className="mt-1 break-all text-xs text-muted-foreground">{lastSavedPath}</p>
-                  </div>
                 )}
               </section>
             </div>
@@ -888,7 +898,7 @@ function canSave(entries: SubtitleEntry[], invalidCount: number, setNotice: (not
 
 function normalizeEntries(entries: SubtitleEntry[]) {
   return entries
-    .map((entry) => ({ ...entry, text: cleanSubtitleTextForDisplay(entry.text) }))
+    .map((entry, index) => normalizeEntry(entry, index, true))
     .filter((entry) => !isMeaninglessSubtitleText(entry.text))
     .map((entry, index) => ({
       ...entry,
@@ -896,6 +906,17 @@ function normalizeEntries(entries: SubtitleEntry[]) {
       start: entry.start || '00:00:00,000',
       end: entry.end || entry.start || '00:00:00,000',
     }))
+}
+
+function normalizeEntry(entry: SubtitleEntry, index: number, cleanText: boolean) {
+  const text = cleanText ? cleanSubtitleTextForDisplay(entry.text) : String(entry.text || '')
+  return {
+    ...entry,
+    index: index + 1,
+    text,
+    start: entry.start || '00:00:00,000',
+    end: entry.end || entry.start || '00:00:00,000',
+  }
 }
 
 function splitSubtitleLines(text: string) {
@@ -906,8 +927,36 @@ function splitSubtitleLines(text: string) {
     .map((line) => line.trim())
     .filter(Boolean)
   return {
+    all: lines,
     primary: lines[0] || '',
     secondary: lines.slice(1).join('\n'),
+  }
+}
+
+function splitSubtitleByLanguage(text: string) {
+  const lines = splitSubtitleLines(text).all
+  const originalLines: string[] = []
+  const translationLines: string[] = []
+
+  for (const line of lines) {
+    if (isChineseText(line)) {
+      translationLines.push(line)
+    } else {
+      originalLines.push(line)
+    }
+  }
+
+  if (!originalLines.length && !translationLines.length) {
+    return { original: '', translation: '' }
+  }
+
+  if (!translationLines.length && originalLines.length === 1 && isLikelyTranslatedChinese(originalLines[0])) {
+    return { original: '', translation: originalLines[0] }
+  }
+
+  return {
+    original: originalLines.join('\n'),
+    translation: translationLines.join('\n'),
   }
 }
 
@@ -922,8 +971,8 @@ function joinSubtitleLines(primary: string, secondary: string) {
 }
 
 function extractTranslationSourceText(text: string) {
-  const { primary, secondary } = splitSubtitleLines(text)
-  return secondary || primary
+  const { original, translation } = splitSubtitleByLanguage(text)
+  return original || translation
 }
 
 function combineComparedSubtitleText(originalText: string, translatedText: string) {
@@ -932,6 +981,14 @@ function combineComparedSubtitleText(originalText: string, translatedText: strin
   if (!normalizedOriginal) return normalizedTranslated
   if (!normalizedTranslated || normalizedOriginal === normalizedTranslated) return normalizedOriginal
   return `${normalizedTranslated}\n${normalizedOriginal}`
+}
+
+function isChineseText(value: string) {
+  return /[\u3400-\u9fff]/.test(value)
+}
+
+function isLikelyTranslatedChinese(value: string) {
+  return isChineseText(value)
 }
 
 function isMeaninglessSubtitleText(text: string) {
@@ -1126,6 +1183,31 @@ function NoticeBox({ notice }: { notice: CorrectionNotice }) {
       <Icon className="mt-0.5 size-3.5 shrink-0" />
       <span>{notice.message}</span>
     </div>
+  )
+}
+
+function CompactSelect({
+  value,
+  options,
+  onChange,
+  placeholder,
+}: {
+  value: string
+  options: FieldOption[]
+  onChange: (value: string) => void
+  placeholder: string
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none transition-colors focus:border-primary"
+    >
+      {!options.length && <option value="">{placeholder}</option>}
+      {options.map(([optionValue, optionLabel]) => (
+        <option key={optionValue || 'empty'} value={optionValue}>{optionLabel}</option>
+      ))}
+    </select>
   )
 }
 
