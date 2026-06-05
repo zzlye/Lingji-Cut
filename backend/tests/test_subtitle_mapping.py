@@ -30,8 +30,8 @@ class SubtitleMappingTest(unittest.TestCase):
         self.assertEqual([item["end"] for item in mapped], ["00:00:02,000", "00:00:03,000"])
         self.assertEqual([item["text"] for item in mapped], ["第一句", "第二句"])
 
-    def test_map_fewer_lines_merges_timestamp_ranges(self):
-        """AI 返回行数更少时，字幕会覆盖原时间段范围"""
+    def test_map_fewer_lines_distributes_text_without_merging_timestamps(self):
+        """AI 返回行数更少时也必须保留原字幕槽位，避免一条字幕覆盖几十秒"""
         original = [
             {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "a"},
             {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "b"},
@@ -41,10 +41,28 @@ class SubtitleMappingTest(unittest.TestCase):
 
         mapped = map_text_to_timed_entries("上半段\n下半段", original)
 
+        self.assertEqual(len(mapped), 4)
         self.assertEqual(mapped[0]["start"], "00:00:01,000")
-        self.assertEqual(mapped[0]["end"], "00:00:03,000")
-        self.assertEqual(mapped[1]["start"], "00:00:03,000")
-        self.assertEqual(mapped[1]["end"], "00:00:05,000")
+        self.assertEqual(mapped[0]["end"], "00:00:02,000")
+        self.assertEqual(mapped[1]["start"], "00:00:02,000")
+        self.assertEqual(mapped[-1]["end"], "00:00:05,000")
+        self.assertEqual("".join(str(item["text"]) for item in mapped), "上半段下半段")
+
+    def test_map_single_translated_line_keeps_fast_asr_timeline(self):
+        """整段翻译兜底不能把开头多句字幕压成一条长字幕"""
+        original = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:02,220", "text": "This is Minecraft Bedrock Edition,"},
+            {"index": 2, "start": "00:00:02,420", "end": "00:00:04,220", "text": "the version of Minecraft that's available on"},
+            {"index": 3, "start": "00:00:04,220", "end": "00:00:05,500", "text": "all platforms with"},
+            {"index": 4, "start": "00:00:05,500", "end": "00:00:06,940", "text": "some differences to Java."},
+        ]
+
+        mapped = map_text_to_timed_entries("这是《我的世界》基岩版，一个全平台互通但和 Java 版有些不同的版本。", original)
+
+        self.assertEqual(len(mapped), len(original))
+        self.assertEqual([item["start"] for item in mapped], [item["start"] for item in original])
+        self.assertEqual([item["end"] for item in mapped], [item["end"] for item in original])
+        self.assertLessEqual(max(len(str(item["text"])) for item in mapped), 20)
 
     def test_map_more_lines_distributes_text_into_original_slots(self):
         """AI 返回行数更多时，多行文本会分配回原字幕槽位"""

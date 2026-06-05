@@ -5,6 +5,7 @@ import json
 import os
 import asyncio
 import mimetypes
+import re
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -758,6 +759,17 @@ def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[d
     source_count = len(original_entries)
     line_count = len(lines)
 
+    if line_count < source_count:
+        distributed_lines = _distribute_text_to_original_slots(lines, original_entries)
+        for index, entry in enumerate(original_entries, 1):
+            entries.append({
+                "index": index,
+                "start": str(entry.get("start", "00:00:00,000")),
+                "end": str(entry.get("end", "00:00:01,000")),
+                "text": distributed_lines[index - 1] or str(entry.get("text") or ""),
+            })
+        return entries
+
     if line_count <= source_count:
         for index, line in enumerate(lines, 1):
             start_index = int((index - 1) * source_count / line_count)
@@ -780,6 +792,109 @@ def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[d
             "text": "\n".join(lines[start_line:end_line]),
         })
     return entries
+
+
+def _distribute_text_to_original_slots(lines: list[str], original_entries: list[dict]) -> list[str]:
+    """把少行文本拆回原字幕槽位，避免整段翻译兜底破坏本地识别时间轴"""
+    text = _join_processed_lines(lines)
+    if not text:
+        return ["" for _ in original_entries]
+
+    weights = [
+        max(1, len(str(entry.get("text") or "").replace("\\N", " ").strip()))
+        for entry in original_entries
+    ]
+    units = _mapping_text_units(text, len(original_entries))
+    if not units:
+        return ["" for _ in original_entries]
+
+    total_units = len(units)
+    total_weight = max(1, sum(weights))
+    distributed: list[str] = []
+    unit_start = 0
+    elapsed_weight = 0
+    for index, weight in enumerate(weights):
+        elapsed_weight += weight
+        unit_end = total_units if index == len(weights) - 1 else round(total_units * elapsed_weight / total_weight)
+        unit_end = max(unit_start + 1, min(total_units, unit_end))
+        distributed.append(_join_mapping_units(units[unit_start:unit_end]))
+        unit_start = unit_end
+        if unit_start >= total_units:
+            distributed.extend(["" for _ in range(index + 1, len(weights))])
+            break
+    return distributed[:len(original_entries)]
+
+
+def _join_processed_lines(lines: list[str]) -> str:
+    """合并文本 API 整段兜底结果，中文不额外加空格，英文按词保留空格"""
+    text = ""
+    for line in lines:
+        cleaned = " ".join(str(line or "").split())
+        if not cleaned:
+            continue
+        if not text:
+            text = cleaned
+            continue
+        separator = " " if re.match(r"[\w\]]$", text, re.ASCII) and re.match(r"^[\w\[]", cleaned, re.ASCII) else ""
+        text = f"{text}{separator}{cleaned}"
+    return text
+
+
+def _mapping_text_units(text: str, target_count: int) -> list[str]:
+    """生成用于回填时间轴的文本单元，英文优先按词，中文优先按字"""
+    normalized = " ".join(str(text or "").split())
+    tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+    tokens = _attach_mapping_punctuation(tokens)
+    if len(tokens) >= max(2, target_count // 2):
+        return tokens
+    return [char for char in normalized if not char.isspace()]
+
+
+def _attach_mapping_punctuation(tokens: list[str]) -> list[str]:
+    """把标点并到相邻文本单元，避免兜底回填时生成只有标点的字幕"""
+    units: list[str] = []
+    pending_prefix = ""
+    closing_marks = "，。、！？；,.!?;:：)]}）】”’》"
+    opening_marks = "([{（【“‘《"
+    for token in tokens:
+        if not token.strip():
+            continue
+        if token in opening_marks:
+            pending_prefix += token
+            continue
+        if token in closing_marks and units:
+            units[-1] = f"{units[-1]}{token}"
+            continue
+        units.append(f"{pending_prefix}{token}")
+        pending_prefix = ""
+    if pending_prefix and units:
+        units[-1] = f"{units[-1]}{pending_prefix}"
+    return units
+
+
+def _join_mapping_units(units: list[str]) -> str:
+    """合并回填文本单元，中文连续显示，英文单词之间保留空格"""
+    if not units:
+        return ""
+    text = ""
+    for unit in [item.strip() for item in units if item.strip()]:
+        if not text:
+            text = unit
+            continue
+        separator = " " if _mapping_units_need_space(text[-1], unit[0]) else ""
+        text = f"{text}{separator}{unit}"
+    return text.strip()
+
+
+def _mapping_units_need_space(left: str, right: str) -> bool:
+    """判断字幕回填单元之间是否需要空格，避免切碎英文同时不破坏中文显示"""
+    if not left or not right:
+        return False
+    if right in "，。、！？；,.!?;:：)]}）】”’":
+        return False
+    if left in "([{（【“‘":
+        return False
+    return bool(re.match(r"[A-Za-z0-9]", left) and re.match(r"[A-Za-z0-9]", right))
 
 
 def combine_original_and_translated_entries(original_entries: list[dict], translated_entries: list[dict]) -> list[dict]:
