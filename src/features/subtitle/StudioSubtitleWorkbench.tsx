@@ -84,6 +84,7 @@ export function StudioSubtitleWorkbench({
   const [entryKeyword, setEntryKeyword] = useState('')
   const [checkedEntryIndexes, setCheckedEntryIndexes] = useState<number[]>([])
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
+  const [showPasteImport, setShowPasteImport] = useState(false)
   const autoLoadKeyRef = useRef('')
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
@@ -587,56 +588,59 @@ export function StudioSubtitleWorkbench({
   }
 
   return (
-    <Card className="glass">
-      <CardContent className="space-y-4 p-4">
+    <Card className="glass h-full min-h-0 py-0">
+      <CardContent className="flex h-full min-h-0 flex-col gap-3 p-3">
         {notice && <NoticeBox notice={notice} />}
 
-        <section className="rounded-xl border bg-background/60 p-4">
-          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,460px)]">
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <SectionTitle title="路径与任务选择" description="先从任务队列/历史选择，或直接填写字幕文件路径；读取后下方列表会加载可校对字幕。" />
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="secondary">{entries.length ? `${entries.length} 条字幕` : '未载入字幕'}</Badge>
-                  <Badge variant={validCheckedEntryIndexes.length ? 'default' : 'outline'}>已勾选 {validCheckedEntryIndexes.length}</Badge>
-                  {invalidCount > 0 && <Badge variant="destructive">异常时间 {invalidCount}</Badge>}
-                </div>
-              </div>
-              <div className="grid gap-3 xl:grid-cols-[minmax(220px,360px)_minmax(0,1fr)_auto]">
-                <SelectField
-                  label="任务队列 / 历史"
-                  value={selectedJob?.id || ''}
-                  options={jobOptions}
-                  onChange={handleSelectJob}
-                  placeholder={availableJobs.length ? '选择任务' : '暂无可选任务'}
-                />
-                <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\\项目\\output\\subtitle.ass" onChange={setSubtitlePath} />
-                <div className="flex items-end gap-2">
-                  <Button className="h-10" onClick={() => handleParseFile()} disabled={isLoading}>
-                    {isLoading ? '读取中…' : '读取路径'}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="h-10"
-                    onClick={() => handleParseFile(selectedJobSubtitleCandidates)}
-                    disabled={!selectedJobSubtitleCandidates.length || isLoading}
-                  >
-                    载入任务
-                  </Button>
-                </div>
-              </div>
-              {selectedJob && (
-                <div className="grid gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-muted-foreground lg:grid-cols-3">
-                  <PathRow icon={FileText} label="字幕" path={selectedJobSubtitleFile} emptyText="未找到可编辑字幕" />
-                  <PathRow icon={Film} label="源视频" path={selectedJobSourceVideo} emptyText="未找到源视频" />
-                  <PathRow icon={Volume2} label="配音" path={selectedJobVoicePath} emptyText="无配音音轨" />
-                </div>
-              )}
+        <section className="shrink-0 rounded-xl border bg-background/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SectionTitle title="路径与任务选择" description="读取后进入下方校对工作区。" />
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">{entries.length ? `${entries.length} 条字幕` : '未载入字幕'}</Badge>
+              <Badge variant={validCheckedEntryIndexes.length ? 'default' : 'outline'}>已勾选 {validCheckedEntryIndexes.length}</Badge>
+              {invalidCount > 0 && <Badge variant="destructive">异常时间 {invalidCount}</Badge>}
+              <Button variant="outline" size="sm" onClick={() => setShowPasteImport((value) => !value)}>
+                {showPasteImport ? '收起粘贴导入' : '粘贴导入'}
+              </Button>
             </div>
+          </div>
 
-            <div className="rounded-xl border bg-background p-3">
+          <div className="mt-2 grid gap-2 xl:grid-cols-[minmax(220px,320px)_minmax(0,1fr)_auto]">
+            <SelectField
+              label="任务队列 / 历史"
+              value={selectedJob?.id || ''}
+              options={jobOptions}
+              onChange={handleSelectJob}
+              placeholder={availableJobs.length ? '选择任务' : '暂无可选任务'}
+            />
+            <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\\项目\\output\\subtitle.ass" onChange={setSubtitlePath} />
+            <div className="flex items-end gap-2">
+              <Button className="h-10" onClick={() => handleParseFile()} disabled={isLoading}>
+                {isLoading ? '读取中…' : '读取路径'}
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10"
+                onClick={() => handleParseFile(selectedJobSubtitleCandidates)}
+                disabled={!selectedJobSubtitleCandidates.length || isLoading}
+              >
+                载入任务
+              </Button>
+            </div>
+          </div>
+
+          {selectedJob && (
+            <div className="mt-2 grid gap-1.5 rounded-lg border border-primary/20 bg-primary/5 p-1.5 text-[11px] text-muted-foreground lg:grid-cols-3">
+              <PathRow icon={FileText} label="字幕" path={selectedJobSubtitleFile} emptyText="未找到可编辑字幕" />
+              <PathRow icon={Film} label="源视频" path={selectedJobSourceVideo} emptyText="未找到源视频" />
+              <PathRow icon={Volume2} label="配音" path={selectedJobVoicePath} emptyText="无配音音轨" />
+            </div>
+          )}
+
+          {showPasteImport && (
+            <div className="mt-2 rounded-xl border bg-background p-2.5">
               <div className="flex items-center justify-between gap-3">
-                <SectionTitle title="粘贴导入" description="辅助入口：粘贴 SRT / VTT 文本后解析到列表。" />
+                <SectionTitle title="粘贴导入" description="辅助入口：粘贴文本后解析。" />
                 <select
                   value={pasteFormat}
                   onChange={(event) => setPasteFormat(event.target.value as 'srt' | 'vtt')}
@@ -649,19 +653,19 @@ export function StudioSubtitleWorkbench({
               <textarea
                 value={pasteText}
                 onChange={(event) => setPasteText(event.target.value)}
-                rows={4}
-                className="mt-3 w-full resize-y rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none transition-colors focus:border-primary"
+                rows={3}
+                className="mt-2 w-full resize-none rounded-md border bg-background px-3 py-2 text-xs leading-5 outline-none transition-colors focus:border-primary"
               />
               <Button variant="outline" size="sm" className="mt-2 w-full" onClick={handleParseText} disabled={isLoading}>
                 解析粘贴文本
               </Button>
             </div>
-          </div>
+          )}
         </section>
 
-        <div className="grid min-h-[720px] gap-4 2xl:grid-cols-[260px_minmax(0,1fr)_340px]">
-          <section className="rounded-xl border bg-background/60">
-            <div className="border-b p-3">
+        <div className="grid min-h-0 flex-1 gap-3 grid-cols-[250px_minmax(0,1fr)_320px] max-lg:grid-cols-1">
+          <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60">
+            <div className="shrink-0 border-b p-3">
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <h3 className="text-sm font-medium">字幕列表</h3>
@@ -687,11 +691,11 @@ export function StudioSubtitleWorkbench({
             </div>
 
             {entries.length === 0 ? (
-              <div className="grid min-h-[520px] place-items-center p-4 text-center text-xs text-muted-foreground">
+              <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-xs text-muted-foreground">
                 先在顶部选择路径或任务并读取字幕。
               </div>
             ) : (
-              <div className="max-h-[650px] space-y-2 overflow-auto p-3">
+              <div className="min-h-0 flex-1 space-y-2 overflow-auto p-3">
                 {filteredEntryIndexes.length ? filteredEntryIndexes.map((index) => {
                   const entry = entries[index]
                   const lines = splitSubtitleLines(entry.text)
@@ -734,34 +738,35 @@ export function StudioSubtitleWorkbench({
             )}
           </section>
 
-          <section className="grid gap-4">
-            <div className="rounded-xl border bg-background/60 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-medium">原文</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">上方固定编辑原文；如果还没翻译，当前字幕会先作为原文显示。</p>
+          <section className="grid min-h-0 grid-rows-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-3">
+            <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60 p-3">
+              <div className="shrink-0">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium">原文</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">编辑原视频识别文本。</p>
+                  </div>
+                  {selectedEntry && (
+                    <Badge variant="outline">
+                      第 {selectedIndex + 1} 条 · {selectedEntry.start} - {selectedEntry.end}
+                    </Badge>
+                  )}
                 </div>
-                {selectedEntry && (
-                  <Badge variant="outline">
-                    第 {selectedIndex + 1} 条 · {selectedEntry.start} - {selectedEntry.end}
-                  </Badge>
-                )}
               </div>
               <textarea
                 value={selectedOriginalText}
                 onChange={(event) => updateSelectedOriginalText(event.target.value)}
-                rows={8}
                 disabled={!selectedEntry}
-                className="mt-3 min-h-[190px] w-full resize-y rounded-lg border bg-background px-4 py-3 text-base leading-7 outline-none transition-colors focus:border-primary disabled:opacity-50"
+                className="mt-3 min-h-0 flex-1 resize-none rounded-lg border bg-background px-4 py-3 text-base leading-7 outline-none transition-colors focus:border-primary disabled:opacity-50"
                 placeholder="选择左侧字幕后编辑原文"
               />
             </div>
 
-            <div className="rounded-xl border bg-background/60 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60 p-3">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-medium">译文</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">AI 翻译会写到这里；保存/生成时会按“译文 + 原文”输出双语字幕。</p>
+                  <p className="mt-1 text-xs text-muted-foreground">保存时按“译文 + 原文”输出双语字幕。</p>
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => moveSelection(-1)} disabled={selectedVisiblePosition <= 0}>
@@ -777,21 +782,20 @@ export function StudioSubtitleWorkbench({
               <textarea
                 value={selectedTranslationText}
                 onChange={(event) => updateSelectedTranslationText(event.target.value)}
-                rows={12}
                 disabled={!selectedEntry}
-                className="mt-3 min-h-[320px] w-full resize-y rounded-lg border bg-background px-4 py-3 text-base leading-7 outline-none transition-colors focus:border-primary disabled:opacity-50"
+                className="mt-3 min-h-0 flex-1 resize-none rounded-lg border bg-background px-4 py-3 text-base leading-7 outline-none transition-colors focus:border-primary disabled:opacity-50"
                 placeholder="这里编辑翻译后的字幕"
               />
             </div>
           </section>
 
-          <aside className="rounded-xl border bg-background/60 p-4">
-            <div className="mb-4">
+          <aside className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-background/60 p-3">
+            <div className="mb-3 shrink-0">
               <h3 className="text-sm font-medium">操作栏</h3>
               <p className="mt-1 text-xs text-muted-foreground">AI、保存和重新合并都在这里执行；AI 可按勾选字幕批量处理。</p>
             </div>
 
-            <div className="space-y-5">
+            <div className="min-h-0 flex-1 space-y-3 overflow-auto pr-1">
               <section className="space-y-3 rounded-xl border bg-background p-3">
                 <SectionTitle title="AI 单独处理" description="默认处理左侧已勾选字幕；没有勾选时可切到当前条或全部。" />
                 <SelectField
@@ -1137,12 +1141,12 @@ function PathRow({
   emptyText: string
 }) {
   return (
-    <div>
-      <div className="flex items-center gap-1.5 text-foreground">
-        <Icon className="size-3.5" />
-        <span>{label}</span>
+    <div className="min-w-0 rounded-md bg-background/40 px-2 py-1">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Icon className="size-3.5 shrink-0 text-foreground" />
+        <span className="shrink-0 text-foreground">{label}</span>
+        <span className="truncate" title={path || emptyText}>{path || emptyText}</span>
       </div>
-      <p className="mt-1 break-all">{path || emptyText}</p>
     </div>
   )
 }

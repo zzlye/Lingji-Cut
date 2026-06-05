@@ -29,21 +29,16 @@ export function SubtitleWorkbenchPage() {
   }, [selectedJob?.id, setSubtitleJobId, subtitleJobId])
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5 p-6">
-      <section className="glass rounded-2xl border p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="space-y-2">
+    <div className="flex h-full min-h-0 flex-col gap-3 p-3">
+      <section className="glass shrink-0 rounded-2xl border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm font-medium text-primary">
               <Captions className="size-4" />
               独立字幕调整页面
             </div>
-            <h1 className="text-2xl font-semibold tracking-tight">字幕校对、AI 处理、单独导出都在这里完成</h1>
-            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-              这里不绑定工作台流程。你可以单独载入字幕文件，手动逐条校对，也可以只做 AI 翻译、AI 润色或生成文案，再单独保存为 SRT 或 ASS。
-            </p>
-            <p className="text-xs text-muted-foreground">
-              现在也可以直接从任务队列或历史记录选一个任务，把字幕拉进来继续改，改完后重新合并导出。
-            </p>
+            <h1 className="mt-1 truncate text-lg font-semibold tracking-tight">字幕校对、AI 处理、单独导出都在这里完成</h1>
+            <p className="mt-1 text-xs text-muted-foreground">从任务队列或历史记录选任务，校对后可保存字幕并重新合并导出。</p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant="secondary">
@@ -59,13 +54,15 @@ export function SubtitleWorkbenchPage() {
         </div>
       </section>
 
-      <StudioSubtitleWorkbench
-        availableJobs={selectableJobs}
-        selectedJob={selectedJob}
-        onSelectJob={setSubtitleJobId}
-        suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
-        onOpenTextSettings={() => openSettings('api')}
-      />
+      <div className="min-h-0 flex-1">
+        <StudioSubtitleWorkbench
+          availableJobs={selectableJobs}
+          selectedJob={selectedJob}
+          onSelectJob={setSubtitleJobId}
+          suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
+          onOpenTextSettings={() => openSettings('api')}
+        />
+      </div>
     </div>
   )
 }
