@@ -16,6 +16,10 @@ VTT_TAG_RE = re.compile(r"</?[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
 MIN_VTT_CUE_DURATION_MS = 250
 ASS_OVERRIDE_TAG_RE = re.compile(r"\{[^}]*\}")
+LEADING_PUNCTUATION_RE = re.compile(r"^[，。、！？；：,.!?;:…]+")
+PUNCTUATION_ONLY_RE = re.compile(r"^[\s，。、！？；：,.!?;:…]+$")
+MEANINGFUL_CHAR_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+DISALLOWED_SUBTITLE_PUNCTUATION_RE = re.compile(r"\.{3,}|…+|[，。,.]")
 
 
 class SubtitleEngine:
@@ -112,8 +116,8 @@ class SubtitleEngine:
         """将字幕条目转换为标准 SRT 文本"""
         blocks: list[str] = []
         for index, entry in enumerate(entries, 1):
-            text = str(entry.get("text") or "").replace("\\N", "\n").strip()
-            if not text:
+            text = self.clean_subtitle_text_for_output(str(entry.get("text") or "").replace("\\N", "\n"))
+            if not text or self.is_meaningless_subtitle_text(text):
                 continue
             start = self.normalize_srt_time(str(entry.get("start") or "00:00:00,000"))
             end = self.normalize_srt_time(str(entry.get("end") or start))
@@ -165,12 +169,15 @@ class SubtitleEngine:
             text_lines = self._normalize_vtt_text_lines(lines[timing_index + 1:]) if is_vtt else lines[timing_index + 1:]
             if not text_lines:
                 continue
+            text = self._join_vtt_text_lines(text_lines) if is_vtt else "\n".join(text_lines).strip()
+            if self.is_meaningless_subtitle_text(text):
+                continue
 
             entries.append({
                 "index": len(entries) + 1,
                 "start": self.normalize_srt_time(start_raw),
                 "end": self.normalize_srt_time(end_raw),
-                "text": self._join_vtt_text_lines(text_lines) if is_vtt else "\n".join(text_lines).strip(),
+                "text": text,
             })
         return self._dedupe_vtt_rolling_entries(entries) if is_vtt else entries
 
@@ -217,7 +224,7 @@ class SubtitleEngine:
                 continue
 
             text = self._remove_rolling_prefix(text, previous_text)
-            if not text:
+            if not text or self.is_meaningless_subtitle_text(text):
                 continue
 
             next_entry = dict(entry)
@@ -375,10 +382,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         max_chars = self._max_display_chars(preset)
         normalized_entries: list[dict] = []
         for entry in entries:
-            text = WHITESPACE_RE.sub(" ", str(entry.get("text") or "").replace("\\N", " ").replace("\n", " ")).strip()
-            if not text:
+            text = self.clean_subtitle_text_for_output(str(entry.get("text") or ""))
+            text = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
+            if not text or self.is_meaningless_subtitle_text(text):
                 continue
             parts = self._split_subtitle_text(text, max_chars)
+            if not parts:
+                continue
             start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
             end_ms = self._time_to_milliseconds(str(entry.get("end") or "00:00:00,000"))
             if end_ms <= start_ms:
@@ -431,9 +441,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     def _dialogue_lines(self, text: str) -> list[str]:
         """按显式换行拆字幕行，并清理每行内部空白"""
         return [
-            WHITESPACE_RE.sub(" ", line).strip()
+            self.clean_subtitle_text_for_output(WHITESPACE_RE.sub(" ", line))
             for line in str(text or "").replace("\\N", "\n").splitlines()
-            if WHITESPACE_RE.sub(" ", line).strip()
+            if self.clean_subtitle_text_for_output(WHITESPACE_RE.sub(" ", line))
+            and not self.is_meaningless_subtitle_text(self.clean_subtitle_text_for_output(WHITESPACE_RE.sub(" ", line)))
         ]
 
     def _double_line_text(self, lines: list[str], max_chars: int) -> tuple[str, str]:
@@ -453,31 +464,100 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     def _split_subtitle_text(self, text: str, max_chars: int) -> list[str]:
         """按显示宽度拆字幕文本，优先在标点或空格处断开"""
-        if len(text) <= max_chars:
-            return [text]
+        cleaned = WHITESPACE_RE.sub(" ", self.clean_subtitle_text_for_output(text)).strip()
+        if not cleaned:
+            return []
+        if self.is_meaningless_subtitle_text(cleaned):
+            return []
+        if len(cleaned) <= max_chars:
+            return [cleaned]
 
         lines: list[str] = []
-        remaining = text
-        break_chars = "，。、！？；,.!?; "
+        remaining = cleaned
+        break_chars = "，。、！？；：,.!?;:… "
         while len(remaining) > max_chars:
-            candidates = [(remaining.rfind(char, 0, max_chars + 1), char) for char in break_chars]
-            split_at, split_char = max(candidates, key=lambda item: item[0], default=(-1, ""))
-            if split_at < max_chars // 2:
-                line_end = max_chars
-                next_start = max_chars
-            elif split_char == " ":
-                line_end = split_at
-                next_start = split_at + 1
-            else:
-                line_end = split_at + 1
-                next_start = split_at + 1
-            line = remaining[:line_end].strip()
+            split_at = self._preferred_subtitle_split_at(remaining, max_chars, break_chars)
+            line = remaining[:split_at].strip()
             if line:
                 lines.append(line)
-            remaining = remaining[next_start:].strip()
+            remaining = remaining[split_at:].strip()
         if remaining:
             lines.append(remaining)
-        return lines
+        return self._merge_invalid_subtitle_parts(lines)
+
+    def _preferred_subtitle_split_at(self, text: str, max_chars: int, break_chars: str) -> int:
+        """优先在靠近目标宽度的标点或空格处分句，减少硬切导致的断句问题"""
+        search_start = max(1, max_chars // 2)
+        for index in range(max_chars, search_start - 1, -1):
+            char = text[index - 1]
+            if char not in break_chars:
+                continue
+            return index - 1 if char == " " else index
+        return max_chars
+
+    def _merge_invalid_subtitle_parts(self, parts: list[str]) -> list[str]:
+        """合并纯标点碎片和单字尾巴，避免生成无意义字幕条目"""
+        merged: list[str] = []
+        for raw_part in parts:
+            part = raw_part.strip()
+            if not part:
+                continue
+
+            leading = LEADING_PUNCTUATION_RE.match(part)
+            if merged and leading:
+                punctuation = leading.group(0)
+                merged[-1] = f"{merged[-1]}{punctuation}"
+                part = part[len(punctuation):].strip()
+                if not part:
+                    continue
+
+            if merged and self._should_merge_fragment(part):
+                merged[-1] = self._join_subtitle_fragments(merged[-1], part)
+                continue
+            merged.append(part)
+
+        if len(merged) >= 2 and self._should_merge_fragment(merged[0]):
+            merged[1] = self._join_subtitle_fragments(merged[0], merged[1])
+            merged = merged[1:]
+        return [part for part in merged if not self.is_meaningless_subtitle_text(part)]
+
+    def is_meaningless_subtitle_text(self, text: str) -> bool:
+        """判断字幕是否只有逗号、句号、省略号等无信息标点"""
+        return bool(PUNCTUATION_ONLY_RE.fullmatch(str(text or "").strip()))
+
+    def clean_subtitle_text_for_output(self, text: str) -> str:
+        """输出字幕前移除用户不需要的逗号、句号和省略号"""
+        normalized = DISALLOWED_SUBTITLE_PUNCTUATION_RE.sub("", str(text or "").replace("\\N", "\n"))
+        lines = [
+            WHITESPACE_RE.sub(" ", line).strip()
+            for line in normalized.splitlines()
+            if WHITESPACE_RE.sub(" ", line).strip()
+        ]
+        return "\n".join(lines).strip()
+
+    def _should_merge_fragment(self, text: str) -> bool:
+        """判断碎片是否需要并回前后文，重点处理纯标点和单个有效字"""
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return True
+        if PUNCTUATION_ONLY_RE.fullmatch(cleaned):
+            return True
+        return self._meaningful_char_count(cleaned) <= 1
+
+    def _meaningful_char_count(self, text: str) -> int:
+        """统计真正承载信息的字符数，用来识别无意义碎片"""
+        return len(MEANINGFUL_CHAR_RE.findall(str(text or "")))
+
+    def _join_subtitle_fragments(self, left: str, right: str) -> str:
+        """把被拆开的字幕碎片重新拼回一句，英文单词之间保留必要空格"""
+        left = str(left or "").strip()
+        right = str(right or "").strip()
+        if not left:
+            return right
+        if not right:
+            return left
+        separator = " " if self._needs_word_separator(left[-1], right[0]) else ""
+        return f"{left}{separator}{right}".strip()
 
     def _milliseconds_to_srt_time(self, milliseconds: int) -> str:
         """把毫秒转换成 SRT 时间码"""

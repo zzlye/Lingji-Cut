@@ -3,8 +3,9 @@
 import { useState } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
-  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight,
+  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -16,6 +17,7 @@ import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
+import { videoApi } from '@/lib/api'
 import { useParseVideo } from '@/hooks/useParseVideo'
 import { useAutoRun } from '@/hooks/useAutoRun'
 import { useVideoStore } from '@/stores/videoStore'
@@ -210,6 +212,23 @@ function PipelineStepper({ job }: { job?: AutomationJob }) {
 
 /** 视频信息卡 */
 function VideoInfoCard({ video }: { video: VideoParseResult }) {
+  const [isDownloadingCover, setIsDownloadingCover] = useState(false)
+  const [lastCoverPath, setLastCoverPath] = useState('')
+
+  const handleDownloadCover = async () => {
+    if (isDownloadingCover || !video.thumbnail_url) return
+    setIsDownloadingCover(true)
+    try {
+      const result = await videoApi.downloadThumbnail(video.id)
+      setLastCoverPath(result.output_path)
+      toast.success('封面已保存到当前视频目录')
+    } catch (error) {
+      toast.error(`封面下载失败：${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsDownloadingCover(false)
+    }
+  }
+
   return (
     <Card>
       <CardContent className="flex gap-4 pt-6">
@@ -226,6 +245,22 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
             <Badge variant="outline">{video.formats.length} 个清晰度</Badge>
             <Badge variant="outline">{video.subtitles.length} 条字幕轨</Badge>
           </div>
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDownloadCover}
+              disabled={isDownloadingCover || !video.thumbnail_url}
+            >
+              <Download className="mr-1.5 size-3.5" />
+              {isDownloadingCover ? '保存封面中…' : '手动下载封面'}
+            </Button>
+          </div>
+          {lastCoverPath && (
+            <p className="break-all text-[11px] text-muted-foreground">
+              封面已保存：{lastCoverPath}
+            </p>
+          )}
         </div>
       </CardContent>
     </Card>

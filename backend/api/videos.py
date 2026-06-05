@@ -4,6 +4,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import json
+import os
 
 from pydantic import BaseModel
 from typing import Optional
@@ -40,6 +41,18 @@ class DownloadRequest(BaseModel):
     video_id: int
     format_id: Optional[str] = None
     output_format: str = "mp4"
+
+
+class ThumbnailDownloadRequest(BaseModel):
+    """手动下载封面请求"""
+    video_id: int
+    file_name: Optional[str] = None
+
+
+class ThumbnailDownloadResponse(BaseModel):
+    """手动下载封面响应"""
+    message: str
+    output_path: str
 
 
 @router.post("/parse", response_model=ParseResponse)
@@ -151,3 +164,38 @@ def download_video(request: DownloadRequest, db: Session = Depends(get_db)):
         task.error_message = str(exc)
         db.commit()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/download-thumbnail", response_model=ThumbnailDownloadResponse)
+def download_thumbnail(request: ThumbnailDownloadRequest, db: Session = Depends(get_db)):
+    """按当前解析视频信息把封面下载到该视频的独立工作目录"""
+    video = db.query(VideoSource).filter(VideoSource.id == request.video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="视频记录不存在，请先解析视频")
+    if not video.thumbnail_url:
+        raise HTTPException(status_code=400, detail="当前视频没有可下载的封面地址")
+
+    workspace_paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+    raw_file_name = str(request.file_name or "").strip()
+    cover_name = raw_file_name or f"{_safe_cover_base_name(video.title or video.video_id or 'thumbnail')}_cover"
+
+    try:
+        output_path = Downloader().download_thumbnail(
+            thumbnail_url=video.thumbnail_url,
+            output_dir=workspace_paths["downloads_dir"],
+            file_name=cover_name,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return ThumbnailDownloadResponse(
+        message="封面下载完成",
+        output_path=output_path,
+    )
+
+
+def _safe_cover_base_name(value: str) -> str:
+    """把视频标题转换成封面文件名片段，避免非法字符导致保存失败"""
+    safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(value or "").strip())
+    safe_name = safe_name.strip("._") or "thumbnail"
+    return os.path.splitext(safe_name)[0]

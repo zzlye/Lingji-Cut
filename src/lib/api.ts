@@ -44,6 +44,13 @@ export const videoApi = {
       method: 'POST',
       body: JSON.stringify({ video_id: videoId, format_id: formatId }),
     }),
+
+  /** 手动下载视频封面 */
+  downloadThumbnail: (videoId: number, fileName?: string) =>
+    request<{ message: string; output_path: string }>('/videos/download-thumbnail', {
+      method: 'POST',
+      body: JSON.stringify({ video_id: videoId, file_name: fileName }),
+    }),
 }
 
 /** 画面处理 API */

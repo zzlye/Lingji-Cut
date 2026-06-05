@@ -18,6 +18,8 @@ interface VideoInfoCardProps {
  */
 export function VideoInfoCard({ video }: VideoInfoCardProps) {
   const [isDownloading, setIsDownloading] = useState(false)
+  const [isDownloadingCover, setIsDownloadingCover] = useState(false)
+  const [lastCoverPath, setLastCoverPath] = useState('')
   const { addTask, addLog } = useTaskStore()
 
   /** 格式化时长 */
@@ -55,6 +57,22 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
       addLog('error', `下载失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setIsDownloading(false)
+    }
+  }
+
+  /** 手动下载封面 */
+  const handleDownloadCover = async () => {
+    if (isDownloadingCover || !video.thumbnail_url) return
+
+    setIsDownloadingCover(true)
+    try {
+      const result = await videoApi.downloadThumbnail(video.id)
+      setLastCoverPath(result.output_path)
+      addLog('info', `封面已保存: ${result.output_path}`)
+    } catch (error) {
+      addLog('error', `封面下载失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsDownloadingCover(false)
     }
   }
 
@@ -136,13 +154,27 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
         )}
 
         {/* 下载按钮 */}
-        <button
-          onClick={handleDownload}
-          disabled={isDownloading}
-          className="w-full h-10 bg-primary text-primary-foreground rounded-md font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-        >
-          {isDownloading ? '下载中...' : '下载视频'}
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={handleDownload}
+            disabled={isDownloading}
+            className="h-10 rounded-md bg-primary font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isDownloading ? '下载中...' : '下载视频'}
+          </button>
+          <button
+            onClick={handleDownloadCover}
+            disabled={isDownloadingCover || !video.thumbnail_url}
+            className="h-10 rounded-md border border-border bg-background font-medium transition-colors hover:bg-background/80 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isDownloadingCover ? '保存中...' : '下载封面'}
+          </button>
+        </div>
+        {lastCoverPath && (
+          <p className="text-xs break-all text-foreground-muted">
+            封面已保存到：{lastCoverPath}
+          </p>
+        )}
       </div>
     </div>
   )

@@ -6,6 +6,9 @@ import re
 import json
 import subprocess
 import time
+import mimetypes
+import urllib.request
+from urllib.parse import urlparse
 from typing import Optional, Callable
 from ..utils import get_logger
 from .paths import ensure_project_dirs
@@ -340,3 +343,68 @@ class Downloader:
         finally:
             if process:
                 unregister_process(process)
+
+    def download_thumbnail(
+        self,
+        thumbnail_url: str,
+        output_dir: Optional[str] = None,
+        file_name: Optional[str] = None,
+    ) -> str:
+        """下载视频封面到本地，供用户手动保存缩略图素材"""
+        if not thumbnail_url or not str(thumbnail_url).strip():
+            raise ValueError("封面地址不能为空")
+
+        if output_dir is None:
+            output_dir = ensure_project_dirs()["downloads_dir"]
+        os.makedirs(output_dir, exist_ok=True)
+
+        request = urllib.request.Request(
+            str(thumbnail_url).strip(),
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read()
+                content_type = ""
+                if hasattr(response.headers, "get_content_type"):
+                    content_type = response.headers.get_content_type() or ""
+                else:
+                    content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+        except Exception as exc:
+            raise RuntimeError(f"封面下载失败: {exc}") from exc
+
+        if not payload:
+            raise RuntimeError("封面下载失败：返回内容为空")
+
+        extension = self._guess_thumbnail_extension(str(thumbnail_url), content_type)
+        output_name = self._safe_thumbnail_file_name(file_name or "thumbnail", extension)
+        output_path = os.path.join(output_dir, output_name)
+        with open(output_path, "wb") as file:
+            file.write(payload)
+
+        logger.info(f"封面下载完成: {output_path}")
+        return output_path
+
+    def _guess_thumbnail_extension(self, thumbnail_url: str, content_type: str) -> str:
+        """优先按响应类型判断封面后缀，避免 WebP/JPEG 保存错扩展名"""
+        guessed = mimetypes.guess_extension(str(content_type or "").strip(), strict=False)
+        if guessed:
+            if guessed == ".jpe":
+                return ".jpg"
+            return guessed
+
+        path = urlparse(str(thumbnail_url or "")).path
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            return suffix
+        return ".jpg"
+
+    def _safe_thumbnail_file_name(self, file_name: str, extension: str) -> str:
+        """把标题整理成安全文件名，并补齐封面后缀"""
+        safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(file_name or "").strip())
+        safe_name = safe_name.strip("._") or "thumbnail"
+        base_name, current_ext = os.path.splitext(safe_name)
+        if current_ext.lower() != extension.lower():
+            safe_name = f"{base_name or 'thumbnail'}{extension}"
+        return safe_name

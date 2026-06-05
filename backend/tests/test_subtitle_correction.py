@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -323,14 +324,47 @@ Language: ja
     def test_normalize_entries_for_display_uses_text_weighted_timing(self):
         """拆分字幕按文字长度分配时长，避免短句和长句被平均切分导致时间轴偏移"""
         entries = SubtitleEngine().normalize_entries_for_display(
-            [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "这是一个非常长的字幕前半段内容需要完整保留，短句。"}],
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "这是一个非常长的字幕前半段内容需要完整保留；短句还需要继续补充说明"}],
             {"font_size": 48, "line_mode": "single"},
         )
 
         self.assertEqual(len(entries), 2)
-        self.assertTrue(entries[0]["text"].endswith("，"))
-        self.assertGreater(entries[0]["end"], "00:00:03,000")
+        self.assertTrue(entries[0]["text"].endswith("；"))
+        self.assertGreater(entries[0]["end"], "00:00:02,500")
         self.assertEqual(entries[-1]["end"], "00:00:04,000")
+
+    def test_split_subtitle_text_does_not_leave_punctuation_only_or_single_char_fragments(self):
+        """字幕切分不能留下纯标点条目，也不能把最后一个有效字单独切成一条"""
+        parts = SubtitleEngine()._split_subtitle_text(
+            "这是一段比较长的字幕内容，需要继续说明......最后不会单独剩下啊。",
+            12,
+        )
+
+        self.assertGreater(len(parts), 1)
+        self.assertFalse(any(re.fullmatch(r"[\s，。、！？；：,.!?;:…]+", part) for part in parts))
+        self.assertFalse(any(len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", part)) == 1 for part in parts))
+
+    def test_normalize_entries_for_display_drops_punctuation_only_entries(self):
+        """显示字幕会丢弃只有逗号、句号或省略号的无意义条目"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [
+                {"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "，"},
+                {"index": 2, "start": "00:00:01,000", "end": "00:00:02,000", "text": "..."},
+                {"index": 3, "start": "00:00:02,000", "end": "00:00:03,000", "text": "有效字幕"},
+            ],
+            {"font_size": 48, "line_mode": "single"},
+        )
+
+        self.assertEqual([entry["text"] for entry in entries], ["有效字幕"])
+
+    def test_output_subtitle_text_removes_comma_period_and_ellipsis(self):
+        """输出字幕正文会移除逗号、句号和省略号"""
+        engine = SubtitleEngine()
+
+        text = engine.clean_subtitle_text_for_output("Hello, world...\\N这是中文，保留文字。")
+
+        self.assertEqual(text, "Hello world\n这是中文保留文字")
+        self.assertNotRegex(text, r"[，。,.]|\.{3,}|…")
 
     def test_process_subtitle_entries_keeps_original_timeline(self):
         """字幕条目 AI 处理接口返回后仍保持原始时间轴"""

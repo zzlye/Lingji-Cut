@@ -226,8 +226,8 @@ def _normalize_correction_entries(engine: SubtitleEngine, entries: list[Subtitle
     """清理前端提交的字幕条目，保证时间码和序号稳定"""
     normalized: list[dict] = []
     for item in entries:
-        text = item.text.replace("\\N", "\n").strip()
-        if not text:
+        text = engine.clean_subtitle_text_for_output(item.text)
+        if not text or engine.is_meaningless_subtitle_text(text):
             continue
         start = engine.normalize_srt_time(item.start)
         end = engine.normalize_srt_time(item.end)

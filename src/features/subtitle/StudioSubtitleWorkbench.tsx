@@ -1,8 +1,8 @@
 // src/features/subtitle/StudioSubtitleWorkbench.tsx
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 润色/翻译/生成，并保留时间轴
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, Captions, FileText, Film, History, Languages, ListChecks, Settings2, Sparkles, Volume2, Wand2 } from 'lucide-react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { Bot, Captions, ChevronLeft, ChevronRight, FileText, Film, History, Languages, ListChecks, Search, Settings2, Sparkles, Volume2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
@@ -11,6 +11,7 @@ import type { ApiProfile, AutomationJob, SubtitleEntry, SubtitleTextOperation } 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { TextField, TextareaField, SelectField, SegmentedField, type FieldOption } from '@/components/fields'
 
 const SAMPLE_SUBTITLE_TEXT = `1
@@ -80,10 +81,13 @@ export function StudioSubtitleWorkbench({
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
   const [isReExporting, setIsReExporting] = useState(false)
+  const [entryKeyword, setEntryKeyword] = useState('')
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
   const autoLoadKeyRef = useRef('')
+  const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
   const selectedEntry = entries[selectedIndex] || null
+  const selectedEntryLines = useMemo(() => splitSubtitleLines(selectedEntry?.text || ''), [selectedEntry?.text])
   const plainText = useMemo(
     () => entries.map((entry) => entry.text.trim()).filter(Boolean).join('\n'),
     [entries],
@@ -122,6 +126,25 @@ export function StudioSubtitleWorkbench({
     [availableJobs],
   )
   const selectedProfile = textProfiles.find((profile) => profile.id === selectedProfileId) || null
+  const filteredEntryIndexes = useMemo(() => {
+    if (!deferredEntryKeyword) {
+      return entries.map((_, index) => index)
+    }
+    const keyword = deferredEntryKeyword.toLowerCase()
+    return entries.reduce<number[]>((result, entry, index) => {
+      const searchableText = [
+        `#${index + 1}`,
+        entry.start,
+        entry.end,
+        entry.text.replace(/\r?\n/g, ' '),
+      ].join(' ').toLowerCase()
+      if (searchableText.includes(keyword)) {
+        result.push(index)
+      }
+      return result
+    }, [])
+  }, [entries, deferredEntryKeyword])
+  const selectedVisiblePosition = filteredEntryIndexes.findIndex((index) => index === selectedIndex)
 
   useEffect(() => {
     if (!subtitlePath && suggestedSubtitleFile) {
@@ -153,6 +176,25 @@ export function StudioSubtitleWorkbench({
     }
     loadTextProfiles()
   }, [addLog, preferences.text_profile_id])
+
+  useEffect(() => {
+    if (!entries.length) {
+      if (selectedIndex !== 0) {
+        setSelectedIndex(0)
+      }
+      return
+    }
+    if (selectedIndex >= entries.length) {
+      setSelectedIndex(entries.length - 1)
+      return
+    }
+    if (!filteredEntryIndexes.length) {
+      return
+    }
+    if (!filteredEntryIndexes.includes(selectedIndex)) {
+      setSelectedIndex(filteredEntryIndexes[0])
+    }
+  }, [entries.length, filteredEntryIndexes, selectedIndex])
 
   const applyParsedEntries = (nextEntries: SubtitleEntry[], message: string, path?: string) => {
     const normalized = normalizeEntries(nextEntries)
@@ -250,6 +292,11 @@ export function StudioSubtitleWorkbench({
     ))))
   }
 
+  const updateSelectedEntryLines = (primary: string, secondary: string) => {
+    if (!selectedEntry) return
+    updateEntry(selectedIndex, 'text', joinSubtitleLines(primary, secondary))
+  }
+
   const addEntry = () => {
     const previous = entries[entries.length - 1]
     const start = previous?.end || '00:00:00,000'
@@ -270,11 +317,21 @@ export function StudioSubtitleWorkbench({
 
   const cleanupEntries = () => {
     const nextEntries = normalizeEntries(entries
-      .map((entry) => ({ ...entry, text: entry.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join('\n') }))
+      .map((entry) => {
+        const { primary, secondary } = splitSubtitleLines(entry.text)
+        return { ...entry, text: joinSubtitleLines(primary, secondary) }
+      })
       .filter((entry) => entry.text.trim()))
     setEntries(nextEntries)
     setSelectedIndex(Math.min(selectedIndex, Math.max(0, nextEntries.length - 1)))
     setNotice({ type: 'success', message: `已清理字幕，保留 ${nextEntries.length} 条。` })
+  }
+
+  const moveSelection = (offset: number) => {
+    if (!filteredEntryIndexes.length) return
+    const currentPosition = selectedVisiblePosition >= 0 ? selectedVisiblePosition : 0
+    const nextPosition = Math.max(0, Math.min(filteredEntryIndexes.length - 1, currentPosition + offset))
+    setSelectedIndex(filteredEntryIndexes[nextPosition])
   }
 
   const handleSelectProfile = (value: string) => {
@@ -303,7 +360,16 @@ export function StudioSubtitleWorkbench({
     }
 
     const targetIndexes = aiScope === 'current' ? [selectedIndex] : entries.map((_, index) => index)
-    const targetEntries = targetIndexes.map((index) => entries[index])
+    const targetEntries = targetIndexes.map((index) => {
+      const currentEntry = entries[index]
+      if (operation !== 'translate') {
+        return currentEntry
+      }
+      return {
+        ...currentEntry,
+        text: extractTranslationSourceText(currentEntry.text),
+      }
+    })
     const actionLabel = AI_OPERATION_LABEL[operation]
 
     setIsAiProcessing(true)
@@ -322,11 +388,18 @@ export function StudioSubtitleWorkbench({
         result.entries.forEach((entry, itemIndex) => {
           const targetIndex = targetIndexes[itemIndex]
           if (targetIndex === undefined) return
-          next[targetIndex] = { ...next[targetIndex], start: entry.start, end: entry.end, text: entry.text }
+          const sourceText = targetEntries[itemIndex]?.text || ''
+          const nextText = operation === 'translate'
+            ? combineComparedSubtitleText(sourceText, entry.text)
+            : entry.text
+          next[targetIndex] = { ...next[targetIndex], start: entry.start, end: entry.end, text: nextText }
         })
         return normalizeEntries(next)
       })
-      setNotice({ type: 'success', message: `${actionLabel}完成，已更新 ${result.entries.length} 条字幕。` })
+      const successMessage = operation === 'translate'
+        ? `${actionLabel}完成，已生成原文对照字幕 ${result.entries.length} 条。`
+        : `${actionLabel}完成，已更新 ${result.entries.length} 条字幕。`
+      setNotice({ type: 'success', message: successMessage })
       addLog('info', `${actionLabel}完成，范围：${aiScope === 'all' ? '全部字幕' : '当前一条'}`)
     } catch (error) {
       const message = `AI 处理失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -490,7 +563,7 @@ export function StudioSubtitleWorkbench({
       <CardContent className="space-y-4 p-4">
         {notice && <NoticeBox notice={notice} />}
 
-        <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)_300px]">
+        <div className="grid gap-4 2xl:grid-cols-[340px_minmax(0,1fr)]">
           <div className="space-y-4">
             <section className="rounded-xl border bg-background/60 p-4">
               <SectionTitle title="任务来源" description="可直接从任务队列或历史记录挑一个任务，把字幕载进来继续改，改完再重新合并导出。" />
@@ -543,7 +616,7 @@ export function StudioSubtitleWorkbench({
 
             <section className="rounded-xl border bg-background/60 p-4">
               <SectionTitle title="导入字幕" description="支持 SRT / VTT / ASS 文件，也可以直接粘贴 SRT / VTT 文本。" />
-              <div className="mt-3 space-y-3">
+              <div className="mt-3 space-y-4">
                 <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\\项目\\output\\subtitle.ass" onChange={setSubtitlePath} />
                 <Button className="w-full" onClick={() => handleParseFile()} disabled={isLoading}>
                   {isLoading ? '读取中…' : '读取字幕文件'}
@@ -560,115 +633,28 @@ export function StudioSubtitleWorkbench({
                     </Button>
                   </div>
                 )}
-              </div>
-            </section>
-
-            <section className="rounded-xl border bg-background/60 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <SectionTitle title="粘贴解析" description="适合把外部字幕或人工整理后的 SRT / VTT 直接贴进来。" />
-                <select
-                  value={pasteFormat}
-                  onChange={(event) => setPasteFormat(event.target.value as 'srt' | 'vtt')}
-                  className="h-8 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
-                >
-                  <option value="srt">SRT</option>
-                  <option value="vtt">VTT</option>
-                </select>
-              </div>
-              <TextareaField label="字幕文本" value={pasteText} rows={11} onChange={setPasteText} />
-              <Button variant="outline" className="mt-3 w-full" onClick={handleParseText} disabled={isLoading}>
-                解析字幕文本
-              </Button>
-            </section>
-          </div>
-
-          <section className="min-h-[640px] rounded-xl border bg-background/60">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-              <div>
-                <h3 className="text-sm font-medium">逐条校对</h3>
-                <p className="mt-1 text-xs text-muted-foreground">可直接修改时间码和字幕正文，AI 处理结果也会回填到这里。</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={addEntry}>新增行</Button>
-                <Button variant="outline" size="sm" onClick={cleanupEntries} disabled={!entries.length}>清理空白</Button>
-              </div>
-            </div>
-
-            {entries.length === 0 ? (
-              <div className="grid min-h-[560px] place-items-center p-6">
-                <div className="max-w-sm rounded-xl border border-dashed p-5 text-center">
-                  <div className="text-sm font-medium">还没有可编辑字幕</div>
-                  <p className="mt-2 text-xs text-muted-foreground">先读取字幕文件，或把 SRT / VTT 文本粘贴进来解析。</p>
-                </div>
-              </div>
-            ) : (
-              <div className="grid min-h-[560px] grid-cols-[120px_minmax(0,1fr)] max-xl:grid-cols-1">
-                <div className="overflow-auto border-r p-2 max-xl:max-h-28 max-xl:border-r-0 max-xl:border-b">
-                  <div className="grid grid-cols-1 gap-1 max-xl:grid-cols-[repeat(auto-fill,minmax(72px,1fr))]">
-                    {entries.map((entry, index) => (
-                      <button
-                        key={`${entry.index}-${index}`}
-                        onClick={() => setSelectedIndex(index)}
-                        className={selectedIndex === index
-                          ? 'rounded-md border border-primary bg-primary/10 px-2 py-2 text-left text-primary'
-                          : timeToMs(entry.end) <= timeToMs(entry.start)
-                            ? 'rounded-md border border-destructive/40 px-2 py-2 text-left text-destructive'
-                            : 'rounded-md border bg-background px-2 py-2 text-left text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground'}
-                      >
-                        <div className="text-xs font-medium">#{index + 1}</div>
-                        <div className="mt-1 truncate font-mono text-[10px] opacity-75">{entry.start}</div>
-                      </button>
-                    ))}
+                <div className="rounded-xl border bg-background p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <SectionTitle title="粘贴解析" description="适合把外部字幕或人工整理后的 SRT / VTT 直接贴进来。" />
+                    <select
+                      value={pasteFormat}
+                      onChange={(event) => setPasteFormat(event.target.value as 'srt' | 'vtt')}
+                      className="h-8 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary"
+                    >
+                      <option value="srt">SRT</option>
+                      <option value="vtt">VTT</option>
+                    </select>
                   </div>
-                </div>
-
-                <div className="overflow-auto p-4">
-                  {selectedEntry && (
-                    <div className="mx-auto max-w-3xl space-y-4">
-                      <div className="grid grid-cols-[1fr_1fr_auto] items-end gap-3 max-sm:grid-cols-1">
-                        <TextField label="开始时间" value={selectedEntry.start} onChange={(value) => updateEntry(selectedIndex, 'start', value)} />
-                        <TextField label="结束时间" value={selectedEntry.end} onChange={(value) => updateEntry(selectedIndex, 'end', value)} />
-                        <Button variant="outline" className="max-sm:w-full" onClick={() => removeEntry(selectedIndex)}>
-                          删除
-                        </Button>
-                      </div>
-
-                      <label className="block">
-                        <span className="mb-1 block text-xs text-muted-foreground">字幕正文</span>
-                        <textarea
-                          value={selectedEntry.text}
-                          onChange={(event) => updateEntry(selectedIndex, 'text', event.target.value)}
-                          rows={10}
-                          className="w-full resize-y rounded-md border bg-background px-3 py-2 text-sm leading-6 outline-none transition-colors focus:border-primary"
-                        />
-                      </label>
-
-                      <div className="rounded-xl border bg-background p-4">
-                        <div className="mb-3 flex items-center justify-between gap-3">
-                          <div>
-                            <h4 className="text-sm font-medium">画面预览</h4>
-                            <p className="mt-1 text-xs text-muted-foreground">用于快速确认断句、换行和可读性。</p>
-                          </div>
-                          <span className="rounded-md border px-2 py-1 font-mono text-[10px] text-muted-foreground">
-                            {selectedEntry.start} - {selectedEntry.end}
-                          </span>
-                        </div>
-                        <div className="rounded-lg bg-black px-4 py-6 text-center text-lg font-semibold leading-snug text-white [text-shadow:0_2px_4px_#000,1px_0_#000,-1px_0_#000,0_1px_#000,0_-1px_#000]">
-                          {selectedEntry.text.split(/\r?\n/).map((line, index) => (
-                            <div key={`${line}-${index}`}>{line || ' '}</div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
+                  <TextareaField label="字幕文本" value={pasteText} rows={10} onChange={setPasteText} />
+                  <Button variant="outline" className="mt-3 w-full" onClick={handleParseText} disabled={isLoading}>
+                    解析字幕文本
+                  </Button>
                 </div>
               </div>
-            )}
-          </section>
+            </section>
 
-          <div className="space-y-4">
             <section className="rounded-xl border bg-background/60 p-4">
-              <SectionTitle title="AI 单独处理" description="先选处理范围，再决定只做翻译、润色或生成，不绑定一键流程。" />
+              <SectionTitle title="AI 单独处理" description="翻译会自动保留原文做双行对照，润色和生成则只改当前正文。" />
               <div className="mt-3 space-y-3">
                 <SelectField
                   label="文本 API 配置"
@@ -687,7 +673,7 @@ export function StudioSubtitleWorkbench({
                   </Button>
                   <Button variant="outline" onClick={() => handleAiProcess('translate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Languages className="mr-2 size-4" />
-                    {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.translate ? 'AI 翻译中…' : 'AI 翻译'}
+                    {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.translate ? 'AI 翻译中…' : 'AI 翻译并保留原文'}
                   </Button>
                   <Button variant="outline" onClick={() => handleAiProcess('generate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Sparkles className="mr-2 size-4" />
@@ -733,25 +719,194 @@ export function StudioSubtitleWorkbench({
             </section>
 
             <section className="rounded-xl border bg-background/60 p-4">
-              <SectionTitle title="校对统计" description="保存前快速看条目数量、字符数和异常时间。" />
+              <SectionTitle title="校对统计" description="保存前快速看条目数量、字符数和异常时间，也方便通看整段正文。" />
               <div className="mt-4 grid grid-cols-2 gap-2">
                 <MetricTile label="字幕条目" value={String(entries.length)} />
                 <MetricTile label="正文字符" value={String(totalChars)} />
                 <MetricTile label="异常时间" value={String(invalidCount)} tone={invalidCount ? 'warn' : 'default'} />
                 <MetricTile label="当前序号" value={entries.length ? String(selectedIndex + 1) : '-'} />
               </div>
-            </section>
-
-            <section className="rounded-xl border bg-background/60 p-4">
-              <SectionTitle title="纯文本检查" description="只看字幕正文，方便发现重复句、漏字和格式问题。" />
-              <textarea
-                value={plainText}
-                readOnly
-                rows={10}
-                className="mt-3 w-full resize-none rounded-md border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground outline-none"
-              />
+              <label className="mt-4 block">
+                <span className="mb-1 block text-sm">纯文本检查</span>
+                <span className="block text-xs text-muted-foreground">只看字幕正文，方便发现重复句、漏字和格式问题。</span>
+                <textarea
+                  value={plainText}
+                  readOnly
+                  rows={10}
+                  className="mt-2 w-full resize-none rounded-md border bg-background px-3 py-2 text-xs leading-5 text-muted-foreground outline-none"
+                />
+              </label>
             </section>
           </div>
+
+          <section className="min-h-[720px] rounded-xl border bg-background/60">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-4">
+              <div>
+                <h3 className="text-sm font-medium">逐条校对</h3>
+                <p className="mt-1 text-xs text-muted-foreground">左边筛选并定位条目，右边分开编辑主字幕和副字幕，适合中英对照逐条校正。</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative min-w-[220px] max-w-sm flex-1">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={entryKeyword}
+                    onChange={(event) => setEntryKeyword(event.target.value)}
+                    placeholder="按序号、时间或文本筛选"
+                    className="h-9 pl-8"
+                  />
+                </div>
+                <Button variant="outline" size="sm" onClick={addEntry}>新增行</Button>
+                <Button variant="outline" size="sm" onClick={cleanupEntries} disabled={!entries.length}>清理空白</Button>
+              </div>
+            </div>
+
+            {entries.length === 0 ? (
+              <div className="grid min-h-[640px] place-items-center p-6">
+                <div className="max-w-sm rounded-xl border border-dashed p-5 text-center">
+                  <div className="text-sm font-medium">还没有可编辑字幕</div>
+                  <p className="mt-2 text-xs text-muted-foreground">先读取字幕文件，或把 SRT / VTT 文本粘贴进来解析。</p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid min-h-[640px] xl:grid-cols-[320px_minmax(0,1fr)]">
+                <div className="border-r">
+                  <div className="flex items-center justify-between border-b px-4 py-3 text-xs text-muted-foreground">
+                    <span>显示 {filteredEntryIndexes.length} / {entries.length} 条</span>
+                    <span>异常时间 {invalidCount}</span>
+                  </div>
+                  <div className="max-h-[680px] space-y-2 overflow-auto p-3">
+                    {filteredEntryIndexes.length ? filteredEntryIndexes.map((index) => {
+                      const entry = entries[index]
+                      const lines = splitSubtitleLines(entry.text)
+                      const isInvalid = timeToMs(entry.end) <= timeToMs(entry.start)
+                      return (
+                        <button
+                          key={`${entry.index}-${index}`}
+                          onClick={() => setSelectedIndex(index)}
+                          className={selectedIndex === index
+                            ? 'w-full rounded-xl border border-primary bg-primary/10 px-3 py-3 text-left text-primary'
+                            : isInvalid
+                              ? 'w-full rounded-xl border border-destructive/40 bg-background px-3 py-3 text-left text-destructive'
+                              : 'w-full rounded-xl border bg-background px-3 py-3 text-left text-foreground transition-colors hover:border-primary/40'}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium">#{index + 1}</span>
+                            <span className="font-mono text-[10px] opacity-75">{entry.start}</span>
+                          </div>
+                          <p className="mt-2 line-clamp-2 text-sm font-medium leading-5">{lines.primary || '空字幕'}</p>
+                          {lines.secondary ? (
+                            <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#C99A00]">{lines.secondary.replace(/\r?\n/g, ' / ')}</p>
+                          ) : (
+                            <p className="mt-1 text-[11px] text-muted-foreground">{entry.end}</p>
+                          )}
+                        </button>
+                      )
+                    }) : (
+                      <div className="grid min-h-[240px] place-items-center rounded-xl border border-dashed p-4 text-center text-xs text-muted-foreground">
+                        没有匹配到字幕条目，换个关键词试试。
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-auto p-4">
+                  {selectedEntry && (
+                    <div className="mx-auto max-w-4xl space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="secondary">第 {selectedIndex + 1} 条</Badge>
+                            <Badge variant="outline">
+                              {selectedVisiblePosition >= 0 ? `${selectedVisiblePosition + 1} / ${filteredEntryIndexes.length}` : `共 ${entries.length} 条`}
+                            </Badge>
+                          </div>
+                          <p className="mt-2 text-xs text-muted-foreground">双行对照建议：第一行放译文或主字幕，第二行放原文或补充字幕。</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => moveSelection(-1)}
+                            disabled={selectedVisiblePosition <= 0}
+                          >
+                            <ChevronLeft className="mr-1 size-4" />
+                            上一条
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => moveSelection(1)}
+                            disabled={selectedVisiblePosition < 0 || selectedVisiblePosition >= filteredEntryIndexes.length - 1}
+                          >
+                            下一条
+                            <ChevronRight className="ml-1 size-4" />
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => removeEntry(selectedIndex)}>
+                            删除
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <TextField label="开始时间" value={selectedEntry.start} onChange={(value) => updateEntry(selectedIndex, 'start', value)} />
+                        <TextField label="结束时间" value={selectedEntry.end} onChange={(value) => updateEntry(selectedIndex, 'end', value)} />
+                      </div>
+
+                      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+                        <div className="space-y-4">
+                          <TextareaField
+                            label="主字幕 / 译文"
+                            description="最终显示在第一行。AI 翻译会把译文放这里。"
+                            value={selectedEntryLines.primary}
+                            rows={6}
+                            onChange={(value) => updateSelectedEntryLines(value, selectedEntryLines.secondary)}
+                          />
+                          <TextareaField
+                            label="副字幕 / 原文"
+                            description="可留空。做中英对照时，原文会保留在这里。"
+                            value={selectedEntryLines.secondary}
+                            rows={5}
+                            onChange={(value) => updateSelectedEntryLines(selectedEntryLines.primary, value)}
+                          />
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="rounded-xl border bg-background p-4">
+                            <div className="mb-3 flex items-center justify-between gap-3">
+                              <div>
+                                <h4 className="text-sm font-medium">画面预览</h4>
+                                <p className="mt-1 text-xs text-muted-foreground">快速确认断句、对照顺序和两行可读性。</p>
+                              </div>
+                              <span className="rounded-md border px-2 py-1 font-mono text-[10px] text-muted-foreground">
+                                {selectedEntry.start} - {selectedEntry.end}
+                              </span>
+                            </div>
+                            <div className="rounded-lg bg-black px-4 py-6 text-center [text-shadow:0_2px_4px_#000,1px_0_#000,-1px_0_#000,0_1px_#000,0_-1px_#000]">
+                              <div className="text-lg font-semibold leading-snug text-white">
+                                {selectedEntryLines.primary || '主字幕会显示在这里'}
+                              </div>
+                              {selectedEntryLines.secondary && (
+                                <div className="mt-2 space-y-1 text-base font-medium leading-snug text-[#FDE68A]">
+                                  {selectedEntryLines.secondary.split(/\r?\n/).map((line, index) => (
+                                    <div key={`${line}-${index}`}>{line || ' '}</div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border bg-background p-4 text-xs text-muted-foreground">
+                            <div className="font-medium text-foreground">当前条目提示</div>
+                            <p className="mt-2">切句时不要留下单个字、逗号句号或省略号单独成条。翻译对照时，上面是译文，下面是原文。</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
         </div>
       </CardContent>
     </Card>
@@ -771,12 +926,64 @@ function canSave(entries: SubtitleEntry[], invalidCount: number, setNotice: (not
 }
 
 function normalizeEntries(entries: SubtitleEntry[]) {
-  return entries.map((entry, index) => ({
-    ...entry,
-    index: index + 1,
-    start: entry.start || '00:00:00,000',
-    end: entry.end || entry.start || '00:00:00,000',
-  }))
+  return entries
+    .map((entry) => ({ ...entry, text: cleanSubtitleTextForDisplay(entry.text) }))
+    .filter((entry) => !isMeaninglessSubtitleText(entry.text))
+    .map((entry, index) => ({
+      ...entry,
+      index: index + 1,
+      start: entry.start || '00:00:00,000',
+      end: entry.end || entry.start || '00:00:00,000',
+    }))
+}
+
+function splitSubtitleLines(text: string) {
+  const lines = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\\N/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  return {
+    primary: lines[0] || '',
+    secondary: lines.slice(1).join('\n'),
+  }
+}
+
+function joinSubtitleLines(primary: string, secondary: string) {
+  const normalizedPrimary = primary.trim()
+  const normalizedSecondary = secondary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+  return [normalizedPrimary, normalizedSecondary].filter(Boolean).join('\n')
+}
+
+function extractTranslationSourceText(text: string) {
+  const { primary, secondary } = splitSubtitleLines(text)
+  return secondary || primary
+}
+
+function combineComparedSubtitleText(originalText: string, translatedText: string) {
+  const normalizedOriginal = originalText.trim()
+  const normalizedTranslated = translatedText.trim()
+  if (!normalizedOriginal) return normalizedTranslated
+  if (!normalizedTranslated || normalizedOriginal === normalizedTranslated) return normalizedOriginal
+  return `${normalizedTranslated}\n${normalizedOriginal}`
+}
+
+function isMeaninglessSubtitleText(text: string) {
+  return /^[\s，。、！？；：,.!?;:…]+$/.test(String(text || '').trim())
+}
+
+function cleanSubtitleTextForDisplay(text: string) {
+  return String(text || '')
+    .replace(/\.{3,}|…+|[，。,.]/g, '')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
 }
 
 function timeToMs(value: string) {
