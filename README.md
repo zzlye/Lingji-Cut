@@ -138,27 +138,6 @@ npm run build
 7. 保存字幕后点击“重新合并导出”。
 8. 到“素材库”播放成品，确认无误后使用导出文件。
 
-## 打包发布
-Windows 打包：
-
-```powershell
-npm run build:win
-```
-
-macOS 打包：
-
-```bash
-npm run build:mac
-```
-
-Linux 打包：
-
-```bash
-npm run build:linux
-```
-
-打包完成后，安装包会出现在 `release` 文件夹。
-
 ## 常见问题
 ### 打开后提示本地处理服务启动失败
 检查端口 `8765` 是否被占用，或检查 Python 依赖是否安装完整。Windows 安装包用户可先关闭安全软件拦截后重试。
