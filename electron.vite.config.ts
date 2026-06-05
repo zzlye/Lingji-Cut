@@ -37,6 +37,12 @@ export default defineConfig({
     },
     plugins: [react(), tailwindcss()],
     root: '.',
+    // 固定开发预览端口，避免 Vite 自动换端口后浏览器停在旧地址黑屏。
+    server: {
+      host: '127.0.0.1',
+      port: 8931,
+      strictPort: true
+    },
     build: {
       rollupOptions: {
         input: {
