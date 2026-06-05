@@ -1,6 +1,7 @@
 // src/components/fields.tsx
 // 统一设置字段组件 - 基于 shadcn 封装，替换各设置面板各自实现的原生 input/select/checkbox 伪组件
 import type { ReactNode } from 'react'
+import { Eye, EyeOff } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
@@ -8,6 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import type { RandomRange } from '@/types'
 
@@ -35,6 +37,48 @@ export function TextField({ label, value, onChange, placeholder, description, ty
   return (
     <Field label={label} description={description} className={className}>
       <Input type={type} value={value} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} />
+    </Field>
+  )
+}
+
+/** 密钥输入框：已保存密钥默认显示等长掩码，点击小眼睛后显示真实内容 */
+export function SecretField({ label, value, onChange, placeholder, description, visible, onToggleVisible, className, maskWhenHidden = false }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  description?: string
+  visible: boolean
+  onToggleVisible: () => void
+  className?: string
+  maskWhenHidden?: boolean
+}) {
+  // 只有“已保存密钥”的隐藏态才显示等长掩码，新建配置仍允许直接输入。
+  const showMaskedValue = maskWhenHidden && !visible && value.length > 0
+  const maskedValue = showMaskedValue ? '*'.repeat(value.length) : value
+
+  return (
+    <Field label={label} description={description} className={className}>
+      <div className="flex items-center gap-2">
+        <Input
+          type={visible ? 'text' : 'password'}
+          value={maskedValue}
+          placeholder={placeholder}
+          readOnly={showMaskedValue}
+          onChange={(e) => onChange(e.target.value)}
+          className="flex-1"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-sm"
+          onClick={onToggleVisible}
+          aria-label={visible ? '隐藏密钥' : '显示密钥'}
+          title={visible ? '隐藏密钥' : '显示密钥'}
+        >
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </Button>
+      </div>
     </Field>
   )
 }

@@ -53,6 +53,11 @@ class ProfileResponse(BaseModel):
         from_attributes = True
 
 
+class ProfileSecretResponse(BaseModel):
+    """按需返回已保存的 API Key，默认不出现在列表接口中"""
+    api_key: str
+
+
 class TextModelListRequest(BaseModel):
     """文本模型列表请求"""
     provider_type: str
@@ -390,10 +395,33 @@ def _voice_profile_to_response(profile: VoiceProviderProfile) -> ProfileResponse
     )
 
 
+def _get_text_profile_or_404(profile_id: int, db: Session) -> TextProviderProfile:
+    """读取文本配置，不存在时抛出 404"""
+    profile = db.query(TextProviderProfile).filter(TextProviderProfile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="文本配置不存在")
+    return profile
+
+
+def _get_voice_profile_or_404(profile_id: int, db: Session) -> VoiceProviderProfile:
+    """读取配音配置，不存在时抛出 404"""
+    profile = db.query(VoiceProviderProfile).filter(VoiceProviderProfile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="配音配置不存在")
+    return profile
+
+
 @router.get("/text", response_model=list[ProfileResponse])
 async def get_text_profiles(db: Session = Depends(get_db)):
     """获取所有文本 API 配置"""
     return db.query(TextProviderProfile).all()
+
+
+@router.get("/text/{profile_id}/secret", response_model=ProfileSecretResponse)
+async def get_text_profile_secret(profile_id: int, db: Session = Depends(get_db)):
+    """按需读取已保存的文本 API Key，避免列表接口直接暴露密钥"""
+    profile = _get_text_profile_or_404(profile_id, db)
+    return ProfileSecretResponse(api_key=decrypt_api_key(profile.api_key_encrypted))
 
 
 @router.post("/text", response_model=ProfileResponse)
@@ -417,9 +445,7 @@ async def create_text_profile(profile: ProfileCreate, db: Session = Depends(get_
 @router.put("/text/{profile_id}", response_model=ProfileResponse)
 async def update_text_profile(profile_id: int, profile: ProfileUpdate, db: Session = Depends(get_db)):
     """更新文本 API 配置"""
-    db_profile = db.query(TextProviderProfile).filter(TextProviderProfile.id == profile_id).first()
-    if not db_profile:
-        raise HTTPException(status_code=404, detail="文本配置不存在")
+    db_profile = _get_text_profile_or_404(profile_id, db)
 
     db_profile.name = profile.name
     db_profile.provider_type = profile.provider_type
@@ -505,6 +531,13 @@ async def get_voice_profiles(db: Session = Depends(get_db)):
     return [_voice_profile_to_response(profile) for profile in profiles]
 
 
+@router.get("/voice/{profile_id}/secret", response_model=ProfileSecretResponse)
+async def get_voice_profile_secret(profile_id: int, db: Session = Depends(get_db)):
+    """按需读取已保存的配音 API Key，默认仍保持隐藏"""
+    profile = _get_voice_profile_or_404(profile_id, db)
+    return ProfileSecretResponse(api_key=decrypt_api_key(profile.api_key_encrypted))
+
+
 @router.post("/voice", response_model=ProfileResponse)
 async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get_db)):
     """创建配音 API 配置"""
@@ -526,9 +559,7 @@ async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get
 @router.put("/voice/{profile_id}", response_model=ProfileResponse)
 async def update_voice_profile(profile_id: int, profile: ProfileUpdate, db: Session = Depends(get_db)):
     """更新配音 API 配置"""
-    db_profile = db.query(VoiceProviderProfile).filter(VoiceProviderProfile.id == profile_id).first()
-    if not db_profile:
-        raise HTTPException(status_code=404, detail="配音配置不存在")
+    db_profile = _get_voice_profile_or_404(profile_id, db)
 
     db_profile.name = profile.name
     db_profile.provider_type = profile.provider_type

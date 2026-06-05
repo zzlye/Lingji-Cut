@@ -222,6 +222,10 @@ export const profileApi = {
   listText: () =>
     request<import('@/types').ApiProfile[]>('/profiles/text'),
 
+  /** 获取已保存的文本 API Key */
+  getTextSecret: (id: number) =>
+    request<{ api_key: string }>(`/profiles/text/${id}/secret`),
+
   /** 创建文本 API 配置 */
   createText: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>
     request<import('@/types').ApiProfile>('/profiles/text', {
@@ -246,6 +250,10 @@ export const profileApi = {
   /** 获取配音 API 配置 */
   listVoice: () =>
     request<import('@/types').ApiProfile[]>('/profiles/voice'),
+
+  /** 获取已保存的配音 API Key */
+  getVoiceSecret: (id: number) =>
+    request<{ api_key: string }>(`/profiles/voice/${id}/secret`),
 
   /** 创建配音 API 配置 */
   createVoice: (profile: { name: string; provider_type: string; base_url: string; api_key: string; model?: string; extra_params?: string }) =>

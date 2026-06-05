@@ -1,7 +1,7 @@
 // src/features/settings/ApiConfigPanel.tsx
 // 文本 API 配置面板 - 管理模型渠道、模型获取、生成参数和自动化参数（shadcn 重做）
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { profileApi } from '@/lib/api'
 import { saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { cn } from '@/lib/utils'
-import { TextField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, TextareaField, type FieldOption } from '@/components/fields'
+import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, TextareaField, type FieldOption } from '@/components/fields'
 
 /** 文本 API 渠道配置 */
 const TEXT_PROVIDERS = [
@@ -53,17 +53,50 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isSaving, setIsSaving] = useState(false)
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
   const { addLog } = useTaskStore()
+  const profileRequestRef = useRef(0)
 
   const selectedProfile = useMemo(() => profiles.find((p) => p.id === selectedProfileId) || null, [profiles, selectedProfileId])
   const provider = TEXT_PROVIDERS.find((item) => item.id === profileForm.provider_type) || TEXT_PROVIDERS[0]
   const activeModel = profileForm.custom_model.trim() || profileForm.model
 
-  const loadProfiles = async () => {
+  const loadSavedApiKey = async (profileId: number) => {
+    const result = await profileApi.getTextSecret(profileId)
+    return result.api_key
+  }
+
+  const selectProfile = async (profile: ApiProfile) => {
+    // 记录本次切换请求，避免用户快速切换配置时旧请求回写错误的密钥。
+    const requestId = ++profileRequestRef.current
+    setSelectedProfileId(profile.id)
+    saveAutomationPreferences({ text_profile_id: profile.id })
+    setShowApiKey(false)
+    try {
+      const apiKey = await loadSavedApiKey(profile.id)
+      if (requestId !== profileRequestRef.current) return
+      setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: apiKey, model: profile.model || '', custom_model: '' })
+    } catch (error) {
+      if (requestId !== profileRequestRef.current) return
+      setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: '', model: profile.model || '', custom_model: '' })
+      addLog('warn', `读取已保存文本 API Key 失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+    if (profile.extra_params) {
+      try { setSettings({ ...createDefaultSettings(), ...JSON.parse(profile.extra_params) }) } catch { setSettings(createDefaultSettings()) }
+    } else { setSettings(createDefaultSettings()) }
+    setModelOptions(profile.model ? [{ id: profile.model, label: profile.model }] : [])
+  }
+
+  const loadProfiles = async (preferredProfileId?: number) => {
     try {
       const data = await profileApi.listText()
       setProfiles(data)
-      if (data.length > 0 && selectedProfileId === null) selectProfile(data[0])
+      const target = preferredProfileId
+        ? data.find((item) => item.id === preferredProfileId) || null
+        : selectedProfileId === null
+          ? data[0] || null
+          : null
+      if (target) await selectProfile(target)
     } catch (error) {
       addLog('error', `加载文本 API 配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
@@ -71,21 +104,13 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => { loadProfiles() }, [])
 
-  const selectProfile = (profile: ApiProfile) => {
-    setSelectedProfileId(profile.id)
-    saveAutomationPreferences({ text_profile_id: profile.id })
-    setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: '', model: profile.model || '', custom_model: '' })
-    if (profile.extra_params) {
-      try { setSettings({ ...createDefaultSettings(), ...JSON.parse(profile.extra_params) }) } catch { setSettings(createDefaultSettings()) }
-    } else { setSettings(createDefaultSettings()) }
-    setModelOptions(profile.model ? [{ id: profile.model, label: profile.model }] : [])
-  }
-
   const createNewProfile = () => {
+    profileRequestRef.current += 1
     setSelectedProfileId(null)
     setProfileForm(createProfileForm())
     setSettings(createDefaultSettings())
     setModelOptions([])
+    setShowApiKey(false)
   }
 
   const updateProvider = (providerType: string) => {
@@ -119,9 +144,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
       saveAutomationPreferences({ text_profile_id: saved.id })
       toast.success(`文本 API 配置 "${saved.name}" 已保存`)
       addLog('info', `文本 API 配置 "${saved.name}" 已保存`)
-      await loadProfiles()
-      setSelectedProfileId(saved.id)
-      setProfileForm((current) => ({ ...current, api_key: '' }))
+      await loadProfiles(saved.id)
     } catch (error) {
       addLog('error', `保存文本 API 配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally { setIsSaving(false) }
@@ -174,7 +197,16 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
             <TextField label="配置名称" value={profileForm.name} onChange={(v) => setProfileForm({ ...profileForm, name: v })} />
             <SelectField label="渠道" value={profileForm.provider_type} options={TEXT_PROVIDERS.map((p) => [p.id, p.name] as FieldOption)} onChange={updateProvider} description={provider.description} />
             <TextField label="Base URL" value={profileForm.base_url} onChange={(v) => setProfileForm({ ...profileForm, base_url: v })} />
-            <TextField label={selectedProfile ? 'API Key（留空保留已存密钥）' : 'API Key'} type="password" value={profileForm.api_key} onChange={(v) => setProfileForm({ ...profileForm, api_key: v })} />
+            <SecretField
+              label="API Key"
+              value={profileForm.api_key}
+              placeholder={selectedProfile ? '已保存密钥' : '请输入 API Key'}
+              description={selectedProfile ? '已保存配置会自动带出密钥，默认隐藏；点击右侧眼睛可查看。' : undefined}
+              visible={showApiKey}
+              maskWhenHidden={Boolean(selectedProfile)}
+              onToggleVisible={() => setShowApiKey((current) => !current)}
+              onChange={(v) => setProfileForm({ ...profileForm, api_key: v })}
+            />
             <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
             <TextField label="自定义模型" value={profileForm.custom_model} placeholder={profileForm.model || provider.model || '例如 gpt-4.1-mini'} onChange={(v) => setProfileForm({ ...profileForm, custom_model: v })} />
           </div>

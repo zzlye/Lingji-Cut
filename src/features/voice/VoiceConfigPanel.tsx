@@ -2,7 +2,7 @@
 // 配音配置面板 - 管理配音 API、音色、试听和生成参数
 // 交互重做：渠道/音色/试听露出，生成参数与多说话人收进高级折叠
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { cn } from '@/lib/utils'
-import { TextField, SelectField, SwitchField, SliderField, TextareaField, type FieldOption } from '@/components/fields'
+import { TextField, SecretField, SelectField, SwitchField, SliderField, TextareaField, type FieldOption } from '@/components/fields'
 
 /** 配音渠道配置 */
 const VOICE_PROVIDERS = [
@@ -70,8 +70,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [isLoadingVoices, setIsLoadingVoices] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
   const [notice, setNotice] = useState<PanelNotice>(null)
   const { addLog } = useTaskStore()
+  const profileRequestRef = useRef(0)
 
   const activeProvider = profileForm.provider_type
   const activeProviderMeta = VOICE_PROVIDERS.find((p) => p.id === activeProvider) || VOICE_PROVIDERS[0]
@@ -81,23 +83,26 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts'
   const selectedVoiceLabel = voices.find((item) => item.id === selectedVoice)?.name || selectedVoice
 
-  const loadProfiles = async () => {
-    try {
-      const data = await profileApi.listVoice()
-      setProfiles(data)
-      if (data.length > 0 && selectedProfileId === null) selectProfile(data[0])
-    } catch (error) {
-      addLog('error', `加载配音配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
-    }
+  const loadSavedApiKey = async (profileId: number) => {
+    const result = await profileApi.getVoiceSecret(profileId)
+    return result.api_key
   }
 
-  useEffect(() => { loadProfiles() }, [])
-  useEffect(() => { loadVoices(activeProvider) }, [activeProvider])
-
-  const selectProfile = (profile: ApiProfile) => {
+  const selectProfile = async (profile: ApiProfile) => {
+    // 记录本次切换请求，避免用户快速切换配置时旧请求把密钥覆盖回来。
+    const requestId = ++profileRequestRef.current
     setSelectedProfileId(profile.id)
     setAutomationOptions(saveAutomationPreferences({ voice_profile_id: profile.id }))
-    setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: '', model: profile.model || '', custom_model: '' })
+    setShowApiKey(false)
+    try {
+      const apiKey = await loadSavedApiKey(profile.id)
+      if (requestId !== profileRequestRef.current) return
+      setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: apiKey, model: profile.model || '', custom_model: '' })
+    } catch (error) {
+      if (requestId !== profileRequestRef.current) return
+      setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: '', model: profile.model || '', custom_model: '' })
+      setNotice({ type: 'warning', message: `读取已保存配音 API Key 失败：${error instanceof Error ? error.message : '未知错误'}` })
+    }
     if (profile.extra_params) {
       try {
         const parsed = JSON.parse(profile.extra_params)
@@ -112,13 +117,33 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setNotice({ type: 'info', message: `已选择配音配置：${profile.name}` })
   }
 
+  const loadProfiles = async (preferredProfileId?: number) => {
+    try {
+      const data = await profileApi.listVoice()
+      setProfiles(data)
+      const target = preferredProfileId
+        ? data.find((item) => item.id === preferredProfileId) || null
+        : selectedProfileId === null
+          ? data[0] || null
+          : null
+      if (target) await selectProfile(target)
+    } catch (error) {
+      addLog('error', `加载配音配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  useEffect(() => { loadProfiles() }, [])
+  useEffect(() => { loadVoices(activeProvider) }, [activeProvider])
+
   const createNewProfile = () => {
+    profileRequestRef.current += 1
     setSelectedProfileId(null)
     setProfileForm(createProfileForm())
     setSettings(createDefaultSettings())
     setVoice('alloy')
     setCustomVoice('')
     setModelOptions([])
+    setShowApiKey(false)
     setNotice({ type: 'info', message: '已进入新建配音配置模式' })
   }
 
@@ -169,9 +194,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id }))
       setNotice({ type: 'success', message: `配音配置 "${saved.name}" 已保存` })
       addLog('info', `配音配置 "${saved.name}" 已保存`)
-      await loadProfiles()
-      setSelectedProfileId(saved.id)
-      setProfileForm((current) => ({ ...current, api_key: '' }))
+      await loadProfiles(saved.id)
     } catch (error) {
       const message = `保存配音配置失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message }); addLog('error', message)
@@ -277,7 +300,16 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <TextField label="配置名称" value={profileForm.name} onChange={(v) => setProfileForm({ ...profileForm, name: v })} />
             <SelectField label="渠道" value={profileForm.provider_type} options={VOICE_PROVIDERS.map((p) => [p.id, p.name] as FieldOption)} onChange={updateProvider} />
             <TextField label="Base URL" value={profileForm.base_url} onChange={(v) => setProfileForm({ ...profileForm, base_url: v })} />
-            <TextField label={selectedProfileId ? 'API Key（留空保留已存密钥）' : 'API Key'} type="password" value={profileForm.api_key} onChange={(v) => setProfileForm({ ...profileForm, api_key: v })} />
+            <SecretField
+              label="API Key"
+              value={profileForm.api_key}
+              placeholder={selectedProfileId ? '已保存密钥' : '请输入 API Key'}
+              description={selectedProfileId ? '已保存配置会自动带出密钥，默认隐藏；点击右侧眼睛可查看。' : undefined}
+              visible={showApiKey}
+              maskWhenHidden={Boolean(selectedProfileId)}
+              onToggleVisible={() => setShowApiKey((current) => !current)}
+              onChange={(v) => setProfileForm({ ...profileForm, api_key: v })}
+            />
             <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
             <TextField label="自定义模型" value={profileForm.custom_model} placeholder={profileForm.model || activeProviderMeta.model || '例如 gpt-4o-mini-tts'} onChange={(v) => setProfileForm({ ...profileForm, custom_model: v })} />
           </div>
