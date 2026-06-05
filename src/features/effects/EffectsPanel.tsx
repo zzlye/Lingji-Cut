@@ -21,7 +21,10 @@ const range = (min: number, max: number, value: number | null = null, random = t
 })
 
 /** 自动化参数本地缓存键 */
-export const AUTOMATION_CONFIG_STORAGE_KEY = 'youtube-video-processor:auto-config'
+export const AUTOMATION_CONFIG_STORAGE_KEY = 'lingjian-workshop:auto-config'
+
+/** 旧版本缓存键，用于改名后迁移用户已保存的画面处理设置 */
+const LEGACY_AUTOMATION_CONFIG_STORAGE_KEY = 'youtube-video-processor:auto-config'
 
 /** 画面处理配置版本，用于把旧的重 CPU 默认参数迁移成极速 1080p 方案 */
 const PROCESSING_CONFIG_VERSION = 3
@@ -138,7 +141,7 @@ const QUICK_TEMPLATES = [
 
 /** 判断是否已经保存过自动化参数 */
 export function hasStoredAutomationConfig() {
-  return typeof localStorage !== 'undefined' && Boolean(localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY))
+  return typeof localStorage !== 'undefined' && Boolean(localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTOMATION_CONFIG_STORAGE_KEY))
 }
 
 /** 读取自动化参数，供一键流程复用 */
@@ -148,7 +151,10 @@ export function loadAutomationConfig(): ProcessingConfig {
   }
 
   try {
-    const saved = localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY)
+    const saved = localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTOMATION_CONFIG_STORAGE_KEY)
+    if (saved && !localStorage.getItem(AUTOMATION_CONFIG_STORAGE_KEY)) {
+      localStorage.setItem(AUTOMATION_CONFIG_STORAGE_KEY, saved)
+    }
     if (!saved) return createDefaultProcessingConfig()
     return normalizeProcessingConfig(JSON.parse(saved))
   } catch {

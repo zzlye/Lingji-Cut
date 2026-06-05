@@ -3,7 +3,7 @@
 // 交互重做：渠道/音色/试听露出，生成参数与多说话人收进高级折叠
 
 import { useEffect, useRef, useState } from 'react'
-import { profileApi, voiceApi } from '@/lib/api'
+import { BASE_URL, profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
@@ -224,7 +224,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setNotice({ type: 'info', message: '正在生成试听音频...' })
     try {
       const result = await voiceApi.preview({ text: previewText, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: selectedVoice, model: activeModel, settings })
-      setAudioUrl(`http://127.0.0.1:8765${result.audio_url}`)
+      setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: '试听音频已生成，可直接播放。' })
     } catch (error) {
       const message = `试听失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -239,7 +239,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setNotice({ type: 'info', message: `正在生成 ${speaker.label} 的试听...` })
     try {
       const result = await voiceApi.preview({ text: speaker.sample_text || `${speaker.label} 的配音试听。`, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: speaker.voice, model: activeModel, settings })
-      setAudioUrl(`http://127.0.0.1:8765${result.audio_url}`)
+      setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: `说话人 "${speaker.label}" 试听已生成。` })
     } catch (error) {
       const message = `说话人试听失败: ${error instanceof Error ? error.message : '未知错误'}`

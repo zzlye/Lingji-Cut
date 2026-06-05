@@ -1,8 +1,8 @@
 // src/lib/api.ts
 // API 客户端 - 封装与后端的 HTTP 通信
 
-/** 后端基础地址 */
-const BASE_URL = 'http://127.0.0.1:8765'
+/** 后端基础地址：服务器部署时可通过 VITE_API_BASE_URL 指向远程服务 */
+export const BASE_URL = (import.meta.env.VITE_API_BASE_URL?.trim() || 'http://127.0.0.1:8765').replace(/\/$/, '')
 
 /**
  * 通用请求方法

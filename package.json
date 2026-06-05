@@ -1,7 +1,7 @@
 {
-  "name": "youtube-video-processor",
-  "version": "1.0.0",
-  "description": "YouTube 视频处理桌面软件 - 下载、画面处理、字幕、配音、导出",
+  "name": "lingjian-workshop",
+  "version": "0.1.0",
+  "description": "灵剪工坊 - 视频下载、字幕校对、配音与导出桌面软件",
   "main": "./out/main/index.js",
   "author": "",
   "license": "MIT",
@@ -44,18 +44,32 @@
     "vite": "^6.3.0"
   },
   "build": {
-    "appId": "com.youtubeprocessor.app",
-    "productName": "YouTube视频处理器",
+    "appId": "com.lingjian.workshop",
+    "productName": "灵剪工坊",
     "directories": { "output": "release" },
     "files": ["out/**/*"],
-    "extraResources": [
-      { "from": "D:/tools/python-3.12.10-embed", "to": "python" },
-      { "from": "backend", "to": "backend", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!tests/**"] },
-      { "from": "build-resources/tools", "to": "tools" }
-    ],
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
-      "artifactName": "youtube-video-processor-${version}-Setup.${ext}"
+      "artifactName": "LingjianWorkshop-${version}-Setup.${ext}",
+      "extraResources": [
+        { "from": "D:/tools/python-3.12.10-embed", "to": "python" },
+        { "from": "backend", "to": "backend", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!tests/**"] },
+        { "from": "build-resources/tools", "to": "tools" }
+      ]
+    },
+    "mac": {
+      "target": ["dmg"],
+      "artifactName": "LingjianWorkshop-${version}-mac.${ext}",
+      "extraResources": [
+        { "from": "backend", "to": "backend", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!tests/**"] }
+      ]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "artifactName": "LingjianWorkshop-${version}-linux.${ext}",
+      "extraResources": [
+        { "from": "backend", "to": "backend", "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!tests/**"] }
+      ]
     },
     "nsis": {
       "oneClick": false,

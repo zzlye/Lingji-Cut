@@ -4,7 +4,10 @@
 import type { AutomationPreferences } from '@/types'
 
 /** 一键自动化偏好本地缓存键 */
-const AUTOMATION_PREFERENCES_STORAGE_KEY = 'youtube-video-processor:auto-preferences'
+const AUTOMATION_PREFERENCES_STORAGE_KEY = 'lingjian-workshop:auto-preferences'
+
+/** 旧版本缓存键，用于改名后迁移用户已保存的一键设置 */
+const LEGACY_AUTOMATION_PREFERENCES_STORAGE_KEY = 'youtube-video-processor:auto-preferences'
 
 /** 配音可选迁移标记，避免旧版本默认开启配音影响新流程 */
 const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
@@ -119,7 +122,10 @@ export function loadAutomationPreferences(): AutomationPreferences {
   }
 
   try {
-    const saved = localStorage.getItem(AUTOMATION_PREFERENCES_STORAGE_KEY)
+    const saved = localStorage.getItem(AUTOMATION_PREFERENCES_STORAGE_KEY) || localStorage.getItem(LEGACY_AUTOMATION_PREFERENCES_STORAGE_KEY)
+    if (saved && !localStorage.getItem(AUTOMATION_PREFERENCES_STORAGE_KEY)) {
+      localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, saved)
+    }
     const parsed = saved ? JSON.parse(saved) : {}
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
     return {

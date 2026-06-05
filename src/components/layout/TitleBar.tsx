@@ -19,7 +19,7 @@ export function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
         <span className="grid size-6 place-items-center rounded-md bg-primary/20 text-primary">
           <Clapperboard className="size-4" />
         </span>
-        <span className="text-sm font-semibold">YouTube 视频处理器</span>
+        <span className="text-sm font-semibold">灵剪工坊</span>
       </div>
 
       <div className="flex-1" />

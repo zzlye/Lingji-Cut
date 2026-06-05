@@ -54,4 +54,4 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 
 
 # 默认日志记录器
-logger = get_logger("youtube-processor")
+logger = get_logger("lingjian-workshop")

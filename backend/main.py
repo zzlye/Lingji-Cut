@@ -3,6 +3,7 @@
 # 启动命令：python main.py 或 uvicorn main:app --host 127.0.0.1 --port 8765
 
 import uvicorn
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -16,9 +17,9 @@ from .models import SessionLocal
 
 # 创建 FastAPI 应用实例
 app = FastAPI(
-    title="YouTube 视频处理器",
-    description="YouTube 视频下载、字幕、配音、导出处理后端",
-    version="1.0.0"
+    title="灵剪工坊",
+    description="灵剪工坊本地处理服务",
+    version="0.1.0"
 )
 
 # 配置 CORS（允许 Electron 渲染进程访问）
@@ -61,15 +62,15 @@ async def startup():
 @app.get("/health")
 async def health_check():
     """健康检查端点 - 用于 Electron 主进程检测后端是否就绪"""
-    return {"status": "ok", "service": "youtube-video-processor"}
+    return {"status": "ok", "service": "lingjian-workshop"}
 
 
 @app.get("/")
 async def root():
     """根端点 - 返回服务信息"""
     return {
-        "name": "YouTube 视频处理器",
-        "version": "1.0.0",
+        "name": "灵剪工坊",
+        "version": "0.1.0",
         "endpoints": {
             "health": "/health",
             "videos": "/videos",
@@ -90,8 +91,8 @@ if __name__ == "__main__":
     # 启动 uvicorn 服务器，监听本地 8765 端口
     uvicorn.run(
         "backend.main:app",
-        host="127.0.0.1",
-        port=8765,
+        host=os.environ.get("LINGJIAN_HOST", "127.0.0.1"),
+        port=int(os.environ.get("LINGJIAN_PORT", "8765")),
         reload=False,
         log_level="info"
     )

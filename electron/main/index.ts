@@ -73,21 +73,28 @@ function startPythonBackend(): void {
   let useShell = false
 
   if (app.isPackaged) {
-    // 打包环境：使用随包的 embed Python、后端源码、随包工具，数据写入可写的用户数据目录
+    // 打包环境：Windows 使用随包 Python，macOS/Linux 使用系统 python3。
     const resources = process.resourcesPath
-    command = join(resources, 'python', 'python.exe')
-    args = [join(resources, 'backend', 'run.py')]
+    const backendRunner = join(resources, 'backend', 'run.py')
+    if (process.platform === 'win32') {
+      command = join(resources, 'python', 'python.exe')
+      args = [backendRunner]
+      env.YTV_TOOLS_DIR = join(resources, 'tools')
+    } else {
+      command = 'python3'
+      args = [backendRunner]
+      useShell = true
+    }
     cwd = resources
     env.PYTHONPATH = resources
-    env.YTV_TOOLS_DIR = join(resources, 'tools')
     env.YTV_DATA_ROOT = app.getPath('userData')
   } else {
-    // 开发环境：优先 D:\tools 的 embed Python，回退系统 py
+    // 开发环境：Windows 优先 D:\tools 的 embed Python，其他平台使用 python3。
     const projectRoot = join(__dirname, '../..')
     const backendRunner = join(projectRoot, 'backend/run.py')
-    const hasEmbed = existsSync(TOOLS_PYTHON)
-    command = hasEmbed ? TOOLS_PYTHON : 'py'
-    args = hasEmbed ? [backendRunner] : ['-3', backendRunner]
+    const hasEmbed = process.platform === 'win32' && existsSync(TOOLS_PYTHON)
+    command = hasEmbed ? TOOLS_PYTHON : process.platform === 'win32' ? 'py' : 'python3'
+    args = hasEmbed ? [backendRunner] : process.platform === 'win32' ? ['-3', backendRunner] : [backendRunner]
     cwd = projectRoot
     useShell = true
     env.PYTHONPATH = projectRoot

@@ -14,10 +14,14 @@ def main() -> None:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+    # 默认只监听本机，服务器部署时可通过环境变量改成 0.0.0.0。
+    host = os.environ.get("LINGJIAN_HOST", "127.0.0.1")
+    port = int(os.environ.get("LINGJIAN_PORT", "8765"))
+
     uvicorn.run(
         "backend.main:app",
-        host="127.0.0.1",
-        port=8765,
+        host=host,
+        port=port,
         reload=False,
         log_level="info",
     )
