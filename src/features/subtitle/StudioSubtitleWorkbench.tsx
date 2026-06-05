@@ -298,11 +298,19 @@ export function StudioSubtitleWorkbench({
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在保存 SRT 字幕...' })
     try {
+      const sourcePath = pickSubtitleWorkspaceSource(
+        outputPath.trim(),
+        subtitlePath.trim(),
+        selectedJobSubtitleFile,
+        selectedJobSourceVideo,
+        lastSavedPath,
+      )
       const result = await subtitleApi.saveCorrected({
         entries,
         output_path: outputPath.trim() || undefined,
         file_name: fileName.trim() || undefined,
         format: 'srt',
+        source_path: sourcePath,
       })
       setLastSavedPath(result.output_path)
       setOutputPath(result.output_path)
@@ -324,10 +332,18 @@ export function StudioSubtitleWorkbench({
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在生成 ASS 字幕...' })
     try {
+      const sourcePath = pickSubtitleWorkspaceSource(
+        outputPath.trim(),
+        subtitlePath.trim(),
+        selectedJobSubtitleFile,
+        selectedJobSourceVideo,
+        lastSavedPath,
+      )
       const result = await subtitleApi.saveAss({
         entries,
         file_name: fileName.replace(/\.(srt|vtt|ass)$/i, '.ass'),
         preset_id: preferences.subtitle_preset_id,
+        source_path: sourcePath,
       })
       setLastSavedPath(result.output_path)
       setNotice({ type: 'success', message: result.message })
@@ -346,11 +362,19 @@ export function StudioSubtitleWorkbench({
   }
 
   const ensureAssForReExport = async () => {
+    const sourcePath = pickSubtitleWorkspaceSource(
+      outputPath.trim(),
+      subtitlePath.trim(),
+      selectedJobSubtitleFile,
+      selectedJobSourceVideo,
+      lastSavedPath,
+    )
     const result = await subtitleApi.saveAss({
       entries,
       output_path: buildAssOutputPath(outputPath.trim()),
       file_name: normalizeAssFileName(fileName.trim() || 'manual_subtitle.ass'),
       preset_id: preferences.subtitle_preset_id,
+      source_path: sourcePath,
     })
     setLastSavedPath(result.output_path)
     addLog('info', `重新导出使用 ASS: ${result.output_path}`)
@@ -626,7 +650,7 @@ export function StudioSubtitleWorkbench({
               <SectionTitle title="保存输出" description="校对完成后可单独保存 SRT，也可按当前字幕样式生成 ASS；如果绑定了任务，还能直接重新合成导出。" />
               <div className="mt-3 space-y-3">
                 <TextField label="文件名" value={fileName} onChange={setFileName} />
-                <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动保存到 output 目录" onChange={setOutputPath} />
+                <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动保存到当前字幕或当前视频目录" onChange={setOutputPath} />
                 <div className="grid grid-cols-2 gap-2">
                   <Button onClick={saveSrt} disabled={isSaving || !entries.length}>保存 SRT</Button>
                   <Button variant="outline" onClick={saveAss} disabled={isSaving || !entries.length}>生成 ASS</Button>
@@ -730,6 +754,15 @@ function buildAssOutputPath(value: string) {
   if (!value) return undefined
   const normalized = value.replace(/\.(srt|vtt|ass)$/i, '.ass')
   return /\.ass$/i.test(normalized) ? normalized : `${normalized}.ass`
+}
+
+// 从现有输入里挑一个路径给后端推导工作目录，保证字幕保存仍落回当前视频文件夹。
+function pickSubtitleWorkspaceSource(...candidates: Array<string | null | undefined>) {
+  for (const candidate of candidates) {
+    const value = (candidate || '').trim()
+    if (value) return value
+  }
+  return undefined
 }
 
 function SectionTitle({ title, description }: { title: string; description: string }) {

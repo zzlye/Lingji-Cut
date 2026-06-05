@@ -9,7 +9,7 @@ from datetime import datetime
 import os
 
 from ..core import Downloader, FFmpegProcessor, SubtitleEngine, TextEngine
-from ..core.paths import ensure_project_dirs
+from ..core.paths import detect_video_workspace, ensure_project_dirs, ensure_video_workspace
 from ..core.process_control import TaskControlRequested
 from ..models import DownloadTask, SubtitlePreset, TextProviderProfile, VideoSource, get_db
 from ..utils import decrypt_api_key
@@ -144,6 +144,7 @@ class SubtitleCorrectionSaveRequest(BaseModel):
     output_path: Optional[str] = None
     file_name: Optional[str] = None
     format: str = "srt"
+    source_path: Optional[str] = None
 
 
 class SubtitleCorrectionSaveAssRequest(BaseModel):
@@ -152,6 +153,7 @@ class SubtitleCorrectionSaveAssRequest(BaseModel):
     output_path: Optional[str] = None
     file_name: Optional[str] = None
     preset_id: Optional[int] = None
+    source_path: Optional[str] = None
 
 
 class SubtitleCorrectionResponse(BaseModel):
@@ -253,20 +255,56 @@ def _entry_payloads(entries: list[dict]) -> list[SubtitleEntryPayload]:
     ]
 
 
-def _safe_subtitle_output_path(output_path: Optional[str], file_name: Optional[str], extension: str) -> str:
-    """生成字幕输出路径，未指定时保存到项目 output 目录"""
+def _safe_subtitle_output_path(
+    output_path: Optional[str],
+    file_name: Optional[str],
+    extension: str,
+    source_path: Optional[str] = None,
+) -> str:
+    """生成字幕输出路径，优先复用当前字幕或视频所属目录，避免不同视频的素材混在一起"""
     if output_path and output_path.strip():
         path = os.path.abspath(os.path.expanduser(output_path.strip()))
     else:
-        paths = ensure_project_dirs()
-        raw_name = (file_name or f"manual_subtitle_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
-        safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in raw_name) or "manual_subtitle"
-        if not safe_name.lower().endswith(f".{extension}"):
-            safe_name = f"{os.path.splitext(safe_name)[0]}.{extension}"
-        path = os.path.join(paths["output_dir"], safe_name)
+        base_dir = _subtitle_output_base_dir(source_path)
+        raw_name = (file_name or _subtitle_default_file_name(source_path, extension)).strip()
+        safe_name = _sanitize_subtitle_file_name(raw_name, extension)
+        path = os.path.join(base_dir, safe_name)
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
+
+
+def _subtitle_output_base_dir(source_path: Optional[str]) -> str:
+    """根据当前字幕或视频路径推导默认输出目录，优先落到该视频的工作目录 output 下"""
+    raw_source_path = str(source_path or "").strip()
+    if raw_source_path:
+        normalized = os.path.abspath(os.path.expanduser(raw_source_path))
+        workspace_paths = detect_video_workspace(normalized)
+        if workspace_paths:
+            return workspace_paths["output_dir"]
+        parent_dir = normalized if os.path.isdir(normalized) else os.path.dirname(normalized)
+        if parent_dir:
+            return parent_dir
+    return ensure_project_dirs()["output_dir"]
+
+
+def _subtitle_default_file_name(source_path: Optional[str], extension: str) -> str:
+    """没有显式文件名时，优先沿用源文件名，避免同一视频下生成难以辨认的通用文件名"""
+    raw_source_path = str(source_path or "").strip()
+    if raw_source_path:
+        base_name = os.path.splitext(os.path.basename(raw_source_path))[0].strip()
+        if base_name:
+            return f"{base_name}.{extension}"
+    return f"manual_subtitle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{extension}"
+
+
+def _sanitize_subtitle_file_name(file_name: str, extension: str) -> str:
+    """把用户输入的文件名整理成安全路径片段，并补齐目标扩展名"""
+    safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(file_name or "").strip())
+    safe_name = safe_name.strip("._") or "manual_subtitle"
+    if not safe_name.lower().endswith(f".{extension}"):
+        safe_name = f"{os.path.splitext(safe_name)[0]}.{extension}"
+    return safe_name
 
 
 def entries_to_plain_text(entries: list[dict], max_chars: int = 6000) -> str:
@@ -478,7 +516,7 @@ async def save_corrected_subtitle(request: SubtitleCorrectionSaveRequest):
 
     engine = SubtitleEngine()
     entries = _normalize_correction_entries(engine, request.entries)
-    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "srt")
+    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "srt", request.source_path)
     engine.save_srt(entries, output_path)
 
     return SubtitleCorrectionResponse(
@@ -498,7 +536,7 @@ async def save_corrected_ass(request: SubtitleCorrectionSaveAssRequest, db: Sess
     preset = _pick_subtitle_preset(db, request.preset_id)
     preset_dict = _preset_to_dict(preset)
     display_entries = engine.normalize_entries_for_display(entries, preset_dict)
-    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "ass")
+    output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "ass", request.source_path)
     engine.generate_ass(display_entries, output_path, preset_dict)
 
     return SubtitleCorrectionResponse(
@@ -536,7 +574,7 @@ def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_d
     db.refresh(task)
 
     try:
-        paths = ensure_project_dirs()
+        paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
         subtitle_path = request.subtitle_path
         if not subtitle_path:
             subtitle_path = Downloader().download_subtitle(

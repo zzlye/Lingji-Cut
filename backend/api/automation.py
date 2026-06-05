@@ -20,7 +20,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine
-from ..core.paths import ensure_project_dirs
+from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
 from ..core.tooling import assert_required_tools_available
@@ -418,6 +418,11 @@ def _latest_matching_file(directory: str, pattern: str) -> Optional[str]:
 
 def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
     """推导重新合成导出要使用的源视频，优先画面处理产物，再回退下载原片"""
+    params = _get_job_params(job) if job else {}
+    for key in ("source_video_path", "downloaded_video_path"):
+        candidate = _existing_file(str(params.get(key) or ""), MEDIA_EXTENSIONS)
+        if candidate:
+            return candidate
     return (
         _stage_output_if_reusable(job, "effects")
         or _stage_output_if_reusable(job, "download")
@@ -452,15 +457,75 @@ def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Opt
             return candidate
 
     source_video_path = _find_job_source_video_path(job)
-    if not source_video_path:
+    workspace_paths = _job_workspace_paths(job, db)
+    if workspace_paths:
+        output_dir = workspace_paths["output_dir"]
+    elif source_video_path:
+        detected = detect_video_workspace(source_video_path)
+        output_dir = detected["output_dir"] if detected else None
+    else:
+        output_dir = None
+    if not source_video_path or not output_dir:
         return None
 
     base_name = os.path.splitext(os.path.basename(source_video_path))[0]
-    output_dir = ensure_project_dirs()["output_dir"]
     for pattern in (f"{base_name}_*.ass", f"{base_name}_*.srt", f"{base_name}_*.vtt"):
         matched = _latest_matching_file(output_dir, pattern)
         if matched:
             return matched
+    return None
+
+
+def _store_job_workspace_params(job: Optional[AutomationJobRecord], paths: dict[str, str], source_video_path: Optional[str] = None) -> None:
+    """把视频工作目录写回任务参数，后续重导出和字幕页都直接按目录找资源"""
+    if not job:
+        return
+    params = _get_job_params(job)
+    params.update({
+        "workspace_dir": paths.get("workspace_dir"),
+        "workspace_name": paths.get("workspace_name"),
+        "video_downloads_dir": paths.get("downloads_dir"),
+        "video_output_dir": paths.get("output_dir"),
+        "video_exports_dir": paths.get("exports_dir"),
+    })
+    if source_video_path:
+        params["source_video_path"] = source_video_path
+    _set_job_params(job, params)
+
+
+def _job_workspace_paths(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[dict[str, str]]:
+    """读取任务绑定的视频工作目录，旧任务则尽量从现有文件路径或视频信息推导"""
+    if not job:
+        return None
+    params = _get_job_params(job)
+    workspace_dir = str(params.get("workspace_dir") or "").strip()
+    if workspace_dir:
+        return {
+            "workspace_dir": workspace_dir,
+            "workspace_name": str(params.get("workspace_name") or os.path.basename(workspace_dir)),
+            "downloads_dir": str(params.get("video_downloads_dir") or os.path.join(workspace_dir, "downloads")),
+            "output_dir": str(params.get("video_output_dir") or os.path.join(workspace_dir, "output")),
+            "exports_dir": str(params.get("video_exports_dir") or os.path.join(workspace_dir, "exports")),
+        }
+
+    for candidate in (
+        _stage_output_if_reusable(job, "download"),
+        _stage_output_if_reusable(job, "effects"),
+        _stage_output_if_reusable(job, "subtitle"),
+        _stage_output_if_reusable(job, "voice"),
+        _stage_output_if_reusable(job, "export"),
+        _existing_file(str(params.get("source_video_path") or ""), MEDIA_EXTENSIONS),
+    ):
+        if not candidate:
+            continue
+        detected = detect_video_workspace(candidate)
+        if detected:
+            return detected
+
+    if db and job.video_id:
+        video = db.query(VideoSource).filter(VideoSource.id == job.video_id).first()
+        if video:
+            return ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     return None
 
 
@@ -1145,7 +1210,6 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     assert_required_tools_available()
     downloader = Downloader()
     processor = FFmpegProcessor()
-    paths = ensure_project_dirs()
     stages: list[AutomationStageResult] = []
     subtitle_text = ""
     subtitle_entries: list[dict[str, Any]] = []
@@ -1157,12 +1221,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     preset_dict: dict[str, Any] = {}
 
     video = _parse_or_update_video(db, request.url, downloader)
+    paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     _check_control(db, job)
     stages.append(AutomationStageResult(key="parse", status="completed"))
     if job:
         job.video_id = video.id
         job.title = video.title or "一键自动流程"
         job.status = "running"
+        _store_job_workspace_params(job, paths)
         _update_job_stage(db, job, "parse", "completed")
 
     reusable_download_path = _stage_output_if_reusable(job, "download") if resume_from_checkpoint else None
@@ -1186,6 +1252,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             _check_control(db, job, download_task)
             downloaded_path = downloader.download_video(
                 url=video.url,
+                output_dir=paths["downloads_dir"],
                 format_id=request.format_id,
                 output_format="mp4",
                 progress_callback=on_progress,
@@ -1193,6 +1260,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             )
             _check_control(db, job, download_task)
             _complete_task(db, download_task, downloaded_path)
+            if job:
+                _store_job_workspace_params(job, paths, source_video_path=downloaded_path)
             stages.append(AutomationStageResult(key="download", status="completed", task_id=download_task.id, output_path=downloaded_path))
             if job:
                 _update_job_stage(db, job, "download", "completed", task_id=download_task.id, output_path=downloaded_path)
@@ -1450,14 +1519,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             if banned_hits and request.banned_word_action == "block":
                 raise BannedWordsDetected(f"配音文案命中禁词: {', '.join(banned_hits)}")
             output_ext = _voice_output_extension(voice_profile.provider_type, settings)
-            audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice.{output_ext}")
+            audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
             voice_engine = VoiceEngine()
             api_key = decrypt_api_key(voice_profile.api_key_encrypted)
             model = voice_profile.voice or ""
             segments = subtitle_entries_to_voice_segments(subtitle_entries)
             if request.voice_mode == "segmented" and segments and not request.voice_text:
                 try:
-                    audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice_timed.{output_ext}")
+                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_timed.{output_ext}")
 
                     def on_voice_progress(progress: float) -> None:
                         """同步分段配音进度到后台任务"""
@@ -1485,7 +1554,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 except Exception as segmented_exc:
                     if job:
                         _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"分段配音失败，回退整段配音: {segmented_exc}")
-                    audio_path = os.path.join(ensure_project_dirs()["output_dir"], f"{video.video_id}_voice.{output_ext}")
+                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
                     audio_path = asyncio.run(voice_engine.generate_voice(
                         text=voice_text,
                         output_path=audio_path,
@@ -2276,6 +2345,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
 
     _prepare_job_export_stage_for_rerun(job)
     db.commit()
+    workspace_paths = _job_workspace_paths(job, db) or (detect_video_workspace(source_video_path) if source_video_path else None) or ensure_project_dirs()
 
     export_task = _create_task(
         db,
@@ -2331,7 +2401,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
                 video_path=working_video,
                 preset=final_export_preset,
                 output_path=os.path.join(
-                    ensure_project_dirs()["output_dir"],
+                    workspace_paths["output_dir"],
                     f"{os.path.splitext(os.path.basename(working_video))[0]}_manual_final.mp4",
                 ),
                 control_keys=_control_keys(job, export_task),

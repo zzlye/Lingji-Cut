@@ -20,6 +20,13 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
 # 项目目录下自动创建的业务子目录
 PROJECT_SUBDIRS = {
     "data_dir": "data",
+    "videos_dir": "videos",
+    "downloads_dir": "downloads",
+    "output_dir": "output",
+    "exports_dir": "exports",
+}
+
+WORKSPACE_STAGE_DIRS = {
     "downloads_dir": "downloads",
     "output_dir": "output",
     "exports_dir": "exports",
@@ -82,6 +89,61 @@ def ensure_project_dirs(project_root: str | None = None) -> dict[str, str]:
     return paths
 
 
+def ensure_video_workspace(video_id: str | int | None, title: str | None, project_root: str | None = None) -> dict[str, str]:
+    """确保单个视频的独立工作目录存在，并返回该视频专属的下载/输出/导出路径"""
+    base_paths = ensure_project_dirs(project_root)
+    compatibility_workspace = _compat_workspace_from_base_paths(base_paths)
+    if compatibility_workspace:
+        return compatibility_workspace
+
+    project_root_path = base_paths.get("project_root") or load_project_root()
+    videos_root = base_paths.get("videos_dir") or os.path.join(project_root_path, "videos")
+    os.makedirs(videos_root, exist_ok=True)
+
+    workspace_name = _resolve_workspace_name(videos_root, video_id, title)
+    workspace_dir = os.path.join(videos_root, workspace_name)
+    os.makedirs(workspace_dir, exist_ok=True)
+
+    paths = {
+        "project_root": project_root_path,
+        "default_project_root": base_paths.get("default_project_root") or APP_ROOT,
+        "videos_dir": videos_root,
+        "workspace_dir": workspace_dir,
+        "workspace_name": workspace_name,
+    }
+    for key, dirname in WORKSPACE_STAGE_DIRS.items():
+        path = os.path.join(workspace_dir, dirname)
+        os.makedirs(path, exist_ok=True)
+        paths[key] = path
+    return paths
+
+
+def detect_video_workspace(media_path: str) -> dict[str, str] | None:
+    """根据已有媒体文件路径回推所属视频工作目录"""
+    normalized = os.path.abspath(os.path.expanduser(str(media_path or "").strip()))
+    if not normalized:
+        return None
+
+    stage_dir = os.path.dirname(normalized)
+    workspace_dir = os.path.dirname(stage_dir)
+    stage_name = os.path.basename(stage_dir).lower()
+    if stage_name not in set(WORKSPACE_STAGE_DIRS.values()):
+        return None
+    if not os.path.isdir(workspace_dir):
+        return None
+
+    paths = {
+        "project_root": os.path.dirname(os.path.dirname(workspace_dir)),
+        "default_project_root": APP_ROOT,
+        "videos_dir": os.path.dirname(workspace_dir),
+        "workspace_dir": workspace_dir,
+        "workspace_name": os.path.basename(workspace_dir),
+    }
+    for key, dirname in WORKSPACE_STAGE_DIRS.items():
+        paths[key] = os.path.join(workspace_dir, dirname)
+    return paths
+
+
 def get_project_paths(create: bool = True) -> dict[str, dict[str, Any]]:
     """返回前端需要展示的项目路径信息"""
     raw_paths = ensure_project_dirs() if create else _build_project_paths(load_project_root())
@@ -101,3 +163,43 @@ def _build_project_paths(project_root: str) -> dict[str, str]:
     for key, dirname in PROJECT_SUBDIRS.items():
         paths[key] = os.path.join(root, dirname)
     return paths
+
+
+def _compat_workspace_from_base_paths(base_paths: dict[str, str]) -> dict[str, str] | None:
+    """兼容单元测试或旧逻辑传入的简化目录结构，避免强行再套一层 videos 目录"""
+    if "project_root" in base_paths:
+        return None
+    fallback_dir = base_paths.get("output_dir") or base_paths.get("downloads_dir") or base_paths.get("exports_dir")
+    if not fallback_dir:
+        return None
+    workspace_dir = os.path.abspath(os.path.expanduser(fallback_dir))
+    return {
+        "project_root": os.path.dirname(workspace_dir),
+        "default_project_root": APP_ROOT,
+        "videos_dir": os.path.dirname(workspace_dir),
+        "workspace_dir": workspace_dir,
+        "workspace_name": os.path.basename(workspace_dir),
+        "downloads_dir": base_paths.get("downloads_dir") or workspace_dir,
+        "output_dir": base_paths.get("output_dir") or workspace_dir,
+        "exports_dir": base_paths.get("exports_dir") or workspace_dir,
+    }
+
+
+def _resolve_workspace_name(videos_root: str, video_id: str | int | None, title: str | None) -> str:
+    """根据视频 ID 和标题生成稳定目录名；同一个视频改标题时尽量复用旧目录"""
+    safe_id = _safe_path_fragment(str(video_id or "").strip(), fallback="video")
+    prefix = f"{safe_id}__"
+    for dirname in os.listdir(videos_root):
+        if dirname.startswith(prefix):
+            return dirname
+    safe_title = _safe_path_fragment(title or "", fallback="untitled")[:64]
+    return f"{safe_id}__{safe_title}"
+
+
+def _safe_path_fragment(value: str, fallback: str = "item") -> str:
+    """把任意标题转换成安全可读的目录名片段"""
+    text = str(value or "").strip()
+    text = "".join(char if char.isalnum() or char in ("-", "_", ".", " ") else "_" for char in text)
+    text = "_".join(text.split())
+    text = text.strip("._")
+    return text or fallback

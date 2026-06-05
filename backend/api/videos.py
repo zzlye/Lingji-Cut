@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ..core import DedupChecker, Downloader
+from ..core.paths import ensure_video_workspace
 from ..core.process_control import TaskControlRequested
 from ..models import get_db, VideoSource, DownloadTask
 
@@ -127,8 +128,10 @@ def download_video(request: DownloadRequest, db: Session = Depends(get_db)):
         db.commit()
 
     try:
+        workspace_paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
         output_path = downloader.download_video(
             url=video.url,
+            output_dir=workspace_paths["downloads_dir"],
             format_id=request.format_id,
             output_format=request.output_format,
             progress_callback=on_progress,

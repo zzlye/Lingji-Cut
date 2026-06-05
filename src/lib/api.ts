@@ -214,14 +214,14 @@ export const subtitleApi = {
     }),
 
   /** 保存手动校对后的 SRT 文件 */
-  saveCorrected: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; format?: 'srt' }) =>
+  saveCorrected: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; format?: 'srt'; source_path?: string }) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path: string; format: string }>('/subtitles/save', {
       method: 'POST',
       body: JSON.stringify(params),
     }),
 
   /** 按字幕预设生成 ASS 文件 */
-  saveAss: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; preset_id?: number | null }) =>
+  saveAss: (params: { entries: import('@/types').SubtitleEntry[]; output_path?: string; file_name?: string; preset_id?: number | null; source_path?: string }) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path: string; format: string }>('/subtitles/save-ass', {
       method: 'POST',
       body: JSON.stringify(params),

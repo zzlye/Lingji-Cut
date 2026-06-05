@@ -167,11 +167,13 @@ export function SubtitleCorrectionPanel() {
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在保存 SRT 字幕...' })
     try {
+      const sourcePath = pickSubtitleWorkspaceSource(outputPath.trim(), subtitlePath.trim(), lastSavedPath)
       const result = await subtitleApi.saveCorrected({
         entries,
         output_path: outputPath.trim() || undefined,
         file_name: fileName.trim() || undefined,
         format: 'srt',
+        source_path: sourcePath,
       })
       setLastSavedPath(result.output_path)
       setOutputPath(result.output_path)
@@ -195,10 +197,12 @@ export function SubtitleCorrectionPanel() {
     setNotice({ type: 'info', message: '正在生成 ASS 字幕...' })
     try {
       const preferences = loadAutomationPreferences()
+      const sourcePath = pickSubtitleWorkspaceSource(outputPath.trim(), subtitlePath.trim(), lastSavedPath)
       const result = await subtitleApi.saveAss({
         entries,
         file_name: fileName.replace(/\.(srt|vtt)$/i, '.ass'),
         preset_id: preferences.subtitle_preset_id,
+        source_path: sourcePath,
       })
       setLastSavedPath(result.output_path)
       setNotice({ type: 'success', message: result.message })
@@ -224,7 +228,7 @@ export function SubtitleCorrectionPanel() {
           <aside className="space-y-4">
             <section className="rounded-lg border border-border bg-background p-4">
               <SectionTitle title="导入字幕" description="支持 SRT/VTT 文件路径，也可以直接粘贴字幕文本。" />
-              <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\视频项目\output\subtitle.srt" onChange={setSubtitlePath} />
+              <TextField label="字幕文件路径" value={subtitlePath} placeholder="D:\视频项目\videos\视频名\output\subtitle.srt" onChange={setSubtitlePath} />
               <button onClick={handleParseFile} disabled={isLoading} className="mt-3 h-9 w-full rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                 {isLoading ? '读取中...' : '读取文件'}
               </button>
@@ -349,9 +353,9 @@ export function SubtitleCorrectionPanel() {
 
           <aside className="space-y-4 max-2xl:col-span-2 max-lg:col-span-1">
             <section className="rounded-lg border border-border bg-background p-4">
-              <SectionTitle title="保存输出" description="留空路径时会自动保存到项目 output 子目录。" />
+              <SectionTitle title="保存输出" description="留空路径时会自动保存到当前字幕或当前视频所属目录。" />
               <TextField label="文件名" value={fileName} onChange={setFileName} />
-              <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动生成" onChange={setOutputPath} />
+              <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动保存到当前字幕或当前视频目录" onChange={setOutputPath} />
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <button onClick={saveSrt} disabled={isSaving || entries.length === 0} className="h-9 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                   保存 SRT
@@ -441,6 +445,15 @@ function msToTime(value: number) {
 /** 两位数补零 */
 function pad(value: number) {
   return String(value).padStart(2, '0')
+}
+
+/** 从当前输入中挑一个可用于推导视频工作目录的路径 */
+function pickSubtitleWorkspaceSource(...candidates: Array<string | null | undefined>) {
+  for (const candidate of candidates) {
+    const value = (candidate || '').trim()
+    if (value) return value
+  }
+  return undefined
 }
 
 /** 分组标题 */

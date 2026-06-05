@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from .process_control import clear_control_request, request_control, terminate_matching_tool_processes
-from .paths import ensure_project_dirs
+from .paths import ensure_project_dirs, ensure_video_workspace
 from ..models import AutomationJobRecord, DownloadTask, VideoSource
 
 
@@ -112,9 +112,10 @@ def _stage_output_fragments(db: Session, task: DownloadTask) -> list[str]:
     if task.task_type == "effects":
         video = _video_for_task(db, task)
         if video:
+            workspace_paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
             title = _safe_file_name(video.title or video.video_id)
             if title:
-                fragments.append(os.path.join(ensure_project_dirs()["output_dir"], f"{title}_enhanced.mp4"))
+                fragments.append(os.path.join(workspace_paths["output_dir"], f"{title}_enhanced.mp4"))
     return _dedupe_fragments(fragments)
 
 
@@ -136,7 +137,7 @@ def _task_match_fragments(db: Session, task: DownloadTask) -> list[str]:
 
     # 自动化画面处理旧任务有时没有把 downloaded_path 写入 params，用视频标题和默认目录兜底匹配。
     if task.task_type in {"effects", "subtitle", "export"} and video:
-        paths = ensure_project_dirs()
+        paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
         title = _safe_file_name(video.title or video.video_id)
         if title:
             fragments.extend([

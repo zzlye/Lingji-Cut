@@ -91,8 +91,8 @@ class VoiceEngine:
         audio_format = self._provider_audio_format(provider_type, options)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        # 分段音频属于临时素材，最终会保留对齐后的完整音轨。
-        temp_dir = tempfile.mkdtemp(prefix="voice_segments_", dir=ensure_project_dirs()["output_dir"])
+        # 分段音频临时目录跟最终输出放在同一视频目录，避免又落回全局 output 里。
+        temp_dir = tempfile.mkdtemp(prefix="voice_segments_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         timed_audio_paths: list[dict[str, Any]] = []
         try:
             total = len(normalized_segments)

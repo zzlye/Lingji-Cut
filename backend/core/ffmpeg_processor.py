@@ -12,7 +12,7 @@ import time
 from functools import lru_cache
 from typing import Any, Callable, Optional
 from ..utils import get_logger
-from .paths import ensure_project_dirs
+from .paths import ensure_project_dirs, detect_video_workspace
 from .process_control import normalize_control_keys, raise_if_control_requested, register_process, subprocess_creation_flags, terminate_process, unregister_process
 from .tooling import get_ffmpeg_command
 
@@ -158,7 +158,9 @@ class FFmpegProcessor:
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             suffix = "preview" if preview else "enhanced"
-            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_{suffix}.mp4")
+            workspace_paths = detect_video_workspace(video_path)
+            output_root = workspace_paths["output_dir"] if workspace_paths else ensure_project_dirs()["output_dir"]
+            output_path = os.path.join(output_root, f"{base_name}_{suffix}.mp4")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -316,7 +318,9 @@ class FFmpegProcessor:
         # 生成输出路径
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
-            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_subtitled.mp4")
+            workspace_paths = detect_video_workspace(video_path)
+            output_root = workspace_paths["output_dir"] if workspace_paths else ensure_project_dirs()["output_dir"]
+            output_path = os.path.join(output_root, f"{base_name}_subtitled.mp4")
 
         # 构建字幕滤镜
         subtitle_filter = self._build_subtitle_filter(subtitle_path, preset)
@@ -437,7 +441,9 @@ class FFmpegProcessor:
         # 生成输出路径
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(video_path))[0]
-            output_path = os.path.join(ensure_project_dirs()["output_dir"], f"{base_name}_voiced.mp4")
+            workspace_paths = detect_video_workspace(video_path)
+            output_root = workspace_paths["output_dir"] if workspace_paths else ensure_project_dirs()["output_dir"]
+            output_path = os.path.join(output_root, f"{base_name}_voiced.mp4")
 
         if mode == "replace":
             # 替换原声
@@ -498,7 +504,9 @@ class FFmpegProcessor:
         output_format = (output_format or "mp4").strip().lower().lstrip(".") or "mp4"
         if output_path is None:
             base_name = os.path.splitext(os.path.basename(input_path))[0]
-            output_path = os.path.join(ensure_project_dirs()["exports_dir"], f"{base_name}.{output_format}")
+            workspace_paths = detect_video_workspace(input_path)
+            output_root = workspace_paths["exports_dir"] if workspace_paths else ensure_project_dirs()["exports_dir"]
+            output_path = os.path.join(output_root, f"{base_name}.{output_format}")
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         input_ext = os.path.splitext(input_path)[1].lower().lstrip(".")

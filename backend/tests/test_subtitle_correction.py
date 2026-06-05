@@ -199,6 +199,31 @@ Language: ja
             self.assertIn("Dialogue:", content)
             self.assertIn("ASS 字幕", content)
 
+    def test_save_ass_without_output_path_uses_video_workspace_output_dir(self):
+        """未手填输出路径时，ASS 默认保存到当前视频工作目录的 output 里"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace_dir = os.path.join(temp_dir, "videos", "demo__测试视频")
+            downloads_dir = os.path.join(workspace_dir, "downloads")
+            output_dir = os.path.join(workspace_dir, "output")
+            os.makedirs(downloads_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+            source_video_path = os.path.join(downloads_dir, "source.mp4")
+            with open(source_video_path, "wb") as file:
+                file.write(b"video")
+
+            request = SubtitleCorrectionSaveAssRequest(
+                source_path=source_video_path,
+                file_name="fixed.ass",
+                entries=[
+                    SubtitleEntryPayload(index=1, start="00:00:01,000", end="00:00:02,000", text="工作目录字幕"),
+                ],
+            )
+
+            response = asyncio.run(save_corrected_ass(request, EmptyDb()))
+
+            self.assertEqual(response.output_path, os.path.join(output_dir, "fixed.ass"))
+            self.assertTrue(os.path.exists(response.output_path))
+
     def test_generate_ass_single_line_does_not_insert_line_breaks(self):
         """单行字幕不会写入 ASS 换行符，避免画面出现双行字幕"""
         with tempfile.TemporaryDirectory() as temp_dir:

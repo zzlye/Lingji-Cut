@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -100,6 +101,44 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
         self.assertTrue(os.path.exists(result_path))
         self.assertGreater(os.path.getsize(result_path), 0)
+
+    def test_timed_voice_segment_temp_dir_follows_output_directory(self):
+        """分段配音的临时片段目录应跟最终输出放在同一个视频目录里"""
+        output_dir = os.path.join(self.temp_dir, "video_workspace", "output")
+        output_audio = os.path.join(output_dir, "timed_voice.wav")
+        temp_dir_calls: list[str] = []
+
+        async def fake_generate_voice(*_, output_path: str, **__):
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "wb") as file:
+                file.write(b"segment")
+            return output_path
+
+        def fake_mix(_timed_audio_paths, final_output_path: str):
+            os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        def fake_mkdtemp(prefix: str, dir: str):
+            temp_dir_calls.append(dir)
+            path = os.path.join(dir, f"{prefix}tmp")
+            os.makedirs(path, exist_ok=True)
+            return path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch("backend.core.voice_engine.tempfile.mkdtemp", side_effect=fake_mkdtemp),
+        ):
+            result_path = asyncio.run(self.voice_engine.generate_timed_voice_track(
+                segments=[{"start_ms": 0, "end_ms": 600, "text": "测试配音"}],
+                output_path=output_audio,
+            ))
+
+        self.assertEqual(result_path, output_audio)
+        self.assertEqual(temp_dir_calls, [output_dir])
+        self.assertTrue(os.path.exists(output_audio))
 
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""
