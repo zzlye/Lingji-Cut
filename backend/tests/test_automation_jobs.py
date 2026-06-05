@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
@@ -70,6 +70,9 @@ class FakeTaskDb(FakeDb):
         elif item in self.jobs:
             self.jobs.remove(item)
 
+    def refresh(self, _item):
+        return None
+
 
 class FakeSubtitleDownloader:
     """测试用字幕下载器，模拟首选语言被限流后其它语言成功"""
@@ -110,6 +113,7 @@ class FakeAutomationProcessor:
         self.temp_dir = temp_dir
         self.burn_calls: list[dict] = []
         self.effects_calls: list[dict] = []
+        self.merge_calls: list[dict] = []
 
     def burn_subtitles(self, **kwargs):
         """记录烧录参数并返回假输出文件"""
@@ -125,6 +129,14 @@ class FakeAutomationProcessor:
         output_path = os.path.join(self.temp_dir, "final.mp4")
         with open(output_path, "wb") as file:
             file.write(b"final")
+        return output_path
+
+    def merge_audio_video(self, **kwargs):
+        """记录音频合并参数并返回假输出文件"""
+        self.merge_calls.append(kwargs)
+        output_path = os.path.join(self.temp_dir, "merged.mp4")
+        with open(output_path, "wb") as file:
+            file.write(b"merged")
         return output_path
 
     def convert_format(self, **_kwargs):
@@ -179,6 +191,45 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.batch_id, "batch-test")
         self.assertTrue(response.can_pause)
         self.assertTrue(response.can_cancel)
+
+    def test_job_response_exposes_reusable_subtitle_and_media_paths(self):
+        """任务响应会补充可编辑字幕、重导出源视频和配音音轨路径"""
+        with tempfile.TemporaryDirectory(prefix="automation_job_assets_") as temp_dir:
+            download_path = os.path.join(temp_dir, "downloaded.mp4")
+            subtitle_ass_path = os.path.join(temp_dir, "downloaded_zh.ass")
+            voice_path = os.path.join(temp_dir, "voice.mp3")
+            subtitled_video_path = os.path.join(temp_dir, "downloaded_subtitled.mp4")
+            for path in (download_path, subtitle_ass_path, voice_path, subtitled_video_path):
+                with open(path, "wb") as file:
+                    file.write(b"ok")
+
+            job = AutomationJobRecord(
+                id="auto-assets",
+                source_url="https://youtube.com/watch?v=test",
+                title="测试任务",
+                status="completed",
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": download_path, "error_message": None},
+                    {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 2, "output_path": subtitled_video_path, "error_message": None},
+                    {"key": "voice", "status": "completed", "progress": 100, "task_id": 3, "output_path": voice_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            subtitle_task = DownloadTask(
+                id=2,
+                video_id=1,
+                task_type="subtitle",
+                status="completed",
+                progress=100,
+                output_path=subtitled_video_path,
+                params=json.dumps({"editable_subtitle_path": subtitle_ass_path}, ensure_ascii=False),
+                parent_job_id="auto-assets",
+            )
+
+            response = _job_to_response(job, FakeTaskDb([job], [subtitle_task]))
+
+        self.assertEqual(response.subtitle_asset_path, subtitle_ass_path)
+        self.assertEqual(response.source_video_path, download_path)
+        self.assertEqual(response.voice_asset_path, voice_path)
 
     def test_default_stages_include_full_automation_flow(self):
         keys = [stage["key"] for stage in _default_stages()]
@@ -299,6 +350,34 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIsNone(stages["export"]["error_message"])
         self.assertEqual(stages["voice"]["status"], "pending")
         self.assertEqual(stages["subtitle"]["status"], "pending")
+
+    def test_prepare_job_export_stage_for_rerun_only_resets_export(self):
+        """字幕调整页重新导出只重置导出阶段，不动下载/画面/字幕/配音结果"""
+        job = AutomationJobRecord(
+            id="auto-rerun-export",
+            source_url="https://youtube.com/watch?v=test",
+            status="completed",
+            progress=100,
+            current_step="流程完成",
+            output_path="D:/old.mp4",
+            error_message="旧错误",
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+                {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 2, "output_path": "D:/subtitle.ass", "error_message": None},
+                {"key": "export", "status": "completed", "progress": 100, "task_id": 3, "output_path": "D:/old.mp4", "error_message": None},
+            ], ensure_ascii=False),
+        )
+
+        _prepare_job_export_stage_for_rerun(job)
+        stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+        self.assertEqual(job.status, "running")
+        self.assertEqual(job.current_step, "字幕调整重新导出")
+        self.assertIsNone(job.output_path)
+        self.assertEqual(stages["download"]["status"], "completed")
+        self.assertEqual(stages["subtitle"]["status"], "completed")
+        self.assertEqual(stages["export"]["status"], "pending")
+        self.assertIsNone(stages["export"]["output_path"])
 
     def test_pause_and_cancel_job_update_controls_and_stages(self):
         """单任务暂停/取消会影响自动化任务状态和阶段状态"""
@@ -683,6 +762,62 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.effects_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
         self.assertFalse(fake_processor.effects_calls[0]["preset"]["transform"]["enabled"])
         self.assertEqual(fake_processor.effects_calls[0]["preset"]["canvas"]["resolution"], "1080p")
+
+    def test_reexport_automation_job_uses_new_subtitle_and_updates_job_output(self):
+        """字幕调整页重新导出会使用新 ASS 并覆盖任务的最新导出路径"""
+        with tempfile.TemporaryDirectory(prefix="automation_reexport_") as temp_dir:
+            source_video_path = os.path.join(temp_dir, "source.mp4")
+            subtitle_path = os.path.join(temp_dir, "manual.ass")
+            voice_path = os.path.join(temp_dir, "voice.mp3")
+            for path in (source_video_path, subtitle_path, voice_path):
+                with open(path, "wb") as file:
+                    file.write(b"data")
+
+            job = AutomationJobRecord(
+                id="auto-reexport",
+                video_id=7,
+                source_url="https://youtube.com/watch?v=test",
+                status="completed",
+                output_path=os.path.join(temp_dir, "old.mp4"),
+                params=json.dumps({
+                    "output_format": "mp4",
+                    "export_with_settings": False,
+                    "audio_mode": "mix",
+                    "original_volume": 0.35,
+                    "export_settings": {"resolution": "original", "bitrate_enabled": False, "bitrate_kbps": 0},
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": source_video_path, "error_message": None},
+                    {"key": "voice", "status": "completed", "progress": 100, "task_id": 2, "output_path": voice_path, "error_message": None},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 3, "output_path": os.path.join(temp_dir, "old.mp4"), "error_message": None},
+                ], ensure_ascii=False),
+            )
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(30, 40))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+            ):
+                response = reexport_automation_job(
+                    "auto-reexport",
+                    AutomationReExportRequest(subtitle_path=subtitle_path, audio_path=voice_path),
+                    db,
+                )
+
+        self.assertEqual(response.job_id, "auto-reexport")
+        self.assertTrue(response.output_path.endswith("exported.mp4"))
+        self.assertEqual(fake_processor.burn_calls[0]["subtitle_path"], subtitle_path)
+        self.assertEqual(fake_processor.merge_calls[0]["audio_path"], voice_path)
+        self.assertEqual(job.output_path, response.output_path)
+        self.assertEqual(job.status, "completed")
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

@@ -2,11 +2,12 @@
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 润色/翻译/生成，并保留时间轴
 
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, Captions, FileText, Languages, Settings2, Sparkles, Wand2 } from 'lucide-react'
-import { subtitleApi, profileApi } from '@/lib/api'
+import { Bot, Captions, FileText, Film, History, Languages, ListChecks, Settings2, Sparkles, Volume2, Wand2 } from 'lucide-react'
+import { subtitleApi, profileApi, automationApi } from '@/lib/api'
+import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
 import { usePrefsStore } from '@/stores/prefsStore'
-import type { ApiProfile, SubtitleEntry, SubtitleTextOperation } from '@/types'
+import type { ApiProfile, AutomationJob, SubtitleEntry, SubtitleTextOperation } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -27,6 +28,14 @@ const AI_OPERATION_LABEL: Record<Exclude<SubtitleTextOperation, 'none'>, string>
   translate: 'AI 翻译',
   generate: 'AI 生成文案',
 }
+const JOB_STATUS_LABEL: Record<AutomationJob['status'], string> = {
+  pending: '等待中',
+  running: '运行中',
+  paused: '已暂停',
+  cancelled: '已取消',
+  completed: '已完成',
+  failed: '失败',
+}
 
 type CorrectionNotice = {
   type: 'info' | 'success' | 'warning' | 'error'
@@ -35,13 +44,23 @@ type CorrectionNotice = {
 
 interface StudioSubtitleWorkbenchProps {
   suggestedSubtitlePath?: string | null
+  availableJobs?: AutomationJob[]
+  selectedJob?: AutomationJob | null
+  onSelectJob?: (jobId: string | null) => void
   onOpenTextSettings?: () => void
 }
 
-export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSettings }: StudioSubtitleWorkbenchProps) {
+export function StudioSubtitleWorkbench({
+  suggestedSubtitlePath,
+  availableJobs = [],
+  selectedJob = null,
+  onSelectJob,
+  onOpenTextSettings,
+}: StudioSubtitleWorkbenchProps) {
   const preferences = usePrefsStore((state) => state.preferences)
   const updatePreferences = usePrefsStore((state) => state.update)
   const { addLog } = useTaskStore()
+  const syncBackendJob = useAutomationStore((state) => state.syncBackendJob)
 
   const [subtitlePath, setSubtitlePath] = useState(suggestedSubtitlePath || '')
   const [pasteText, setPasteText] = useState(SAMPLE_SUBTITLE_TEXT)
@@ -60,6 +79,7 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
   const [aiScope, setAiScope] = useState<'all' | 'current'>('all')
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
+  const [isReExporting, setIsReExporting] = useState(false)
 
   const selectedEntry = entries[selectedIndex] || null
   const plainText = useMemo(
@@ -80,6 +100,22 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
       return /\.(srt|vtt|ass)$/i.test(value) ? value : ''
     },
     [suggestedSubtitlePath],
+  )
+  const selectedJobSubtitleFile = useMemo(
+    () => {
+      const value = (selectedJob?.subtitle_asset_path || '').trim()
+      return /\.(srt|vtt|ass)$/i.test(value) ? value : ''
+    },
+    [selectedJob?.subtitle_asset_path],
+  )
+  const selectedJobSourceVideo = (selectedJob?.source_video_path || '').trim()
+  const selectedJobVoicePath = (selectedJob?.voice_asset_path || '').trim()
+  const jobOptions = useMemo<FieldOption[]>(
+    () => [
+      ['', '不绑定任务，仅手动处理'],
+      ...availableJobs.map((job) => [job.id, `${JOB_STATUS_LABEL[job.status]} · ${job.title}`] as FieldOption),
+    ],
+    [availableJobs],
   )
   const selectedProfile = textProfiles.find((profile) => profile.id === selectedProfileId) || null
 
@@ -112,8 +148,6 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
     if (path) {
       setSubtitlePath(path)
       setOutputPath(path.toLowerCase().endsWith('.srt') ? path : '')
-    }
-    if (!fileName.trim() && path) {
       setFileName(path.split(/[\\/]/).pop() || 'manual_subtitle.srt')
     }
   }
@@ -307,6 +341,61 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
     }
   }
 
+  const handleSelectJob = (jobId: string) => {
+    onSelectJob?.(jobId || null)
+  }
+
+  const ensureAssForReExport = async () => {
+    const result = await subtitleApi.saveAss({
+      entries,
+      output_path: buildAssOutputPath(outputPath.trim()),
+      file_name: normalizeAssFileName(fileName.trim() || 'manual_subtitle.ass'),
+      preset_id: preferences.subtitle_preset_id,
+    })
+    setLastSavedPath(result.output_path)
+    addLog('info', `重新导出使用 ASS: ${result.output_path}`)
+    return result.output_path
+  }
+
+  const reExport = async () => {
+    if (!selectedJob?.id) {
+      setNotice({ type: 'warning', message: '请先从任务队列或历史记录里选择一个任务。' })
+      return
+    }
+    if (selectedJob.status === 'running' || selectedJob.status === 'pending') {
+      setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再重新导出。' })
+      return
+    }
+    if (!selectedJobSourceVideo) {
+      setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能重新导出。' })
+      return
+    }
+    if (!canSave(entries, invalidCount, setNotice)) return
+
+    setIsReExporting(true)
+    setNotice({ type: 'info', message: '正在生成 ASS 并重新合成导出...' })
+    try {
+      const assPath = await ensureAssForReExport()
+      const result = await automationApi.reExport(selectedJob.id, {
+        subtitle_path: assPath,
+        output_format: preferences.output_format,
+        export_with_settings: preferences.export_with_settings,
+        export_settings: preferences.export_settings,
+        audio_mode: preferences.audio_mode,
+        original_volume: preferences.original_volume,
+      })
+      syncBackendJob(await automationApi.getJob(selectedJob.id))
+      setNotice({ type: 'success', message: result.message })
+      addLog('info', `重新导出完成: ${result.output_path}`)
+    } catch (error) {
+      const message = `重新导出失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsReExporting(false)
+    }
+  }
+
   return (
     <Card className="glass">
       <CardHeader className="border-b">
@@ -333,6 +422,44 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
 
         <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)_300px]">
           <div className="space-y-4">
+            <section className="rounded-xl border bg-background/60 p-4">
+              <SectionTitle title="任务来源" description="可直接从任务队列或历史记录挑一个任务，把字幕载进来继续改，改完再重新合并导出。" />
+              <div className="mt-3 space-y-3">
+                <SelectField
+                  label="选择任务"
+                  value={selectedJob?.id || ''}
+                  options={jobOptions}
+                  onChange={handleSelectJob}
+                  description={availableJobs.length ? '这里只列出已有字幕、源视频或配音产物的任务。' : '当前还没有可复用的一键流程任务。'}
+                  placeholder={availableJobs.length ? '选择一个任务' : '暂无可选任务'}
+                />
+                {selectedJob ? (
+                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary">
+                        {selectedJob.status === 'completed' || selectedJob.status === 'failed' || selectedJob.status === 'cancelled' ? <History className="mr-1 size-3.5" /> : <ListChecks className="mr-1 size-3.5" />}
+                        {selectedJob.status === 'completed' || selectedJob.status === 'failed' || selectedJob.status === 'cancelled' ? '历史任务' : '队列任务'}
+                      </Badge>
+                      <Badge variant="outline">{JOB_STATUS_LABEL[selectedJob.status]}</Badge>
+                    </div>
+                    <p className="mt-2 font-medium text-foreground">{selectedJob.title}</p>
+                    <div className="mt-3 space-y-2 text-muted-foreground">
+                      <PathRow icon={FileText} label="可编辑字幕" path={selectedJobSubtitleFile} emptyText="这个任务还没找到可编辑字幕文件" />
+                      <PathRow icon={Film} label="重导出源视频" path={selectedJobSourceVideo} emptyText="没有可复用源视频" />
+                      <PathRow icon={Volume2} label="配音音轨" path={selectedJobVoicePath} emptyText="没有配音音轨，将只合成视频和字幕" />
+                    </div>
+                    <Button variant="outline" size="sm" className="mt-3 w-full" onClick={() => handleParseFile(selectedJobSubtitleFile)} disabled={!selectedJobSubtitleFile || isLoading}>
+                      载入这个任务的字幕
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                    当前不绑定任务。你也可以手动填写字幕路径或直接粘贴字幕文本。
+                  </div>
+                )}
+              </div>
+            </section>
+
             <section className="rounded-xl border bg-background/60 p-4">
               <SectionTitle title="导入字幕" description="支持 SRT / VTT / ASS 文件，也可以直接粘贴 SRT / VTT 文本。" />
               <div className="mt-3 space-y-3">
@@ -496,7 +623,7 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
             </section>
 
             <section className="rounded-xl border bg-background/60 p-4">
-              <SectionTitle title="保存输出" description="校对完成后可单独保存 SRT，也可按当前字幕样式生成 ASS。" />
+              <SectionTitle title="保存输出" description="校对完成后可单独保存 SRT，也可按当前字幕样式生成 ASS；如果绑定了任务，还能直接重新合成导出。" />
               <div className="mt-3 space-y-3">
                 <TextField label="文件名" value={fileName} onChange={setFileName} />
                 <TextField label="SRT 输出路径（可选）" value={outputPath} placeholder="留空自动保存到 output 目录" onChange={setOutputPath} />
@@ -504,6 +631,17 @@ export function StudioSubtitleWorkbench({ suggestedSubtitlePath, onOpenTextSetti
                   <Button onClick={saveSrt} disabled={isSaving || !entries.length}>保存 SRT</Button>
                   <Button variant="outline" onClick={saveAss} disabled={isSaving || !entries.length}>生成 ASS</Button>
                 </div>
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  onClick={reExport}
+                  disabled={isReExporting || !entries.length || !selectedJob?.id || !selectedJobSourceVideo}
+                >
+                  {isReExporting ? '重新合并中…' : '重新合并导出'}
+                </Button>
+                {selectedJob && !selectedJobSourceVideo && (
+                  <p className="text-xs text-warning">当前选中任务没有可复用源视频，暂时不能重新导出。</p>
+                )}
                 {lastSavedPath && (
                   <div className="rounded-lg border border-success/30 bg-success/10 p-3">
                     <div className="text-xs font-medium text-success">最近保存</div>
@@ -583,6 +721,17 @@ function pad(value: number) {
   return String(value).padStart(2, '0')
 }
 
+function normalizeAssFileName(value: string) {
+  const normalized = value.replace(/\.(srt|vtt|ass)$/i, '.ass')
+  return /\.ass$/i.test(normalized) ? normalized : `${normalized}.ass`
+}
+
+function buildAssOutputPath(value: string) {
+  if (!value) return undefined
+  const normalized = value.replace(/\.(srt|vtt|ass)$/i, '.ass')
+  return /\.ass$/i.test(normalized) ? normalized : `${normalized}.ass`
+}
+
 function SectionTitle({ title, description }: { title: string; description: string }) {
   return (
     <div>
@@ -614,6 +763,28 @@ function MetricTile({ label, value, tone = 'default' }: { label: string; value: 
     <div className="rounded-md border bg-background p-3">
       <div className="text-[10px] text-muted-foreground">{label}</div>
       <div className={`mt-1 text-lg font-semibold ${tone === 'warn' ? 'text-warning' : 'text-foreground'}`}>{value}</div>
+    </div>
+  )
+}
+
+function PathRow({
+  icon: Icon,
+  label,
+  path,
+  emptyText,
+}: {
+  icon: typeof FileText
+  label: string
+  path: string
+  emptyText: string
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 text-foreground">
+        <Icon className="size-3.5" />
+        <span>{label}</span>
+      </div>
+      <p className="mt-1 break-all">{path || emptyText}</p>
     </div>
   )
 }

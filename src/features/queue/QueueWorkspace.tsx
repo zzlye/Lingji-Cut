@@ -22,6 +22,7 @@ import { buildAutomationPayload } from '@/lib/automationPayload'
 import { collectBatchSummaries } from '@/lib/automationMapper'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useLogStore } from '@/stores/logStore'
+import { useUiStore } from '@/stores/uiStore'
 import type { AutomationJob, AutomationStep, DownloadTask } from '@/types'
 
 /** 状态 → 文案 + 徽标样式 */
@@ -49,6 +50,7 @@ export function QueueWorkspace() {
   const jobs = useAutomationStore((s) => s.jobs)
   const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
   const addLog = useLogStore((s) => s.addLog)
+  const openSubtitleWorkbench = useUiStore((s) => s.openSubtitleWorkbench)
 
   const [serverTasks, setServerTasks] = useState<DownloadTask[]>([])
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -222,6 +224,7 @@ export function QueueWorkspace() {
               onRetry={() => runJobAction(`retry:${job.id}`, '重试', () => automationApi.retry(job.id))}
               onResume={() => runJobAction(`resume:${job.id}`, '继续', () => automationApi.resume(job.id))}
               onSkip={() => setConfirm({ title: '跳过当前画面处理？', description: `「${job.title}」正在运行的 ffmpeg 会被停止，后续直接使用下载的原视频。`, action: () => runJobAction(`skip:${job.id}`, '跳过当前阶段', () => automationApi.skipCurrentStage(job.id)) })}
+              onOpenSubtitle={() => openSubtitleWorkbench(job.id)}
             />
           ))
         )}
@@ -273,7 +276,7 @@ export function QueueWorkspace() {
 
 /** 单个自动流程任务卡 */
 function JobCard({
-  job, busyId, onPause, onCancel, onRetry, onResume, onSkip,
+  job, busyId, onPause, onCancel, onRetry, onResume, onSkip, onOpenSubtitle,
 }: {
   job: AutomationJob
   busyId: string | null
@@ -282,6 +285,7 @@ function JobCard({
   onRetry: () => void
   onResume: () => void
   onSkip: () => void
+  onOpenSubtitle: () => void
 }) {
   const meta = STATUS_META[job.status] ?? STATUS_META.pending
   const isEffectsRunning = job.steps.find((s) => s.key === 'effects')?.status === 'running'
@@ -311,6 +315,9 @@ function JobCard({
         ))}
         <Separator />
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={onOpenSubtitle}>
+            字幕调整
+          </Button>
           {job.can_pause && (
             <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onPause}><Pause className="size-3.5" /> 暂停</Button>
           )}

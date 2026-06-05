@@ -1,6 +1,7 @@
 // src/features/subtitle/SubtitleWorkbenchPage.tsx
 // 独立字幕页面 - 从左侧导航直接进入，集中处理字幕校对、翻译和导出
 
+import { useEffect, useMemo } from 'react'
 import { Captions, FilePenLine, Sparkles } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { StudioSubtitleWorkbench } from '@/features/subtitle/StudioSubtitleWorkbench'
@@ -10,10 +11,22 @@ import { useUiStore } from '@/stores/uiStore'
 export function SubtitleWorkbenchPage() {
   const jobs = useAutomationStore((state) => state.jobs)
   const openSettings = useUiStore((state) => state.openSettings)
+  const subtitleJobId = useUiStore((state) => state.subtitleJobId)
+  const setSubtitleJobId = useUiStore((state) => state.setSubtitleJobId)
 
-  // 优先复用当前正在处理的任务字幕，避免用户再手动找路径。
-  const activeJob = jobs.find((job) => job.status === 'running' || job.status === 'pending') ?? jobs[0]
-  const subtitleStagePath = activeJob?.steps.find((step) => step.key === 'subtitle')?.output_path || ''
+  const selectableJobs = useMemo(
+    () => jobs.filter((job) => job.id === subtitleJobId || job.subtitle_asset_path || job.source_video_path || job.voice_asset_path),
+    [jobs, subtitleJobId],
+  )
+  const fallbackJob = selectableJobs.find((job) => job.status === 'running' || job.status === 'pending') ?? selectableJobs[0] ?? null
+  const selectedJob = selectableJobs.find((job) => job.id === subtitleJobId) ?? fallbackJob
+
+  useEffect(() => {
+    if (!selectedJob?.id) return
+    if (subtitleJobId !== selectedJob.id) {
+      setSubtitleJobId(selectedJob.id)
+    }
+  }, [selectedJob?.id, setSubtitleJobId, subtitleJobId])
 
   return (
     <div className="mx-auto max-w-6xl space-y-5 p-6">
@@ -27,6 +40,9 @@ export function SubtitleWorkbenchPage() {
             <h1 className="text-2xl font-semibold tracking-tight">字幕校对、AI 处理、单独导出都在这里完成</h1>
             <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
               这里不绑定工作台流程。你可以单独载入字幕文件，手动逐条校对，也可以只做 AI 翻译、AI 润色或生成文案，再单独保存为 SRT 或 ASS。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              现在也可以直接从任务队列或历史记录选一个任务，把字幕拉进来继续改，改完后重新合并导出。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -44,7 +60,10 @@ export function SubtitleWorkbenchPage() {
       </section>
 
       <StudioSubtitleWorkbench
-        suggestedSubtitlePath={isEditableSubtitlePath(subtitleStagePath) ? subtitleStagePath : null}
+        availableJobs={selectableJobs}
+        selectedJob={selectedJob}
+        onSelectJob={setSubtitleJobId}
+        suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
         onOpenTextSettings={() => openSettings('api')}
       />
     </div>

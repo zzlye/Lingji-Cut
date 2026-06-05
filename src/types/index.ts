@@ -191,6 +191,9 @@ export interface AutomationJob {
   can_cancel?: boolean
   can_resume?: boolean
   can_retry?: boolean
+  subtitle_asset_path?: string | null
+  source_video_path?: string | null
+  voice_asset_path?: string | null
 }
 
 /** 后端持久化自动化任务 */
@@ -213,6 +216,9 @@ export interface BackendAutomationJob {
   can_cancel?: boolean
   can_resume?: boolean
   can_retry?: boolean
+  subtitle_asset_path?: string | null
+  source_video_path?: string | null
+  voice_asset_path?: string | null
 }
 
 /** 后端自动化阶段结果 */
@@ -239,6 +245,17 @@ export interface AutomationRunResponse {
 export interface AutomationStartResponse {
   message: string
   job_id: string
+}
+
+/** 后端重新合成导出响应 */
+export interface AutomationReExportResponse {
+  message: string
+  job_id: string
+  task_id: number
+  output_path: string
+  subtitle_path?: string | null
+  audio_path?: string | null
+  video_path: string
 }
 
 /** 后端批量启动自动化任务响应 */

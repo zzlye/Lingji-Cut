@@ -12,6 +12,11 @@ interface UiState {
   /** 当前工作区 */
   workspace: Workspace
   setWorkspace: (workspace: Workspace) => void
+  /** 字幕调整页当前选中的自动化任务 */
+  subtitleJobId: string | null
+  setSubtitleJobId: (jobId: string | null) => void
+  /** 打开独立字幕调整页并可同时锁定任务 */
+  openSubtitleWorkbench: (jobId?: string | null) => void
   /** 活动/日志抽屉是否打开 */
   isActivityOpen: boolean
   setActivityOpen: (open: boolean) => void
@@ -26,6 +31,12 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   workspace: 'studio',
   setWorkspace: (workspace) => set({ workspace }),
+  subtitleJobId: null,
+  setSubtitleJobId: (subtitleJobId) => set({ subtitleJobId }),
+  openSubtitleWorkbench: (subtitleJobId) => set((state) => ({
+    workspace: 'subtitle',
+    subtitleJobId: subtitleJobId ?? state.subtitleJobId,
+  })),
   isActivityOpen: false,
   setActivityOpen: (isActivityOpen) => set({ isActivityOpen }),
   toggleActivity: () => set((state) => ({ isActivityOpen: !state.isActivityOpen })),

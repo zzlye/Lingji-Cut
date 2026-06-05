@@ -447,6 +447,22 @@ export const automationApi = {
   resume: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/resume`, { method: 'POST' }),
 
+  /** 基于已有任务产物重新合成导出，供字幕调整页复用 */
+  reExport: (id: string, params: {
+    subtitle_path?: string
+    audio_path?: string
+    video_path?: string
+    output_format?: string
+    export_with_settings?: boolean
+    export_settings?: import('@/types').AutomationExportSettings
+    audio_mode?: 'replace' | 'mix'
+    original_volume?: number
+  }) =>
+    request<import('@/types').AutomationReExportResponse>(`/automation/jobs/${id}/re-export`, {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
   /** 暂停后台一键流程，并停止当前外部进程 */
   pause: (id: string) =>
     request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/pause`, { method: 'POST' }),

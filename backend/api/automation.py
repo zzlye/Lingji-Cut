@@ -8,6 +8,7 @@ import mimetypes
 import re
 import time
 import uuid
+from glob import glob
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Lock, Semaphore
@@ -42,6 +43,7 @@ SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -147,6 +149,9 @@ class AutomationJobResponse(BaseModel):
     can_cancel: bool = False
     can_resume: bool = False
     can_retry: bool = False
+    subtitle_asset_path: Optional[str] = None
+    source_video_path: Optional[str] = None
+    voice_asset_path: Optional[str] = None
     stages: list[AutomationStageResult] = Field(default_factory=list)
     subtitle_text: str = ""
     created_at: Optional[datetime] = None
@@ -160,6 +165,29 @@ class AutomationStartResponse(BaseModel):
     """启动自动化任务响应"""
     message: str
     job_id: str
+
+
+class AutomationReExportRequest(BaseModel):
+    """字幕调整页重新合成导出请求"""
+    subtitle_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    video_path: Optional[str] = None
+    output_format: Optional[str] = None
+    export_with_settings: Optional[bool] = None
+    export_settings: dict[str, Any] = Field(default_factory=dict)
+    audio_mode: Optional[str] = None
+    original_volume: Optional[float] = None
+
+
+class AutomationReExportResponse(BaseModel):
+    """字幕调整页重新合成导出响应"""
+    message: str
+    job_id: str
+    task_id: int
+    output_path: str
+    subtitle_path: Optional[str] = None
+    audio_path: Optional[str] = None
+    video_path: str
 
 
 class AutomationBatchStartRequest(BaseModel):
@@ -274,7 +302,7 @@ def _update_job_stage(
     _save_job_stages(db, job, stages)
 
 
-def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
+def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> AutomationJobResponse:
     """把数据库自动化任务转换成 API 响应"""
     stages: list[AutomationStageResult] = []
     for stage in _load_job_stages(job):
@@ -306,6 +334,9 @@ def _job_to_response(job: AutomationJobRecord) -> AutomationJobResponse:
         can_cancel=job.status in {"pending", "running", "paused"},
         can_resume=job.status in {"paused", "failed", CANCELLED_STATUS, "completed"},
         can_retry=job.status in {"failed", CANCELLED_STATUS, "completed"},
+        subtitle_asset_path=_find_job_editable_subtitle_path(job, db),
+        source_video_path=_find_job_source_video_path(job),
+        voice_asset_path=_find_job_voice_asset_path(job),
         stages=stages,
         subtitle_text=job.subtitle_text or "",
         created_at=job.created_at,
@@ -331,6 +362,105 @@ def _stage_output_if_reusable(job: Optional[AutomationJobRecord], key: str) -> O
     output_path = stage.get("output_path")
     if isinstance(output_path, str) and output_path and os.path.exists(output_path):
         return output_path
+    return None
+
+
+def _existing_file(path: Optional[str], allowed_exts: Optional[set[str]] = None) -> Optional[str]:
+    """返回真实存在且后缀符合预期的绝对路径"""
+    if not path or not isinstance(path, str):
+        return None
+    normalized = os.path.abspath(os.path.expanduser(path.strip()))
+    if not os.path.exists(normalized) or not os.path.isfile(normalized):
+        return None
+    if allowed_exts and os.path.splitext(normalized)[1].lower() not in allowed_exts:
+        return None
+    return normalized
+
+
+def _read_task_params(task: Optional[DownloadTask]) -> dict[str, Any]:
+    """安全读取底层任务参数 JSON"""
+    if not task or not task.params:
+        return {}
+    try:
+        data = json.loads(task.params)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _subtitle_task_record(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[DownloadTask]:
+    """读取字幕阶段底层任务，优先用阶段 task_id，兼容历史数据回退到父任务查询"""
+    if not job or not db:
+        return None
+    stage = _stage_by_key(job, "subtitle")
+    task_id = stage.get("task_id") if stage else None
+    if task_id:
+        task = db.query(DownloadTask).filter(DownloadTask.id == int(task_id)).first()
+        if task:
+            return task
+    return (
+        db.query(DownloadTask)
+        .filter(DownloadTask.parent_job_id == job.id)
+        .filter(DownloadTask.task_type == "subtitle")
+        .order_by(DownloadTask.created_at.desc())
+        .first()
+    )
+
+
+def _latest_matching_file(directory: str, pattern: str) -> Optional[str]:
+    """按修改时间取最新匹配文件，兼容旧任务没有保存字幕资产路径的情况"""
+    candidates = [path for path in glob(os.path.join(directory, pattern)) if os.path.isfile(path)]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    return candidates[0]
+
+
+def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
+    """推导重新合成导出要使用的源视频，优先画面处理产物，再回退下载原片"""
+    return (
+        _stage_output_if_reusable(job, "effects")
+        or _stage_output_if_reusable(job, "download")
+    )
+
+
+def _find_job_voice_asset_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
+    """推导配音音轨路径"""
+    return _stage_output_if_reusable(job, "voice")
+
+
+def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[str]:
+    """推导可重新编辑的字幕文件路径，优先任务显式记录，再兼容旧任务按命名规则回溯"""
+    if not job:
+        return None
+
+    params = _get_job_params(job)
+    manual_override = _existing_file(str(params.get("manual_subtitle_asset_path") or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+    if manual_override:
+        return manual_override
+
+    subtitle_stage = _stage_by_key(job, "subtitle")
+    stage_output = _existing_file(str((subtitle_stage or {}).get("output_path") or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+    if stage_output:
+        return stage_output
+
+    subtitle_task = _subtitle_task_record(job, db)
+    task_params = _read_task_params(subtitle_task)
+    for key in ("editable_subtitle_path", "subtitle_ass_path", "source_subtitle_path", "subtitle_path"):
+        candidate = _existing_file(str(task_params.get(key) or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+        if candidate:
+            return candidate
+
+    source_video_path = _find_job_source_video_path(job)
+    if not source_video_path:
+        return None
+
+    base_name = os.path.splitext(os.path.basename(source_video_path))[0]
+    output_dir = ensure_project_dirs()["output_dir"]
+    for pattern in (f"{base_name}_*.ass", f"{base_name}_*.srt", f"{base_name}_*.vtt"):
+        matched = _latest_matching_file(output_dir, pattern)
+        if matched:
+            return matched
     return None
 
 
@@ -1273,6 +1403,13 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             if warning_messages:
                 subtitle_task.error_message = "；".join(warning_messages)
                 db.commit()
+            subtitle_task.params = json.dumps({
+                "source_subtitle_path": subtitle_path,
+                "editable_subtitle_path": subtitle_ass_path,
+                "rendered_video_path": video_for_export if request.burn_subtitles else None,
+                "subtitle_language": language,
+            }, ensure_ascii=False)
+            db.commit()
             stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
             if job:
                 _update_job_stage(db, job, "subtitle", "completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path, error_message="；".join(warning_messages) if warning_messages else None)
@@ -1577,6 +1714,27 @@ def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(stages, ensure_ascii=False)
+
+
+def _prepare_job_export_stage_for_rerun(job: AutomationJobRecord) -> None:
+    """只重置导出阶段，供字幕调整页重新合成导出使用"""
+    stages = _load_job_stages(job)
+    for stage in stages:
+        if stage.get("key") != "export":
+            continue
+        stage["status"] = "pending"
+        stage["progress"] = 0
+        stage["task_id"] = None
+        stage["output_path"] = None
+        stage["error_message"] = None
+        break
+    job.status = "running"
+    job.current_step = "字幕调整重新导出"
+    job.output_path = None
+    job.error_message = None
+    job.completed_at = None
+    job.stages = json.dumps(stages, ensure_ascii=False)
+    job.progress = _calculate_job_progress(stages)
 
 
 def _pause_running_job(db: Session, job: AutomationJobRecord, message: str = "用户暂停，等待继续") -> None:
@@ -2001,7 +2159,7 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
 def list_automation_jobs(db: Session = Depends(get_db)):
     """获取自动化任务列表"""
     jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.desc()).limit(50).all()
-    return [_job_to_response(job) for job in jobs]
+    return [_job_to_response(job, db) for job in jobs]
 
 
 @router.get("/media")
@@ -2018,7 +2176,7 @@ def get_automation_job(job_id: str, db: Session = Depends(get_db)):
     job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="自动化任务不存在")
-    return _job_to_response(job)
+    return _job_to_response(job, db)
 
 
 @router.delete("/jobs/{job_id}")
@@ -2078,6 +2236,165 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
     db.commit()
     _submit_automation_job(job_id, True)
     return AutomationStartResponse(message="自动化任务已从断点继续", job_id=job_id)
+
+
+@router.post("/jobs/{job_id}/re-export", response_model=AutomationReExportResponse)
+def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db: Session = Depends(get_db)):
+    """基于已有任务的阶段产物重新合成导出，供字幕调整页复用"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status in {"pending", "running"}:
+        raise HTTPException(status_code=400, detail="任务仍在执行中，请稍后再重新导出")
+
+    try:
+        assert_required_tools_available()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    source_video_path = _existing_file(request.video_path or _find_job_source_video_path(job), MEDIA_EXTENSIONS)
+    if not source_video_path:
+        raise HTTPException(status_code=400, detail="没有可用的源视频，无法重新导出")
+
+    subtitle_path = _existing_file(request.subtitle_path or _find_job_editable_subtitle_path(job, db), EDITABLE_SUBTITLE_EXTENSIONS)
+    audio_path = _existing_file(request.audio_path or _find_job_voice_asset_path(job), MEDIA_EXTENSIONS)
+    if request.subtitle_path and not subtitle_path:
+        raise HTTPException(status_code=404, detail="指定的字幕文件不存在或格式不支持")
+    if request.audio_path and not audio_path:
+        raise HTTPException(status_code=404, detail="指定的配音文件不存在或格式不支持")
+    job_params = _get_job_params(job)
+    output_format = str(request.output_format or job_params.get("output_format") or "mp4").strip().lower() or "mp4"
+    audio_mode = str(request.audio_mode or job_params.get("audio_mode") or "mix").strip() or "mix"
+    original_volume = float(request.original_volume if request.original_volume is not None else job_params.get("original_volume") or 0.25)
+    export_with_settings = request.export_with_settings if request.export_with_settings is not None else bool(job_params.get("export_with_settings", True))
+    export_settings = request.export_settings or (job_params.get("export_settings") if isinstance(job_params.get("export_settings"), dict) else {})
+    final_export_preset = build_final_export_preset(export_settings)
+
+    if request.subtitle_path:
+        job_params["manual_subtitle_asset_path"] = subtitle_path
+        _set_job_params(job, job_params)
+
+    _prepare_job_export_stage_for_rerun(job)
+    db.commit()
+
+    export_task = _create_task(
+        db,
+        job.video_id or 0,
+        "export",
+        {
+            "re_export": True,
+            "video_path": source_video_path,
+            "subtitle_path": subtitle_path,
+            "audio_path": audio_path,
+            "output_format": output_format,
+            "audio_mode": audio_mode,
+            "original_volume": original_volume,
+        },
+        job.id,
+    )
+    _update_job_stage(db, job, "export", "running", progress=10, task_id=export_task.id)
+
+    processor = FFmpegProcessor()
+    try:
+        _check_control(db, job, export_task)
+        working_video = source_video_path
+
+        if subtitle_path:
+            working_video = processor.burn_subtitles(
+                video_path=working_video,
+                subtitle_path=subtitle_path,
+                control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 10.0 + progress * 0.45)),
+            )
+            _check_control(db, job, export_task)
+            export_task.progress = 35
+            db.commit()
+            _update_job_stage(db, job, "export", "running", progress=35, task_id=export_task.id)
+
+        if audio_path:
+            working_video = processor.merge_audio_video(
+                video_path=working_video,
+                audio_path=audio_path,
+                mode=audio_mode,
+                volume_ratio=original_volume,
+                control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(80.0, 35.0 + progress * 0.45)),
+            )
+            _check_control(db, job, export_task)
+            export_task.progress = 70
+            db.commit()
+            _update_job_stage(db, job, "export", "running", progress=70, task_id=export_task.id)
+
+        if should_apply_final_export_settings(export_with_settings, export_settings):
+            render_start = max(15.0, float(export_task.progress or 15.0))
+            working_video = processor.apply_effects(
+                video_path=working_video,
+                preset=final_export_preset,
+                output_path=os.path.join(
+                    ensure_project_dirs()["output_dir"],
+                    f"{os.path.splitext(os.path.basename(working_video))[0]}_manual_final.mp4",
+                ),
+                control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(
+                    db,
+                    job,
+                    export_task,
+                    min(92.0, render_start + progress * max(0.0, 92.0 - render_start) / 100.0),
+                ),
+            )
+            _check_control(db, job, export_task)
+            export_task.progress = 92
+            db.commit()
+            _update_job_stage(db, job, "export", "running", progress=92, task_id=export_task.id)
+
+        output_path = processor.convert_format(
+            input_path=working_video,
+            output_format=output_format,
+            control_keys=_control_keys(job, export_task),
+            progress_callback=lambda progress: _update_export_progress(
+                db,
+                job,
+                export_task,
+                min(95.0, max(80.0, float(export_task.progress or 80.0)) + progress * 0.15),
+            ),
+        )
+        _check_control(db, job, export_task)
+        _complete_task(db, export_task, output_path)
+        _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path)
+        clear_job_control_requests(db, job)
+        job.output_path = output_path
+        job.status = "completed"
+        job.current_step = "重新导出完成"
+        job.completed_at = datetime.now()
+        job.progress = 100
+        db.commit()
+        return AutomationReExportResponse(
+            message="重新合成导出完成",
+            job_id=job.id,
+            task_id=export_task.id,
+            output_path=output_path,
+            subtitle_path=subtitle_path,
+            audio_path=audio_path,
+            video_path=source_video_path,
+        )
+    except TaskControlRequested as exc:
+        _handle_task_control(db, export_task, exc)
+        if exc.action == "pause":
+            _pause_running_job(db, job)
+        else:
+            _cancel_job(db, job)
+        raise HTTPException(status_code=409, detail="重新导出已被用户中断") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _fail_task(db, export_task, exc)
+        job.status = "failed"
+        job.current_step = "重新导出失败"
+        job.error_message = str(exc)
+        job.completed_at = datetime.now()
+        _update_job_stage(db, job, "export", "failed", task_id=export_task.id, error_message=str(exc))
+        db.commit()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/jobs/{job_id}/skip-current-stage", response_model=AutomationStartResponse)
@@ -2164,7 +2481,7 @@ async def stream_automation_job_events(job_id: str, request: Request):
                     yield f"event: error\ndata: {payload}\n\n"
                     break
 
-                payload = _job_to_response(job).model_dump_json()
+                payload = _job_to_response(job, db).model_dump_json()
                 if payload != last_payload:
                     yield f"event: job\ndata: {payload}\n\n"
                     last_payload = payload

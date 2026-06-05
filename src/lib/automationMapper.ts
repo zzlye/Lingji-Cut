@@ -54,6 +54,9 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     can_cancel: job.can_cancel,
     can_resume: job.can_resume,
     can_retry: job.can_retry,
+    subtitle_asset_path: job.subtitle_asset_path || null,
+    source_video_path: job.source_video_path || null,
+    voice_asset_path: job.voice_asset_path || null,
   }
 }
 
