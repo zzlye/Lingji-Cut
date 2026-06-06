@@ -1213,6 +1213,36 @@ def merge_subtitle_burn_preset(subtitle_preset: dict[str, Any], processing_prese
     return merged
 
 
+def _prepare_subtitle_for_burn(
+    subtitle_path: str,
+    output_dir: str,
+    preset: dict[str, Any],
+    suffix: str = "clean",
+) -> str:
+    """烧录前统一清理字幕文件，避免旧 ASS/SRT 绕过标点过滤"""
+    engine = SubtitleEngine()
+    entries = _parse_subtitle_entries(engine, subtitle_path)
+    if not entries:
+        raise RuntimeError("字幕文件为空或无法解析，不能重新烧录")
+    display_entries = engine.normalize_entries_for_display(entries, preset)
+    base_name = os.path.splitext(os.path.basename(subtitle_path))[0]
+    output_path = os.path.join(output_dir, f"{base_name}_{suffix}.ass")
+    engine.generate_ass(display_entries, output_path, preset)
+    return output_path
+
+
+def _subtitle_preset_dict_for_export(db: Session, job_params: dict[str, Any]) -> dict[str, Any]:
+    """重新导出时读取字幕样式；测试桩或旧数据异常时回退默认清理样式"""
+    preset_id = job_params.get("subtitle_preset_id")
+    try:
+        preset = _pick_subtitle_preset(db, int(preset_id)) if preset_id else _pick_subtitle_preset(db, None)
+    except Exception:
+        return {}
+    if not preset or not hasattr(preset, "line_mode"):
+        return {}
+    return _preset_to_dict(preset)
+
+
 def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]:
     """生成最终导出专用预设，只保留导出阶段需要的分辨率和码率参数"""
     resolution = str(export_settings.get("resolution") or "original")
@@ -2427,6 +2457,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
     export_with_settings = request.export_with_settings if request.export_with_settings is not None else bool(job_params.get("export_with_settings", True))
     export_settings = request.export_settings or (job_params.get("export_settings") if isinstance(job_params.get("export_settings"), dict) else {})
     final_export_preset = build_final_export_preset(export_settings)
+    subtitle_preset_dict = _subtitle_preset_dict_for_export(db, job_params)
 
     if request.subtitle_path:
         job_params["manual_subtitle_asset_path"] = subtitle_path
@@ -2459,9 +2490,15 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
         working_video = source_video_path
 
         if subtitle_path:
+            subtitle_for_burn = _prepare_subtitle_for_burn(
+                subtitle_path=subtitle_path,
+                output_dir=workspace_paths["output_dir"],
+                preset=subtitle_preset_dict,
+                suffix="manual_clean",
+            )
             working_video = processor.burn_subtitles(
                 video_path=working_video,
-                subtitle_path=subtitle_path,
+                subtitle_path=subtitle_for_burn,
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 10.0 + progress * 0.45)),
             )

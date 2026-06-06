@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 
-from ..core import FFmpegProcessor
+from ..core import FFmpegProcessor, SubtitleEngine
 from ..core.process_control import TaskControlRequested
 from ..models import get_db, DownloadTask
+from .subtitles import _parse_subtitle_entries
 
 # 创建路由器
 router = APIRouter(prefix="/exports", tags=["exports"])
@@ -33,6 +34,61 @@ class ExportResponse(BaseModel):
     message: str
     task_id: int
     output_path: str
+
+
+def _clean_export_subtitle_path(subtitle_path: str) -> str:
+    """生成导出前清理字幕的临时 ASS 路径"""
+    base_dir = os.path.dirname(os.path.abspath(subtitle_path)) or os.getcwd()
+    base_name = os.path.splitext(os.path.basename(subtitle_path))[0]
+    return os.path.join(base_dir, f"{base_name}_export_clean.ass")
+
+
+def _clean_ass_subtitle_for_burn(engine: SubtitleEngine, subtitle_path: str, output_path: str) -> str:
+    """清理 ASS 的 Dialogue 正文，同时保留原文件里的样式定义"""
+    with open(subtitle_path, "r", encoding="utf-8") as file:
+        content = file.read()
+
+    output_lines: list[str] = []
+    kept_dialogues = 0
+    for raw_line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not raw_line.startswith("Dialogue:"):
+            output_lines.append(raw_line)
+            continue
+
+        parts = raw_line.split(",", 9)
+        if len(parts) < 10:
+            output_lines.append(raw_line)
+            continue
+
+        cleaned_text = engine.clean_subtitle_text_for_output(parts[9]).replace("\n", "\\N")
+        if not cleaned_text or engine.is_meaningless_subtitle_text(cleaned_text):
+            continue
+
+        output_lines.append(",".join([*parts[:9], cleaned_text]))
+        kept_dialogues += 1
+
+    if kept_dialogues == 0:
+        raise RuntimeError("字幕文件为空或无法解析，不能导出")
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as file:
+        file.write("\n".join(output_lines).rstrip() + "\n")
+    return output_path
+
+
+def _prepare_subtitle_for_export_burn(subtitle_path: str) -> str:
+    """导出烧录前统一清理逗号、句号、省略号，避免旧字幕文件绕过过滤"""
+    engine = SubtitleEngine()
+    output_path = _clean_export_subtitle_path(subtitle_path)
+    if os.path.splitext(subtitle_path)[1].lower() == ".ass":
+        return _clean_ass_subtitle_for_burn(engine, subtitle_path, output_path)
+
+    entries = _parse_subtitle_entries(engine, subtitle_path)
+    if not entries:
+        raise RuntimeError("字幕文件为空或无法解析，不能导出")
+    display_entries = engine.normalize_entries_for_display(entries, {})
+    engine.generate_ass(display_entries, output_path, {})
+    return output_path
 
 
 @router.post("/create", response_model=ExportResponse)
@@ -68,9 +124,10 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
 
         # 先烧录字幕，再按需合成配音，最后复制/转换到导出目录。
         if request.subtitle_path:
+            subtitle_for_burn = _prepare_subtitle_for_export_burn(request.subtitle_path)
             working_video = processor.burn_subtitles(
                 video_path=working_video,
-                subtitle_path=request.subtitle_path,
+                subtitle_path=subtitle_for_burn,
                 control_keys=[f"task:{task.id}"],
                 progress_callback=lambda progress: on_progress(progress, 0, 0.35),
             )

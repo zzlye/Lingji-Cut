@@ -814,9 +814,17 @@ class AutomationJobTests(unittest.TestCase):
             source_video_path = os.path.join(temp_dir, "source.mp4")
             subtitle_path = os.path.join(temp_dir, "manual.ass")
             voice_path = os.path.join(temp_dir, "voice.mp3")
-            for path in (source_video_path, subtitle_path, voice_path):
+            for path in (source_video_path, voice_path):
                 with open(path, "wb") as file:
                     file.write(b"data")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("""[Script Info]
+ScriptType: v4.00+
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,手动字幕
+""")
 
             job = AutomationJobRecord(
                 id="auto-reexport",
@@ -859,10 +867,66 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertEqual(response.job_id, "auto-reexport")
         self.assertTrue(response.output_path.endswith("exported.mp4"))
-        self.assertEqual(fake_processor.burn_calls[0]["subtitle_path"], subtitle_path)
+        self.assertNotEqual(fake_processor.burn_calls[0]["subtitle_path"], subtitle_path)
+        self.assertTrue(fake_processor.burn_calls[0]["subtitle_path"].endswith("_manual_clean.ass"))
         self.assertEqual(fake_processor.merge_calls[0]["audio_path"], voice_path)
         self.assertEqual(job.output_path, response.output_path)
         self.assertEqual(job.status, "completed")
+
+    def test_reexport_automation_job_cleans_subtitle_punctuation_before_burn(self):
+        """重新导出旧字幕时会先清理逗号、句号、省略号和顿号再烧录"""
+        with tempfile.TemporaryDirectory(prefix="automation_reexport_clean_") as temp_dir:
+            source_video_path = os.path.join(temp_dir, "source.mp4")
+            subtitle_path = os.path.join(temp_dir, "manual.ass")
+            with open(source_video_path, "wb") as file:
+                file.write(b"video")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("""[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Microsoft YaHei,48,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,30,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，等等...还有、顿号。
+""")
+
+            job = AutomationJobRecord(
+                id="auto-reexport-clean",
+                video_id=8,
+                source_url="https://youtube.com/watch?v=clean",
+                status="completed",
+                params=json.dumps({"output_format": "mp4", "export_with_settings": False}, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": source_video_path, "error_message": None},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 2, "output_path": os.path.join(temp_dir, "old.mp4"), "error_message": None},
+                ], ensure_ascii=False),
+            )
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(40, 50))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+            ):
+                reexport_automation_job("auto-reexport-clean", AutomationReExportRequest(subtitle_path=subtitle_path), db)
+
+            cleaned_path = fake_processor.burn_calls[0]["subtitle_path"]
+            with open(cleaned_path, "r", encoding="utf-8") as file:
+                cleaned_content = file.read()
+
+            dialogue_text = cleaned_content.split("Dialogue:", 1)[1].rsplit(",,", 1)[1]
+            self.assertNotRegex(dialogue_text, r"[，。、,.]|\.{3,}|…")
+            self.assertIn("我已经度过了前100天等等还有顿号", dialogue_text)
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

@@ -1,6 +1,6 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Film, Play, Trash2 } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
@@ -18,8 +18,16 @@ type ProductItem = {
 export function LibraryPanel() {
   const jobs = useAutomationStore((s) => s.jobs)
   const removeJob = useAutomationStore((s) => s.removeJob)
+  const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
   const { addLog } = useTaskStore()
   const [playing, setPlaying] = useState<ProductItem | null>(null)
+
+  useEffect(() => {
+    automationApi.listJobs()
+      .then(syncBackendJobs)
+      .catch((error) => addLog('warn', `刷新素材库失败: ${error instanceof Error ? error.message : '未知错误'}`))
+  }, [addLog, syncBackendJobs])
+
   // 取已完成流程的导出阶段产物作为成品
   const products: ProductItem[] = jobs
     .filter((job) => job.status === 'completed')

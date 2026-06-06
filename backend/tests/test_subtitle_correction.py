@@ -361,10 +361,10 @@ Language: ja
         """输出字幕正文会移除逗号、句号和省略号"""
         engine = SubtitleEngine()
 
-        text = engine.clean_subtitle_text_for_output("Hello, world...\\N这是中文，保留文字。")
+        text = engine.clean_subtitle_text_for_output("Hello, world...\\N这是中文，保留、文字。")
 
         self.assertEqual(text, "Hello world\n这是中文保留文字")
-        self.assertNotRegex(text, r"[，。,.]|\.{3,}|…")
+        self.assertNotRegex(text, r"[，。、,.]|\.{3,}|…")
 
     def test_process_subtitle_entries_keeps_original_timeline(self):
         """字幕条目 AI 处理接口返回后仍保持原始时间轴"""

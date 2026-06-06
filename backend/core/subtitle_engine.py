@@ -19,7 +19,7 @@ ASS_OVERRIDE_TAG_RE = re.compile(r"\{[^}]*\}")
 LEADING_PUNCTUATION_RE = re.compile(r"^[，。、！？；：,.!?;:…]+")
 PUNCTUATION_ONLY_RE = re.compile(r"^[\s，。、！？；：,.!?;:…]+$")
 MEANINGFUL_CHAR_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-DISALLOWED_SUBTITLE_PUNCTUATION_RE = re.compile(r"\.{3,}|…+|[，。,.]")
+DISALLOWED_SUBTITLE_PUNCTUATION_RE = re.compile(r"\.{3,}|…+|[，。、,.]")
 
 
 class SubtitleEngine:

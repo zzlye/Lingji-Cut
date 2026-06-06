@@ -16,13 +16,29 @@ export function useAutomationStream() {
   // 记录已提示完成的任务，避免重复 Toast
   const notifiedRef = useRef<Set<string>>(new Set())
 
-  // 挂载时拉取一次已有任务列表（恢复历史任务）
+  // 挂载时拉取已有任务列表；后端启动慢时重试，避免重启后素材库/历史记录空白。
   useEffect(() => {
-    automationApi.listJobs()
-      .then((list) => useAutomationStore.getState().syncBackendJobs(list))
-      .catch(() => {
-        // 后端尚未就绪时静默失败，后续动作会再次触发同步
-      })
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let attempts = 0
+
+    const syncJobs = () => {
+      attempts += 1
+      automationApi.listJobs()
+        .then((list) => {
+          if (!cancelled) useAutomationStore.getState().syncBackendJobs(list)
+        })
+        .catch(() => {
+          if (cancelled || attempts >= 20) return
+          retryTimer = setTimeout(syncJobs, 1500)
+        })
+    }
+
+    syncJobs()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
   }, [])
 
   // 为每个活跃任务建立 SSE 连接

@@ -1,6 +1,6 @@
 // src/features/history/HistoryPanel.tsx
 // 历史记录 - 展示所有已结束的一键流程（完成/失败/取消）
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { History as HistoryIcon, Trash2 } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
@@ -23,9 +23,16 @@ export function HistoryPanel() {
   const [isClearing, setIsClearing] = useState(false)
   const jobs = useAutomationStore((s) => s.jobs)
   const removeJob = useAutomationStore((s) => s.removeJob)
+  const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
   const { addLog } = useTaskStore()
   const openSubtitleWorkbench = useUiStore((s) => s.openSubtitleWorkbench)
   const history = jobs.filter((job) => job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled')
+
+  useEffect(() => {
+    automationApi.listJobs()
+      .then(syncBackendJobs)
+      .catch((error) => addLog('warn', `刷新历史记录失败: ${error instanceof Error ? error.message : '未知错误'}`))
+  }, [addLog, syncBackendJobs])
 
   const handleDelete = async (jobId: string, title: string) => {
     try {

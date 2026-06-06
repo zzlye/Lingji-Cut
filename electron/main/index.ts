@@ -2,7 +2,7 @@
 // Electron 主进程入口 - 创建窗口、管理应用生命周期、启动 Python 后端
 import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
+import { cpSync, existsSync, mkdirSync, readdirSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import { spawn, ChildProcess } from 'child_process'
 import { net } from 'electron'
@@ -13,6 +13,40 @@ let pythonProcess: ChildProcess | null = null
 const BACKEND_URL = 'http://127.0.0.1:8765'
 // 优先使用 D:\tools 下的 Python，避免 Windows Store python.exe 占位程序导致后端启动失败
 const TOOLS_PYTHON = 'D:\\tools\\python-3.12.10-embed\\python.exe'
+const LEGACY_APP_NAMES = ['YouTube视频处理器', 'youtube-video-processor']
+
+// 固定用户数据目录名称，避免 productName 调整后历史记录和设置换目录。
+app.setName('灵剪工坊')
+
+/** 判断目录是否存在且有内容 */
+function hasDirectoryContent(path: string): boolean {
+  try {
+    return existsSync(path) && readdirSync(path).length > 0
+  } catch {
+    return false
+  }
+}
+
+/** 从旧应用名的数据目录迁移本地数据库和设置，只在新目录没有 data 时执行 */
+function migrateLegacyUserData(): void {
+  const userDataPath = app.getPath('userData')
+  const currentDataPath = join(userDataPath, 'data')
+  if (hasDirectoryContent(currentDataPath)) return
+
+  const appDataRoot = app.getPath('appData')
+  for (const legacyName of LEGACY_APP_NAMES) {
+    const legacyDataPath = join(appDataRoot, legacyName, 'data')
+    if (!hasDirectoryContent(legacyDataPath)) continue
+    try {
+      mkdirSync(userDataPath, { recursive: true })
+      cpSync(legacyDataPath, currentDataPath, { recursive: true, force: false })
+      console.log(`[Main] 已迁移旧版数据目录: ${legacyDataPath}`)
+      return
+    } catch (error) {
+      console.error(`[Main] 迁移旧版数据目录失败: ${error}`)
+    }
+  }
+}
 
 /**
  * 创建主窗口
@@ -177,6 +211,8 @@ function checkBackendHealth(): Promise<boolean> {
 
 // 应用准备就绪时创建窗口
 app.whenReady().then(async () => {
+  migrateLegacyUserData()
+
   // 设置 IPC 处理器 - 窗口控制
   ipcMain.on('window:minimize', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
