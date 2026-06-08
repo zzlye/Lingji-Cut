@@ -1,8 +1,8 @@
 // src/features/subtitle/StudioSubtitleWorkbench.tsx
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 润色/翻译/生成，并保留时间轴
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronLeft, ChevronRight, FileText, Film, Languages, Search, Settings2, Sparkles, Volume2, Wand2 } from 'lucide-react'
+import { startTransition, type UIEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Search, Settings2, Sparkles, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
@@ -24,9 +24,9 @@ const SAMPLE_SUBTITLE_TEXT = `1
 
 const TARGET_LANG_OPTIONS: FieldOption[] = [['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语']]
 const AI_SCOPE_OPTIONS: FieldOption[] = [['checked', '已勾选'], ['current', '当前条'], ['all', '全部']]
-const SUBTITLE_LIST_ROW_HEIGHT = 68
+const SUBTITLE_LIST_ROW_HEIGHT = 64
 const SUBTITLE_LIST_OVERSCAN = 8
-const SUBTITLE_LIST_VISIBLE_COUNT = 18
+const SUBTITLE_LIST_VISIBLE_COUNT = 20
 const AI_OPERATION_LABEL: Record<Exclude<SubtitleTextOperation, 'none'>, string> = {
   polish: 'AI 润色',
   translate: 'AI 翻译',
@@ -88,8 +88,10 @@ export function StudioSubtitleWorkbench({
   const [checkedEntryIndexes, setCheckedEntryIndexes] = useState<number[]>([])
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
   const [showPasteImport, setShowPasteImport] = useState(false)
+  const [showAdvancedOutput, setShowAdvancedOutput] = useState(false)
   const [listScrollTop, setListScrollTop] = useState(0)
   const autoLoadKeyRef = useRef('')
+  const listScrollFrameRef = useRef<number | null>(null)
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
   const selectedEntry = entries[selectedIndex] || null
@@ -117,7 +119,6 @@ export function StudioSubtitleWorkbench({
     () => resolveExplicitSubtitlePath(selectedJob, selectedJobResolvedSubtitle),
     [selectedJob, selectedJobResolvedSubtitle],
   )
-  const selectedJobVoicePath = useMemo(() => resolveJobVoicePath(selectedJob), [selectedJob])
   const jobOptions = useMemo<FieldOption[]>(
     () => [
       ['', '不绑定任务，仅手动处理'],
@@ -164,6 +165,17 @@ export function StudioSubtitleWorkbench({
   const visibleEntryIndexes = filteredEntryIndexes.slice(visibleListStart, visibleListEnd)
   const listTopSpacer = visibleListStart * SUBTITLE_LIST_ROW_HEIGHT
   const listBottomSpacer = Math.max(0, (filteredEntryIndexes.length - visibleListEnd) * SUBTITLE_LIST_ROW_HEIGHT)
+  const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
+  const isPrimaryOutputBusy = isSaving || isReExporting
+  const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
+
+  useEffect(() => {
+    return () => {
+      if (listScrollFrameRef.current !== null) {
+        cancelAnimationFrame(listScrollFrameRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!subtitlePath && suggestedSubtitleFile) {
@@ -232,7 +244,7 @@ export function StudioSubtitleWorkbench({
     const candidates = Array.from(new Set(rawCandidates.map((item) => item.trim()).filter(Boolean)))
     if (!candidates.length) {
       if (!options?.silent) {
-        setNotice({ type: 'warning', message: '请先填写 SRT / VTT / ASS 字幕文件路径。' })
+        setNotice({ type: 'warning', message: '请先填写字幕文件路径。' })
       }
       return false
     }
@@ -279,7 +291,7 @@ export function StudioSubtitleWorkbench({
       ? pathOverride
       : [(pathOverride ?? subtitlePath).trim()]
     if (!candidates.some((item) => item.trim())) {
-      setNotice({ type: 'warning', message: '请先填写 SRT / VTT / ASS 字幕文件路径。' })
+      setNotice({ type: 'warning', message: '请先填写字幕文件路径。' })
       return
     }
     await loadSubtitleCandidates(candidates, { jobId: selectedJob?.id, silent: false })
@@ -287,7 +299,7 @@ export function StudioSubtitleWorkbench({
 
   const handleParseText = async () => {
     if (!pasteText.trim()) {
-      setNotice({ type: 'warning', message: '请先粘贴 SRT 或 VTT 字幕文本。' })
+      setNotice({ type: 'warning', message: '请先粘贴字幕文本。' })
       return
     }
 
@@ -368,6 +380,18 @@ export function StudioSubtitleWorkbench({
     setSelectedIndex(filteredEntryIndexes[nextPosition])
   }
 
+  const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
+    const nextScrollTop = event.currentTarget.scrollTop
+    if (listScrollFrameRef.current !== null) {
+      cancelAnimationFrame(listScrollFrameRef.current)
+    }
+    // 900+ 条字幕滚动时按帧更新可见范围，避免每个滚轮事件都触发整页重算。
+    listScrollFrameRef.current = requestAnimationFrame(() => {
+      startTransition(() => setListScrollTop(nextScrollTop))
+      listScrollFrameRef.current = null
+    })
+  }
+
   const toggleEntryChecked = (index: number, checked?: boolean) => {
     setCheckedEntryIndexes((current) => {
       const exists = current.includes(index)
@@ -411,6 +435,14 @@ export function StudioSubtitleWorkbench({
   const handleTargetLanguageChange = (value: string) => {
     setTargetLanguage(value)
     updatePreferences({ subtitle_target_language: value })
+  }
+
+  const handlePrimaryOutput = async () => {
+    if (selectedJob?.id) {
+      await reExport()
+    } else {
+      await saveSrt()
+    }
   }
 
   const handleAiProcess = async (operation: Exclude<SubtitleTextOperation, 'none'>) => {
@@ -482,7 +514,7 @@ export function StudioSubtitleWorkbench({
     if (!canSave(entries, invalidCount, setNotice)) return
 
     setIsSaving(true)
-    setNotice({ type: 'info', message: '正在保存 SRT 字幕...' })
+    setNotice({ type: 'info', message: '正在保存字幕文件...' })
     try {
       const sourcePath = pickSubtitleWorkspaceSource(
         outputPath.trim(),
@@ -504,7 +536,7 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'success', message: result.message })
       addLog('info', `字幕已保存: ${result.output_path}`)
     } catch (error) {
-      const message = `保存 SRT 失败: ${error instanceof Error ? error.message : '未知错误'}`
+      const message = `保存字幕失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
       addLog('error', message)
     } finally {
@@ -516,7 +548,7 @@ export function StudioSubtitleWorkbench({
     if (!canSave(entries, invalidCount, setNotice)) return
 
     setIsSaving(true)
-    setNotice({ type: 'info', message: '正在生成 ASS 字幕...' })
+    setNotice({ type: 'info', message: '正在生成带样式的字幕文件...' })
     try {
       const sourcePath = pickSubtitleWorkspaceSource(
         outputPath.trim(),
@@ -533,9 +565,9 @@ export function StudioSubtitleWorkbench({
       })
       setLastSavedPath(result.output_path)
       setNotice({ type: 'success', message: result.message })
-      addLog('info', `ASS 字幕已生成: ${result.output_path}`)
+      addLog('info', `样式字幕已生成: ${result.output_path}`)
     } catch (error) {
-      const message = `生成 ASS 失败: ${error instanceof Error ? error.message : '未知错误'}`
+      const message = `生成样式字幕失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
       addLog('error', message)
     } finally {
@@ -563,7 +595,7 @@ export function StudioSubtitleWorkbench({
       source_path: sourcePath,
     })
     setLastSavedPath(result.output_path)
-    addLog('info', `重新导出使用 ASS: ${result.output_path}`)
+    addLog('info', `已准备导出视频用的字幕文件: ${result.output_path}`)
     return result.output_path
   }
 
@@ -573,17 +605,17 @@ export function StudioSubtitleWorkbench({
       return
     }
     if (selectedJob.status === 'running' || selectedJob.status === 'pending') {
-      setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再重新导出。' })
+      setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再导出新视频。' })
       return
     }
     if (!selectedJobSourceVideo) {
-      setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能重新导出。' })
+      setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能导出新视频。' })
       return
     }
     if (!canSave(entries, invalidCount, setNotice)) return
 
     setIsReExporting(true)
-    setNotice({ type: 'info', message: '正在生成 ASS 并重新合成导出...' })
+    setNotice({ type: 'info', message: '正在保存字幕并导出新视频...' })
     try {
       const assPath = await ensureAssForReExport()
       const result = await automationApi.reExport(selectedJob.id, {
@@ -598,10 +630,10 @@ export function StudioSubtitleWorkbench({
       if (result.output_path) {
         setLastSavedPath(result.output_path)
       }
-      setNotice({ type: 'success', message: result.message })
-      addLog('info', `重新导出完成: ${result.output_path}`)
+      setNotice({ type: 'success', message: `已导出新视频：${result.output_path}` })
+      addLog('info', `字幕调整后导出完成: ${result.output_path}`)
     } catch (error) {
-      const message = `重新导出失败: ${error instanceof Error ? error.message : '未知错误'}`
+      const message = `导出新视频失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
       addLog('error', message)
     } finally {
@@ -614,61 +646,61 @@ export function StudioSubtitleWorkbench({
       <CardContent className="flex h-full min-h-0 flex-col gap-3 p-3">
         {notice && <NoticeBox notice={notice} />}
 
-        <section className="shrink-0 rounded-xl border bg-background/60 p-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <SectionTitle title="路径与任务选择" description="读取后进入下方校对工作区。" />
+        <section className="shrink-0 rounded-xl border bg-background/60 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <SectionTitle title="字幕调整流程" description="选任务并读取字幕，改完后点右侧主按钮即可保存并导出新视频。" />
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary">{entries.length ? `${entries.length} 条字幕` : '未载入字幕'}</Badge>
               <Badge variant={validCheckedEntryIndexes.length ? 'default' : 'outline'}>已勾选 {validCheckedEntryIndexes.length}</Badge>
               {invalidCount > 0 && <Badge variant="destructive">异常时间 {invalidCount}</Badge>}
-              <Button variant="outline" size="sm" onClick={() => setShowPasteImport((value) => !value)}>
-                {showPasteImport ? '收起粘贴导入' : '粘贴导入'}
-              </Button>
             </div>
           </div>
 
-          <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(220px,300px)_minmax(0,1fr)_auto]">
+          <div className="mt-3 grid items-center gap-2 xl:grid-cols-[minmax(260px,360px)_auto_minmax(260px,1fr)_auto]">
             <CompactSelect value={selectedJob?.id || ''} options={jobOptions} onChange={handleSelectJob} placeholder={availableJobs.length ? '选择任务' : '暂无可选任务'} />
-            <Input value={subtitlePath} placeholder="字幕文件路径：D:\\项目\\output\\subtitle.ass" onChange={(event) => setSubtitlePath(event.target.value)} />
-            <div className="flex items-end gap-2">
-              <Button className="h-10" onClick={() => handleParseFile()} disabled={isLoading}>
-                {isLoading ? '读取中…' : '读取路径'}
-              </Button>
-              <Button
-                variant="outline"
-                className="h-10"
-                onClick={() => handleParseFile(selectedJobSubtitleCandidates)}
-                disabled={!selectedJobSubtitleCandidates.length || isLoading}
-              >
-                载入任务
-              </Button>
+            <Button
+              variant="outline"
+              className="h-10"
+              onClick={() => handleParseFile(selectedJobSubtitleCandidates)}
+              disabled={!selectedJobSubtitleCandidates.length || isLoading}
+            >
+              {isLoading ? '读取中…' : '读取任务字幕'}
+            </Button>
+            <div className="min-w-0 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+              {selectedJob ? (
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate">当前任务：{selectedJob.title}</span>
+                  <Badge variant={selectedJobSubtitleFile || subtitlePath ? 'default' : 'outline'}>
+                    {selectedJobSubtitleFile || subtitlePath ? '已找到字幕' : '未找到字幕'}
+                  </Badge>
+                  <Badge variant={selectedJobSourceVideo ? 'default' : 'destructive'}>
+                    {selectedJobSourceVideo ? '可导出视频' : '缺少源视频'}
+                  </Badge>
+                </div>
+              ) : (
+                <span>没有绑定任务时，只会保存字幕文件，不会导出新视频。</span>
+              )}
             </div>
+            <Button
+              className="h-10 min-w-44"
+              onClick={handlePrimaryOutput}
+              disabled={isPrimaryOutputBusy || !canUsePrimaryOutput}
+            >
+              {isPrimaryOutputBusy ? '处理中…' : primaryOutputLabel}
+            </Button>
           </div>
 
-          <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(180px,240px)_minmax(0,1fr)_auto]">
-            <Input value={fileName} placeholder="文件名" onChange={(event) => setFileName(event.target.value)} />
-            <Input value={outputPath} placeholder="SRT 输出路径（可选，留空自动保存到当前视频目录）" onChange={(event) => setOutputPath(event.target.value)} />
-            <div className="flex items-end gap-2">
-              <Button className="h-10" onClick={saveSrt} disabled={isSaving || !entries.length}>保存 SRT</Button>
-              <Button variant="outline" className="h-10" onClick={saveAss} disabled={isSaving || !entries.length}>生成 ASS</Button>
-              <Button
-                variant="secondary"
-                className="h-10"
-                onClick={reExport}
-                disabled={isReExporting || !entries.length || !selectedJob?.id || !selectedJobSourceVideo}
-              >
-                {isReExporting ? '合并中…' : '重新合并'}
-              </Button>
-            </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setShowPasteImport((value) => !value)}>
+              {showPasteImport ? '收起其它导入方式' : '其它导入方式'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setShowAdvancedOutput((value) => !value)}>
+              {showAdvancedOutput ? '收起高级输出' : '高级输出'}
+            </Button>
+            {selectedJob?.id && !selectedJobSourceVideo && (
+              <span className="text-xs text-warning">当前任务缺少源视频，暂时不能导出新视频。</span>
+            )}
           </div>
-
-          {selectedJob && (
-            <div className="mt-2 grid gap-1 rounded-lg border border-primary/20 bg-primary/5 p-1.5 text-[11px] text-muted-foreground lg:grid-cols-3">
-              <PathRow icon={FileText} label="字幕" path={selectedJobSubtitleFile} emptyText="未找到可编辑字幕" />
-              <PathRow icon={Film} label="源视频" path={selectedJobSourceVideo} emptyText="未找到源视频" />
-              <PathRow icon={Volume2} label="配音" path={selectedJobVoicePath} emptyText="无配音音轨" />
-            </div>
-          )}
 
           {lastSavedPath && (
             <div className="mt-2 rounded-lg border border-success/30 bg-success/10 px-3 py-2 text-xs">
@@ -680,7 +712,7 @@ export function StudioSubtitleWorkbench({
           {showPasteImport && (
             <div className="mt-2 rounded-xl border bg-background p-2.5">
               <div className="flex items-center justify-between gap-3">
-                <SectionTitle title="粘贴导入" description="辅助入口：粘贴文本后解析。" />
+                <SectionTitle title="其它导入方式" description="任务字幕没自动找到时，再用这里手动读取。" />
                 <select
                   value={pasteFormat}
                   onChange={(event) => setPasteFormat(event.target.value as 'srt' | 'vtt')}
@@ -689,6 +721,12 @@ export function StudioSubtitleWorkbench({
                   <option value="srt">SRT</option>
                   <option value="vtt">VTT</option>
                 </select>
+              </div>
+              <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(0,1fr)_auto]">
+                <Input value={subtitlePath} placeholder="手动字幕路径：D:\\项目\\output\\subtitle.ass" onChange={(event) => setSubtitlePath(event.target.value)} />
+                <Button variant="outline" className="h-10" onClick={() => handleParseFile()} disabled={isLoading}>
+                  {isLoading ? '读取中…' : '读取手动路径'}
+                </Button>
               </div>
               <textarea
                 value={pasteText}
@@ -699,6 +737,20 @@ export function StudioSubtitleWorkbench({
               <Button variant="outline" size="sm" className="mt-2 w-full" onClick={handleParseText} disabled={isLoading}>
                 解析粘贴文本
               </Button>
+            </div>
+          )}
+
+          {showAdvancedOutput && (
+            <div className="mt-2 rounded-xl border bg-background p-2.5">
+              <SectionTitle title="高级输出" description="通常不用管。需要单独导出字幕文件时才用这里。" />
+              <div className="mt-2 grid items-center gap-2 xl:grid-cols-[minmax(180px,240px)_minmax(0,1fr)_auto]">
+                <Input value={fileName} placeholder="字幕文件名" onChange={(event) => setFileName(event.target.value)} />
+                <Input value={outputPath} placeholder="输出路径（可选，留空自动保存到当前视频目录）" onChange={(event) => setOutputPath(event.target.value)} />
+                <div className="flex items-end gap-2">
+                  <Button className="h-10" onClick={saveSrt} disabled={isSaving || !entries.length}>保存字幕文件</Button>
+                  <Button variant="outline" className="h-10" onClick={saveAss} disabled={isSaving || !entries.length}>生成样式字幕</Button>
+                </div>
+              </div>
             </div>
           )}
         </section>
@@ -732,14 +784,14 @@ export function StudioSubtitleWorkbench({
 
             {entries.length === 0 ? (
               <div className="grid min-h-0 flex-1 place-items-center p-4 text-center text-xs text-muted-foreground">
-                先在顶部选择路径或任务并读取字幕。
+                先选择任务并读取字幕，或展开其它导入方式手动读取。
               </div>
             ) : (
-              <div className="min-h-0 flex-1 overflow-auto p-3" onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}>
+              <div className="min-h-0 flex-1 overflow-auto p-3" onScroll={handleListScroll}>
                 {filteredEntryIndexes.length ? (
                   <>
                     <div style={{ height: listTopSpacer }} />
-                    <div className="space-y-2">
+                    <div>
                       {visibleEntryIndexes.map((index) => {
                   const entry = entries[index]
                   const lines = splitSubtitleByLanguage(entry.text)
@@ -748,13 +800,16 @@ export function StudioSubtitleWorkbench({
                   return (
                     <div
                       key={`${entry.index}-${index}`}
-                      className={selectedIndex === index
-                        ? 'rounded-xl border border-primary bg-primary/10 p-2 text-primary'
-                        : isInvalid
-                          ? 'rounded-xl border border-destructive/40 bg-background p-2 text-destructive'
-                          : 'rounded-xl border bg-background p-2 text-foreground transition-colors hover:border-primary/40'}
+                      style={{ height: SUBTITLE_LIST_ROW_HEIGHT }}
+                      className="pb-2"
                     >
-                      <div className="flex items-start gap-2">
+                      <div
+                        className={selectedIndex === index
+                          ? 'flex h-14 items-start gap-2 rounded-xl border border-primary bg-primary/10 p-2 text-primary'
+                          : isInvalid
+                            ? 'flex h-14 items-start gap-2 rounded-xl border border-destructive/40 bg-background p-2 text-destructive'
+                            : 'flex h-14 items-start gap-2 rounded-xl border bg-background p-2 text-foreground transition-colors hover:border-primary/40'}
+                      >
                         <input
                           type="checkbox"
                           checked={checked}
@@ -767,8 +822,7 @@ export function StudioSubtitleWorkbench({
                             <span className="text-xs font-medium">#{index + 1}</span>
                             <span className="font-mono text-[10px] opacity-75">{entry.start}</span>
                           </div>
-                          <p className="mt-1 line-clamp-2 text-sm leading-5">{lines.translation || lines.original || '空字幕'}</p>
-                          {lines.original && <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{lines.original}</p>}
+                          <p className="mt-1 line-clamp-1 text-sm leading-5">{lines.translation || lines.original || '空字幕'}</p>
                         </button>
                       </div>
                     </div>
@@ -1065,13 +1119,6 @@ function resolveJobSourceVideo(job: AutomationJob | null) {
   return ''
 }
 
-function resolveJobVoicePath(job: AutomationJob | null) {
-  const directPath = (job?.voice_asset_path || '').trim()
-  if (isMediaPath(directPath)) return directPath
-  const stagePath = (job?.steps.find((step) => step.key === 'voice')?.output_path || '').trim()
-  return isMediaPath(stagePath) ? stagePath : ''
-}
-
 function buildJobSubtitleCandidates(job: AutomationJob | null, sourceVideoPath: string, resolvedPath = '') {
   const candidates = new Set<string>()
   const directPath = resolveExplicitSubtitlePath(job, resolvedPath)
@@ -1208,27 +1255,5 @@ function CompactSelect({
         <option key={optionValue || 'empty'} value={optionValue}>{optionLabel}</option>
       ))}
     </select>
-  )
-}
-
-function PathRow({
-  icon: Icon,
-  label,
-  path,
-  emptyText,
-}: {
-  icon: typeof FileText
-  label: string
-  path: string
-  emptyText: string
-}) {
-  return (
-    <div className="min-w-0 rounded-md bg-background/40 px-2 py-1">
-      <div className="flex min-w-0 items-center gap-1.5">
-        <Icon className="size-3.5 shrink-0 text-foreground" />
-        <span className="shrink-0 text-foreground">{label}</span>
-        <span className="truncate" title={path || emptyText}>{path || emptyText}</span>
-      </div>
-    </div>
   )
 }

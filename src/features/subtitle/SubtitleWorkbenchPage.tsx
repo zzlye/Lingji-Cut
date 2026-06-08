@@ -13,7 +13,7 @@ export function SubtitleWorkbenchPage() {
   const setSubtitleJobId = useUiStore((state) => state.setSubtitleJobId)
 
   const selectableJobs = useMemo(
-    () => jobs.filter((job) => job.id === subtitleJobId || job.subtitle_asset_path || job.source_video_path || job.voice_asset_path),
+    () => jobs.filter((job) => job.id === subtitleJobId || job.subtitle_asset_path || job.source_video_path),
     [jobs, subtitleJobId],
   )
   const fallbackJob = selectableJobs.find((job) => job.status === 'running' || job.status === 'pending') ?? selectableJobs[0] ?? null
