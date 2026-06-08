@@ -21,6 +21,11 @@ const electronAPI = {
     /** 获取后端服务地址 */
     getUrl: () => ipcRenderer.invoke('get-backend-url')
   },
+  // 系统路径
+  shell: {
+    /** 打开本地文件或文件夹 */
+    openPath: (path: string) => ipcRenderer.invoke('shell:open-path', path)
+  },
   // 系统对话框
   dialog: {
     /** 选择项目目录 */

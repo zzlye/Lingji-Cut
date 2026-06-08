@@ -11,6 +11,9 @@ export interface ElectronAPI {
   backend: {
     getUrl: () => Promise<string>
   }
+  shell: {
+    openPath: (path: string) => Promise<string>
+  }
   dialog: {
     selectDirectory: (defaultPath?: string) => Promise<string | null>
   }

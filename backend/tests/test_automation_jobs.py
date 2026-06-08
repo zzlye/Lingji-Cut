@@ -4,10 +4,11 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from fastapi import HTTPException
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
@@ -973,6 +974,92 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
         self.assertEqual(db.jobs, [])
         self.assertEqual(db.tasks, [])
         self.assertEqual(db.commit_count, 1)
+
+    def test_delete_job_folder_removes_workspace_and_record(self):
+        """删除素材文件夹只允许删除单视频独立目录，并同步清理记录"""
+        with tempfile.TemporaryDirectory(prefix="automation_delete_folder_") as temp_dir:
+            videos_dir = os.path.join(temp_dir, "videos")
+            workspace_dir = os.path.join(videos_dir, "video-1__测试视频")
+            exports_dir = os.path.join(workspace_dir, "exports")
+            output_dir = os.path.join(workspace_dir, "output")
+            downloads_dir = os.path.join(workspace_dir, "downloads")
+            for directory in (exports_dir, output_dir, downloads_dir):
+                os.makedirs(directory, exist_ok=True)
+            output_path = os.path.join(exports_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+
+            job = AutomationJobRecord(
+                id="auto-delete-folder",
+                source_url="https://youtube.com/watch?v=1",
+                status="completed",
+                output_path=output_path,
+                params=json.dumps({
+                    "workspace_dir": workspace_dir,
+                    "workspace_name": "video-1__测试视频",
+                    "video_downloads_dir": downloads_dir,
+                    "video_output_dir": output_dir,
+                    "video_exports_dir": exports_dir,
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 9, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            task = DownloadTask(id=9, video_id=1, task_type="export", status="completed", parent_job_id=job.id, output_path=output_path)
+            db = FakeTaskDb([job], [task])
+
+            with patch("backend.api.automation.ensure_project_dirs", return_value={
+                "project_root": temp_dir,
+                "videos_dir": videos_dir,
+                "downloads_dir": os.path.join(temp_dir, "downloads"),
+                "output_dir": os.path.join(temp_dir, "output"),
+                "exports_dir": os.path.join(temp_dir, "exports"),
+                "data_dir": os.path.join(temp_dir, "data"),
+                "default_project_root": temp_dir,
+            }):
+                response = delete_automation_job_folder(job.id, db)
+
+            self.assertFalse(os.path.exists(workspace_dir))
+            self.assertTrue(os.path.isdir(videos_dir))
+            self.assertEqual(db.jobs, [])
+            self.assertEqual(db.tasks, [])
+            self.assertEqual(response.folder_path, workspace_dir)
+
+    def test_delete_job_folder_rejects_legacy_public_exports_dir(self):
+        """旧版公共 exports 目录不能整目录删除，避免误删其它成品"""
+        with tempfile.TemporaryDirectory(prefix="automation_legacy_delete_") as temp_dir:
+            exports_dir = os.path.join(temp_dir, "exports")
+            os.makedirs(exports_dir, exist_ok=True)
+            output_path = os.path.join(exports_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+
+            job = AutomationJobRecord(
+                id="auto-legacy-delete",
+                source_url="https://youtube.com/watch?v=1",
+                status="completed",
+                output_path=output_path,
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 9, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [])
+
+            with patch("backend.api.automation.ensure_project_dirs", return_value={
+                "project_root": temp_dir,
+                "videos_dir": os.path.join(temp_dir, "videos"),
+                "downloads_dir": os.path.join(temp_dir, "downloads"),
+                "output_dir": os.path.join(temp_dir, "output"),
+                "exports_dir": exports_dir,
+                "data_dir": os.path.join(temp_dir, "data"),
+                "default_project_root": temp_dir,
+            }):
+                with self.assertRaises(HTTPException) as context:
+                    delete_automation_job_folder(job.id, db)
+
+            self.assertEqual(context.exception.status_code, 400)
+            self.assertTrue(os.path.exists(output_path))
+            self.assertEqual(db.jobs, [job])
 
     def test_voice_for_segment_uses_speaker_map(self):
         """分段配音按说话人选择音色，未匹配时回退默认音色"""

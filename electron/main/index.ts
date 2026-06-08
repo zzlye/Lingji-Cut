@@ -234,6 +234,14 @@ app.whenReady().then(async () => {
   // 获取后端地址
   ipcMain.handle('get-backend-url', () => BACKEND_URL)
 
+  // 打开本地路径，供素材库或设置页直接跳转到系统文件夹。
+  ipcMain.handle('shell:open-path', async (_event, path: string) => {
+    if (!path || typeof path !== 'string') {
+      return '路径不能为空'
+    }
+    return shell.openPath(path)
+  })
+
   // 选择项目目录，供文件位置设置使用
   ipcMain.handle('dialog:select-directory', async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({

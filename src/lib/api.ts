@@ -442,6 +442,14 @@ export const automationApi = {
   deleteJob: (id: string) =>
     request<{ message: string; job_id: string }>(`/automation/jobs/${id}`, { method: 'DELETE' }),
 
+  /** 在系统文件管理器中打开该素材所在文件夹 */
+  openJobFolder: (id: string) =>
+    request<{ message: string; job_id: string; folder_path: string }>(`/automation/jobs/${id}/open-folder`, { method: 'POST' }),
+
+  /** 删除该素材对应的独立视频文件夹，并同步删除任务记录 */
+  deleteJobFolder: (id: string) =>
+    request<{ message: string; job_id: string; folder_path: string }>(`/automation/jobs/${id}/folder`, { method: 'DELETE' }),
+
   /** 本地成品媒体播放地址 */
   mediaUrl: (path: string) =>
     `${BASE_URL}/automation/media?path=${encodeURIComponent(path)}`,

@@ -15,6 +15,10 @@ interface ElectronAPI {
   backend: {
     getUrl: () => Promise<string>
   }
+  /** 系统路径 */
+  shell: {
+    openPath: (path: string) => Promise<string>
+  }
   /** 系统对话框 */
   dialog: {
     selectDirectory: (defaultPath?: string) => Promise<string | null>

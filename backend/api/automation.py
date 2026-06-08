@@ -6,6 +6,9 @@ import os
 import asyncio
 import mimetypes
 import re
+import shutil
+import subprocess
+import sys
 import time
 import uuid
 from glob import glob
@@ -44,6 +47,7 @@ CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
 EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
+VIDEO_WORKSPACE_STAGE_DIRS = ("downloads", "output", "exports")
 
 # 自动化阶段权重，用于计算总进度。字幕和配音可跳过，所以权重略低。
 STAGE_WEIGHTS = {
@@ -222,6 +226,13 @@ class AutomationRunResponse(BaseModel):
     output_path: str
     stages: list[AutomationStageResult]
     subtitle_text: str = ""
+
+
+class AutomationJobFolderResponse(BaseModel):
+    """素材库本地文件夹操作响应"""
+    message: str
+    job_id: str
+    folder_path: str
 
 
 def _default_stages() -> list[dict[str, Any]]:
@@ -2104,6 +2115,160 @@ def _safe_media_file_path(path: str) -> str:
     return media_path
 
 
+def _same_path(left: str, right: str) -> bool:
+    """判断两个路径是否指向同一位置，兼容 Windows 大小写差异"""
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _is_path_inside(path: str, parent: str) -> bool:
+    """判断路径是否位于指定父目录内，跨盘符时安全返回 False"""
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_parent = os.path.normcase(os.path.abspath(parent))
+        return os.path.commonpath([normalized_path, normalized_parent]) == normalized_parent
+    except ValueError:
+        return False
+
+
+def _job_output_candidates(job: AutomationJobRecord) -> list[str]:
+    """收集任务已记录的文件产物路径，用于定位成品目录和视频工作目录"""
+    candidates: list[str] = []
+    params = _get_job_params(job)
+    for value in (job.output_path, params.get("source_video_path"), params.get("downloaded_video_path"), params.get("manual_subtitle_asset_path")):
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    for stage in _load_job_stages(job):
+        output_path = stage.get("output_path")
+        if isinstance(output_path, str) and output_path.strip():
+            candidates.append(output_path)
+    return candidates
+
+
+def _job_folder_for_open(job: AutomationJobRecord) -> str:
+    """推导素材库“打开文件夹”要打开的位置，允许旧版公共 exports 目录只打开不删除"""
+    params = _get_job_params(job)
+    for key in ("video_exports_dir", "video_output_dir", "video_downloads_dir", "workspace_dir"):
+        path = str(params.get(key) or "").strip()
+        folder_path = os.path.abspath(os.path.expanduser(path)) if path else ""
+        if folder_path and os.path.isdir(folder_path):
+            return folder_path
+
+    for candidate in _job_output_candidates(job):
+        file_path = os.path.abspath(os.path.expanduser(str(candidate).strip()))
+        if os.path.isfile(file_path):
+            return os.path.dirname(file_path)
+
+    raise HTTPException(status_code=404, detail="没有找到可打开的素材文件夹")
+
+
+def _open_folder_in_file_manager(folder_path: str) -> None:
+    """调用系统文件管理器打开本地目录"""
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", folder_path])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder_path])
+        else:
+            subprocess.Popen(["xdg-open", folder_path])
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"打开文件夹失败: {exc}") from exc
+
+
+def _workspace_candidate_from_stage_dir(path: str) -> Optional[dict[str, str]]:
+    """从任务参数里保存的阶段目录回推出视频工作目录"""
+    stage_dir = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not os.path.isdir(stage_dir):
+        return None
+    if os.path.basename(stage_dir).lower() not in VIDEO_WORKSPACE_STAGE_DIRS:
+        return None
+    workspace_dir = os.path.dirname(stage_dir)
+    return {
+        "workspace_dir": workspace_dir,
+        "workspace_name": os.path.basename(workspace_dir),
+        "videos_dir": os.path.dirname(workspace_dir),
+        "downloads_dir": os.path.join(workspace_dir, "downloads"),
+        "output_dir": os.path.join(workspace_dir, "output"),
+        "exports_dir": os.path.join(workspace_dir, "exports"),
+    }
+
+
+def _normalize_deletable_workspace(paths: dict[str, str]) -> Optional[str]:
+    """校验并返回允许整目录删除的单视频工作目录"""
+    workspace_dir = os.path.abspath(os.path.expanduser(str(paths.get("workspace_dir") or "").strip()))
+    if not workspace_dir or not os.path.isdir(workspace_dir):
+        return None
+
+    videos_dir = os.path.abspath(os.path.expanduser(str(paths.get("videos_dir") or os.path.dirname(workspace_dir)).strip()))
+    if not videos_dir or not os.path.isdir(videos_dir):
+        return None
+    if os.path.basename(videos_dir).lower() != "videos":
+        return None
+    if not _same_path(os.path.dirname(workspace_dir), videos_dir):
+        return None
+    if os.path.basename(workspace_dir).lower() in {"", "videos", *VIDEO_WORKSPACE_STAGE_DIRS, "data"}:
+        return None
+
+    project_paths = ensure_project_dirs()
+    protected_dirs = [
+        project_paths.get("project_root"),
+        project_paths.get("videos_dir"),
+        project_paths.get("downloads_dir"),
+        project_paths.get("output_dir"),
+        project_paths.get("exports_dir"),
+        project_paths.get("data_dir"),
+        project_paths.get("default_project_root"),
+        videos_dir,
+    ]
+    if any(path and _same_path(workspace_dir, path) for path in protected_dirs):
+        return None
+
+    stage_dirs = [os.path.join(workspace_dir, dirname) for dirname in VIDEO_WORKSPACE_STAGE_DIRS]
+    if not any(os.path.isdir(path) for path in stage_dirs):
+        return None
+    if any(not _is_path_inside(path, workspace_dir) for path in stage_dirs):
+        return None
+    return workspace_dir
+
+
+def _deletable_job_workspace_dir(job: AutomationJobRecord, db: Optional[Session] = None) -> str:
+    """只返回可安全整目录删除的单视频工作目录，旧版公共目录会被拒绝"""
+    params = _get_job_params(job)
+    candidates: list[dict[str, str]] = []
+
+    workspace_dir = str(params.get("workspace_dir") or "").strip()
+    if workspace_dir:
+        candidates.append({
+            "workspace_dir": workspace_dir,
+            "workspace_name": str(params.get("workspace_name") or os.path.basename(workspace_dir)),
+            "videos_dir": os.path.dirname(os.path.abspath(os.path.expanduser(workspace_dir))),
+            "downloads_dir": str(params.get("video_downloads_dir") or os.path.join(workspace_dir, "downloads")),
+            "output_dir": str(params.get("video_output_dir") or os.path.join(workspace_dir, "output")),
+            "exports_dir": str(params.get("video_exports_dir") or os.path.join(workspace_dir, "exports")),
+        })
+
+    for key in ("video_downloads_dir", "video_output_dir", "video_exports_dir"):
+        candidate = _workspace_candidate_from_stage_dir(str(params.get(key) or ""))
+        if candidate:
+            candidates.append(candidate)
+
+    for output_path in _job_output_candidates(job):
+        if not os.path.isfile(os.path.abspath(os.path.expanduser(str(output_path).strip()))):
+            continue
+        detected = detect_video_workspace(output_path)
+        if detected:
+            candidates.append(detected)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        workspace = _normalize_deletable_workspace(candidate)
+        if not workspace or workspace in seen:
+            continue
+        seen.add(workspace)
+        return workspace
+
+    raise HTTPException(status_code=400, detail="未找到可安全删除的独立视频文件夹。旧版公共目录不能整目录删除，请手动清理文件。")
+
+
 def _delete_job_record(db: Session, job: AutomationJobRecord) -> None:
     """删除一键流程记录和它的子任务记录，不删除硬盘上的成品文件"""
     for task in db.query(DownloadTask).filter(DownloadTask.parent_job_id == job.id).all():
@@ -2414,6 +2579,37 @@ def delete_automation_job(job_id: str, db: Session = Depends(get_db)):
     clear_job_control_requests(db, job)
     _delete_job_record(db, job)
     return {"message": "记录已删除", "job_id": job_id}
+
+
+@router.post("/jobs/{job_id}/open-folder", response_model=AutomationJobFolderResponse)
+def open_automation_job_folder(job_id: str, db: Session = Depends(get_db)):
+    """在系统文件管理器中打开素材成品所在文件夹"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    folder_path = _job_folder_for_open(job)
+    _open_folder_in_file_manager(folder_path)
+    return AutomationJobFolderResponse(message="文件夹已打开", job_id=job_id, folder_path=folder_path)
+
+
+@router.delete("/jobs/{job_id}/folder", response_model=AutomationJobFolderResponse)
+def delete_automation_job_folder(job_id: str, db: Session = Depends(get_db)):
+    """删除单个视频的独立文件夹，同时清理任务记录"""
+    job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="自动化任务不存在")
+    if job.status in {"pending", "running"}:
+        raise HTTPException(status_code=400, detail="执行中任务不能删除文件夹，请先暂停或取消")
+
+    folder_path = _deletable_job_workspace_dir(job, db)
+    clear_job_control_requests(db, job)
+    try:
+        shutil.rmtree(folder_path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"删除文件夹失败: {exc}") from exc
+
+    _delete_job_record(db, job)
+    return AutomationJobFolderResponse(message="文件夹和记录已删除", job_id=job_id, folder_path=folder_path)
 
 
 @router.post("/jobs/{job_id}/retry", response_model=AutomationStartResponse)

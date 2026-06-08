@@ -1,11 +1,15 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
 import { useEffect, useState } from 'react'
-import { Film, Play, Trash2 } from 'lucide-react'
+import { Film, FolderOpen, FolderX, Play, Trash2 } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
 import type { AutomationJob } from '@/types'
@@ -21,6 +25,9 @@ export function LibraryPanel() {
   const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
   const { addLog } = useTaskStore()
   const [playing, setPlaying] = useState<ProductItem | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ProductItem | null>(null)
+  const [openingId, setOpeningId] = useState<string | null>(null)
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
 
   useEffect(() => {
     automationApi.listJobs()
@@ -44,6 +51,36 @@ export function LibraryPanel() {
       addLog('info', `素材记录 "${job.title}" 已删除`)
     } catch (error) {
       addLog('error', `删除素材记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  const handleOpenFolder = async (job: AutomationJob) => {
+    if (openingId) return
+    setOpeningId(job.id)
+    try {
+      const result = await automationApi.openJobFolder(job.id)
+      addLog('info', `素材文件夹已打开: ${result.folder_path}`)
+    } catch (error) {
+      addLog('error', `打开素材文件夹失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setOpeningId(null)
+    }
+  }
+
+  const handleDeleteFolder = async () => {
+    if (!deleteTarget || deletingFolderId) return
+    const { job } = deleteTarget
+    setDeletingFolderId(job.id)
+    try {
+      const result = await automationApi.deleteJobFolder(job.id)
+      removeJob(job.id)
+      if (playing?.job.id === job.id) setPlaying(null)
+      setDeleteTarget(null)
+      addLog('info', `素材文件夹和记录已删除: ${result.folder_path}`)
+    } catch (error) {
+      addLog('error', `删除素材文件夹失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setDeletingFolderId(null)
     }
   }
 
@@ -77,9 +114,17 @@ export function LibraryPanel() {
                     <Play className="mr-1.5 size-4" />
                     播放
                   </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleOpenFolder(job)} disabled={openingId === job.id}>
+                    <FolderOpen className="mr-1.5 size-4" />
+                    {openingId === job.id ? '打开中…' : '打开文件夹'}
+                  </Button>
                   <Button size="sm" variant="outline" className="text-destructive" onClick={() => handleDelete(job)}>
                     <Trash2 className="mr-1.5 size-4" />
                     删除记录
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={() => setDeleteTarget({ job, output })} disabled={deletingFolderId === job.id}>
+                    <FolderX className="mr-1.5 size-4" />
+                    {deletingFolderId === job.id ? '删除中…' : '删除文件夹'}
                   </Button>
                 </div>
               </CardContent>
@@ -105,6 +150,28 @@ export function LibraryPanel() {
           )}
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除整个素材文件夹？</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>这会删除该视频的独立文件夹，并同步删除素材库记录。此操作不可恢复。</p>
+                <p className="break-all rounded-md bg-muted px-3 py-2 font-mono text-xs text-foreground select-text">
+                  {deleteTarget?.output}
+                </p>
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(deletingFolderId)}>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={handleDeleteFolder} disabled={Boolean(deletingFolderId)}>
+              {deletingFolderId ? '删除中…' : '确认删除文件夹'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
