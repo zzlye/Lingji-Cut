@@ -1,12 +1,11 @@
 // src/features/settings/BannedWordsPanel.tsx
 // 禁词表设置面板 - 管理自动流程中的禁词提醒和拦截策略（shadcn 重做）
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { ChevronDown, ChevronUp, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react'
+import { Plus, Search, ShieldAlert, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
-import { Field, SegmentedField } from '@/components/fields'
+import { SegmentedField } from '@/components/fields'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import { cn } from '@/lib/utils'
 
@@ -15,7 +14,6 @@ export function BannedWordsPanel() {
   const [draftWords, setDraftWords] = useState(() => preferences.banned_words)
   const [newWord, setNewWord] = useState('')
   const [searchKeyword, setSearchKeyword] = useState('')
-  const [activeMatchPosition, setActiveMatchPosition] = useState(0)
   const wordRefs = useRef<Array<HTMLDivElement | null>>([])
   const normalizedSearchKeyword = searchKeyword.trim().toLowerCase()
   const words = draftWords
@@ -28,16 +26,7 @@ export function BannedWordsPanel() {
       return result
     }, [])
   }, [normalizedSearchKeyword, words])
-  const activeWordIndex = matchedWordIndexes[activeMatchPosition] ?? -1
-
-  useEffect(() => {
-    setActiveMatchPosition(0)
-  }, [normalizedSearchKeyword])
-
-  useEffect(() => {
-    if (activeMatchPosition < matchedWordIndexes.length) return
-    setActiveMatchPosition(Math.max(0, matchedWordIndexes.length - 1))
-  }, [activeMatchPosition, matchedWordIndexes.length])
+  const activeWordIndex = matchedWordIndexes[0] ?? -1
 
   useEffect(() => {
     if (!normalizedSearchKeyword || activeWordIndex < 0) return
@@ -106,133 +95,99 @@ export function BannedWordsPanel() {
     event.currentTarget.blur()
   }
 
-  const jumpMatch = (direction: 'previous' | 'next') => {
-    if (!matchedWordIndexes.length) return
-    setActiveMatchPosition((current) => {
-      const offset = direction === 'next' ? 1 : -1
-      return (current + offset + matchedWordIndexes.length) % matchedWordIndexes.length
-    })
-  }
-
   return (
-    <div className="mx-auto max-w-3xl space-y-5 p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold">禁词表</h2>
-          <p className="text-sm text-muted-foreground">检测字幕和配音文案中的禁词，支持命中后提醒继续或停止整个流程。</p>
-        </div>
-        <Badge variant="secondary">{words.length} 个禁词</Badge>
-      </div>
-
-      <Card className="border-primary/20 bg-primary/5">
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">命中策略</p>
-              <p className="text-xs text-muted-foreground">提醒继续适合人工确认，命中停止适合无人值守流程。</p>
+    <div className="h-full p-6">
+      <Card className="mx-auto max-w-5xl overflow-hidden">
+        <CardContent className="space-y-4 p-5">
+          <div className="space-y-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchKeyword}
+                className="h-11 pl-9"
+                placeholder="搜索禁词，自动跳转到命中项"
+                onChange={(event) => setSearchKeyword(event.target.value)}
+              />
             </div>
-            <SegmentedField
-              value={preferences.banned_word_action}
-              options={[['warn', '提醒继续'], ['block', '命中停止']]}
-              onChange={updateAction}
-            />
+            {normalizedSearchKeyword && (
+              <div className="rounded-lg bg-muted/35 px-3 py-2 text-xs text-muted-foreground">
+                {matchedWordIndexes.length ? `找到 ${matchedWordIndexes.length} 个匹配，已自动跳到第 1 个。` : '没有找到匹配的禁词。'}
+              </div>
+            )}
           </div>
 
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-            <Field label="新增禁词" description="可粘贴多行或用逗号分隔，保存时会自动去重。">
-              <Input
-                value={newWord}
-                placeholder="输入禁词，例如 敏感词A"
-                onChange={(event) => setNewWord(event.target.value)}
-                onKeyDown={handleNewWordKeyDown}
-              />
-            </Field>
-            <Button className="mt-7 gap-1.5 md:self-start" onClick={addWords} disabled={!newWord.trim()}>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_120px]">
+            <Input
+              value={newWord}
+              className="h-11"
+              placeholder="输入禁词，可一次粘贴多行或用逗号分隔"
+              onChange={(event) => setNewWord(event.target.value)}
+              onKeyDown={handleNewWordKeyDown}
+            />
+            <Button className="h-11 gap-1.5" onClick={addWords} disabled={!newWord.trim()}>
               <Plus className="size-4" /> 添加
             </Button>
           </div>
-        </CardContent>
-      </Card>
 
-      <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="flex items-center gap-2 text-sm font-medium"><ShieldAlert className="size-4" /> 当前禁词</p>
-              <p className="text-xs text-muted-foreground">像术语表一样逐条管理，搜索会直接跳到命中的禁词。</p>
-            </div>
-            <div className="flex min-w-[280px] flex-1 items-center gap-2 md:max-w-md">
-              <div className="relative min-w-0 flex-1">
-                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={searchKeyword}
-                  className="pl-9"
-                  placeholder="搜索禁词并跳转"
-                  onChange={(event) => setSearchKeyword(event.target.value)}
-                />
+          <div className="overflow-hidden rounded-2xl border bg-background/70">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+              <div>
+                <p className="flex items-center gap-2 text-sm font-medium"><ShieldAlert className="size-4" /> 禁词列表</p>
+                <p className="text-xs text-muted-foreground">共 {words.length} 个，修改后会自动保存。</p>
               </div>
-              <Button variant="outline" size="icon-sm" onClick={() => jumpMatch('previous')} disabled={!matchedWordIndexes.length} aria-label="上一个禁词">
-                <ChevronUp className="size-4" />
-              </Button>
-              <Button variant="outline" size="icon-sm" onClick={() => jumpMatch('next')} disabled={!matchedWordIndexes.length} aria-label="下一个禁词">
-                <ChevronDown className="size-4" />
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">命中策略</span>
+                <SegmentedField value={preferences.banned_word_action} options={[['warn', '提醒继续'], ['block', '命中停止']]} onChange={updateAction} />
+              </div>
             </div>
-          </div>
-
-          {normalizedSearchKeyword && (
-            <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              {matchedWordIndexes.length
-                ? `已找到 ${matchedWordIndexes.length} 个匹配，当前第 ${activeMatchPosition + 1} 个。`
-                : '没有找到匹配的禁词。'}
+            <div className="grid grid-cols-[64px_minmax(0,1fr)_64px] border-b bg-muted/35 px-4 py-2 text-xs font-medium text-muted-foreground">
+              <span>序号</span>
+              <span>禁词</span>
+              <span className="text-right">操作</span>
             </div>
-          )}
-
-          {words.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-14 text-center">
-              <ShieldAlert className="size-8 text-muted-foreground/50" />
-              <p className="text-sm text-muted-foreground">暂无禁词</p>
-              <p className="text-xs text-muted-foreground/70">添加后会在字幕和配音文案里检测命中内容</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {words.map((word, index) => (
-                <div
-                  key={`${index}-${word}`}
-                  ref={(node) => {
-                    wordRefs.current[index] = node
-                  }}
-                >
-                  <Card className={cn(
-                    'transition-colors',
-                    activeWordIndex === index && 'border-primary bg-primary/10 shadow-sm',
-                    normalizedSearchKeyword && matchedWordIndexes.includes(index) && activeWordIndex !== index && 'border-primary/40',
-                  )}>
-                    <CardContent className="space-y-3 pt-6">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-muted-foreground">禁词 #{index + 1}</span>
-                          {activeWordIndex === index && <Badge>当前命中</Badge>}
-                        </div>
+            <div className="min-h-[480px] max-h-[58vh] overflow-auto">
+              {words.length === 0 ? (
+                <div className="grid min-h-[480px] place-items-center text-center">
+                  <div className="space-y-2">
+                    <ShieldAlert className="mx-auto size-8 text-muted-foreground/50" />
+                    <p className="text-sm text-muted-foreground">暂无禁词</p>
+                    <p className="text-xs text-muted-foreground/70">添加后会在字幕和配音文案里检测命中内容</p>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  {words.map((word, index) => (
+                    <div
+                      key={`${index}-${word}`}
+                      ref={(node) => {
+                        wordRefs.current[index] = node
+                      }}
+                      className={cn(
+                        'grid grid-cols-[64px_minmax(0,1fr)_64px] items-center gap-3 border-b px-4 py-2 transition-colors last:border-b-0',
+                        activeWordIndex === index && 'bg-primary/10',
+                        normalizedSearchKeyword && matchedWordIndexes.includes(index) && activeWordIndex !== index && 'bg-primary/5',
+                      )}
+                    >
+                      <span className="text-xs font-medium text-muted-foreground">#{index + 1}</span>
+                      <Input
+                        value={word}
+                        className="h-9 border-transparent bg-transparent px-0 shadow-none focus-visible:border-input focus-visible:bg-background focus-visible:px-3"
+                        placeholder="输入禁词"
+                        onChange={(event) => updateDraftWord(index, event.target.value)}
+                        onBlur={commitDraftWords}
+                        onKeyDown={handleWordKeyDown}
+                      />
+                      <div className="flex justify-end">
                         <Button variant="ghost" size="icon-sm" className="text-destructive" onClick={() => removeWord(index)} aria-label="删除禁词">
                           <Trash2 className="size-4" />
                         </Button>
                       </div>
-                      <Field label="禁词内容">
-                        <Input
-                          value={word}
-                          placeholder="输入禁词"
-                          onChange={(event) => updateDraftWord(index, event.target.value)}
-                          onBlur={commitDraftWords}
-                          onKeyDown={handleWordKeyDown}
-                        />
-                      </Field>
-                    </CardContent>
-                  </Card>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
-          )}
+          </div>
         </CardContent>
       </Card>
     </div>
