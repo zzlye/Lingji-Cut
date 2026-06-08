@@ -1,7 +1,7 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
 import { useEffect, useState } from 'react'
-import { Film, FolderOpen, FolderX, Play, Trash2 } from 'lucide-react'
+import { Film, FolderOpen, FolderX, Play } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -42,17 +42,6 @@ export function LibraryPanel() {
       const output = job.steps.find((step) => step.key === 'export')?.output_path
       return output ? [{ job, output }] : []
     })
-
-  const handleDelete = async (job: AutomationJob) => {
-    try {
-      await automationApi.deleteJob(job.id)
-      removeJob(job.id)
-      if (playing?.job.id === job.id) setPlaying(null)
-      addLog('info', `素材记录 "${job.title}" 已删除`)
-    } catch (error) {
-      addLog('error', `删除素材记录失败: ${error instanceof Error ? error.message : '未知错误'}`)
-    }
-  }
 
   const handleOpenFolder = async (job: AutomationJob) => {
     if (openingId) return
@@ -109,7 +98,7 @@ export function LibraryPanel() {
                   <p className="min-w-0 flex-1 truncate text-sm font-medium">{job.title}</p>
                 </div>
                 <p className="break-all text-xs text-muted-foreground select-text">{output}</p>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   <Button size="sm" className="h-9 w-full justify-center" onClick={() => setPlaying({ job, output })}>
                     <Play className="mr-1.5 size-4" />
                     播放
@@ -118,17 +107,13 @@ export function LibraryPanel() {
                     <FolderOpen className="mr-1.5 size-4" />
                     {openingId === job.id ? '打开中…' : '打开文件夹'}
                   </Button>
-                  <Button size="sm" variant="outline" className="h-9 w-full justify-center text-destructive" onClick={() => handleDelete(job)}>
-                    <Trash2 className="mr-1.5 size-4" />
-                    删除记录
-                  </Button>
                   <Button size="sm" variant="destructive" className="h-9 w-full justify-center" onClick={() => setDeleteTarget({ job, output })} disabled={deletingFolderId === job.id}>
                     <FolderX className="mr-1.5 size-4" />
                     {deletingFolderId === job.id ? '删除中…' : '删除文件夹'}
                   </Button>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  删除记录只移出列表；删除文件夹会删除硬盘上的该视频文件夹，并同步移出列表。
+                  删除文件夹会删除硬盘上的该视频文件夹，并同步移出素材库。
                 </p>
               </CardContent>
             </Card>
