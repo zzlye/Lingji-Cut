@@ -55,13 +55,16 @@ class FakeDb:
 class FakeTaskDb(FakeDb):
     """测试用数据库会话，支持按模型返回任务或自动化任务"""
 
-    def __init__(self, jobs, tasks):
+    def __init__(self, jobs, tasks, videos=None):
         super().__init__(jobs)
         self.tasks = tasks
+        self.videos = videos or []
 
     def query(self, model):
         if model is DownloadTask:
             return FakeQuery(self.tasks)
+        if model is VideoSource:
+            return FakeQuery(self.videos)
         return FakeQuery(self.jobs)
 
     def delete(self, item):
@@ -230,6 +233,37 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.subtitle_asset_path, subtitle_ass_path)
         self.assertEqual(response.source_video_path, download_path)
         self.assertEqual(response.voice_asset_path, voice_path)
+
+    def test_job_response_includes_cached_video_info(self):
+        """任务响应会带上缓存视频信息，工作台刷新后不再一直显示准备中"""
+        video = VideoSource(
+            id=5,
+            platform="youtube",
+            video_id="D_OuGJETqQw",
+            url="https://youtu.be/D_OuGJETqQw",
+            title="200 Days in Minecraft Bedrock Edition",
+            author="测试作者",
+            duration=120,
+            thumbnail_url="https://example.test/cover.jpg",
+            formats=json.dumps([{"format_id": "18", "resolution": "360p"}], ensure_ascii=False),
+            subtitles=json.dumps([{"language": "en", "name": "English", "ext": "vtt", "type": "auto"}], ensure_ascii=False),
+        )
+        job = AutomationJobRecord(
+            id="auto-video-info",
+            video_id=5,
+            source_url="https://youtu.be/D_OuGJETqQw",
+            title="200 Days in Minecraft Bedrock Edition",
+            status="completed",
+            progress=100,
+        )
+
+        response = _job_to_response(job, FakeTaskDb([job], [], [video]))
+
+        self.assertIsNotNone(response.video_info)
+        self.assertEqual(response.video_info["id"], 5)
+        self.assertEqual(response.video_info["title"], "200 Days in Minecraft Bedrock Edition")
+        self.assertEqual(response.video_info["formats"][0]["format_id"], "18")
+        self.assertEqual(response.video_info["subtitles"][0]["language"], "en")
 
     def test_job_response_recovers_legacy_flat_subtitle_asset_path(self):
         """旧版平铺目录任务即使没保存字幕参数，也能从 output 目录回推出可编辑字幕"""

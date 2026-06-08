@@ -43,6 +43,7 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     title: job.title || '一键自动流程',
     source_url: job.source_url,
     video_id: job.video_id,
+    video_info: job.video_info || null,
     status: job.status,
     progress: Math.round(job.progress || 0),
     current_step: job.current_step || '等待开始',

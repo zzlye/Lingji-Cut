@@ -59,6 +59,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
 
   // 优先展示进行中的任务，否则展示最近一个
   const activeJob = jobs.find((job) => job.status === 'running' || job.status === 'pending') ?? jobs[0]
+  const displayVideo = currentVideo ?? activeJob?.video_info ?? null
 
   const handleParse = () => parse(url)
   const handleStart = () => start(url)
@@ -99,7 +100,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       {/* 双栏：左信息+进度，右配置摘要 */}
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
-          {currentVideo ? <VideoInfoCard video={currentVideo} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
+          {displayVideo ? <VideoInfoCard video={displayVideo} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
           {activeJob && <JobProgressCard job={activeJob} />}
         </div>
         <ConfigSummary preferences={preferences} onOpenSettings={onOpenSettings} />
@@ -269,14 +270,18 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
 
 /** 一键完成已启动但前端暂无解析结果时的占位卡片 */
 function AutoRunPendingCard({ job }: { job: AutomationJob }) {
+  const isWaiting = job.status === 'running' || job.status === 'pending'
+  const Icon = isWaiting ? Loader2 : Film
   return (
     <Card className="border-dashed">
       <CardContent className="space-y-2 py-8">
         <div className="flex items-center gap-2 text-sm font-medium">
-          <Loader2 className="size-4 animate-spin text-info" />
-          正在准备视频信息
+          <Icon className={cn('size-4 text-info', isWaiting && 'animate-spin')} />
+          {isWaiting ? '正在准备视频信息' : '视频信息未加载'}
         </div>
-        <p className="text-sm text-muted-foreground">一键完成已启动，左侧会在解析完成后显示标题、时长和缩略图。</p>
+        <p className="text-sm text-muted-foreground">
+          {isWaiting ? '一键完成已启动，左侧会在解析完成后显示标题、时长和缩略图。' : '这条历史任务没有可恢复的缩略图和时长信息，可重新解析链接刷新预览。'}
+        </p>
         <p className="truncate text-xs text-muted-foreground select-text">{job.source_url}</p>
       </CardContent>
     </Card>

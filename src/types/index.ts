@@ -180,6 +180,7 @@ export interface AutomationJob {
   title: string
   source_url: string
   video_id: number | null
+  video_info?: VideoParseResult | null
   status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number
   current_step: string
@@ -201,6 +202,7 @@ export interface BackendAutomationJob {
   id: string
   source_url: string
   video_id: number | null
+  video_info?: VideoParseResult | null
   title: string | null
   status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number

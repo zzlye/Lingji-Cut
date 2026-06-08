@@ -138,6 +138,7 @@ class AutomationJobResponse(BaseModel):
     id: str
     source_url: str
     video_id: Optional[int] = None
+    video_info: Optional[dict[str, Any]] = None
     title: Optional[str] = None
     status: str
     progress: float
@@ -302,6 +303,40 @@ def _update_job_stage(
     _save_job_stages(db, job, stages)
 
 
+def _json_list_from_model(value: Optional[str]) -> list[dict[str, Any]]:
+    """读取数据库里保存的 JSON 列表，旧数据异常时返回空列表"""
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _job_video_info(job: AutomationJobRecord, db: Optional[Session]) -> Optional[dict[str, Any]]:
+    """从已缓存的视频记录恢复工作台视频信息，避免刷新后一直显示准备中"""
+    if not db or not job.video_id:
+        return None
+    try:
+        video = db.query(VideoSource).filter(VideoSource.id == job.video_id).first()
+    except Exception:
+        return None
+    if not video or not hasattr(video, "video_id") or not hasattr(video, "platform"):
+        return None
+    return {
+        "id": video.id,
+        "video_id": video.video_id,
+        "platform": video.platform,
+        "title": video.title,
+        "author": video.author,
+        "duration": video.duration,
+        "thumbnail_url": video.thumbnail_url,
+        "formats": _json_list_from_model(video.formats),
+        "subtitles": _json_list_from_model(video.subtitles),
+    }
+
+
 def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> AutomationJobResponse:
     """把数据库自动化任务转换成 API 响应"""
     stages: list[AutomationStageResult] = []
@@ -323,6 +358,7 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         id=job.id,
         source_url=job.source_url,
         video_id=job.video_id,
+        video_info=_job_video_info(job, db),
         title=job.title,
         status=job.status,
         progress=job.progress or 0,
