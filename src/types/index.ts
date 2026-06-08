@@ -326,7 +326,6 @@ export interface AutomationPreferences {
   glossary_terms: GlossaryTerm[]
   banned_words: string[]
   banned_word_action: 'warn' | 'block'
-  cover_download_dir: string
 }
 
 /** 配音音色 */

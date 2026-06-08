@@ -44,7 +44,6 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   glossary_terms: [],
   banned_words: [],
   banned_word_action: 'warn',
-  cover_download_dir: '',
 }
 
 /** 规范数字 ID，避免把 NaN 写入一键参数 */
@@ -145,7 +144,6 @@ export function loadAutomationPreferences(): AutomationPreferences {
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),
       banned_words: normalizeBannedWords(parsed.banned_words),
       banned_word_action: parsed.banned_word_action === 'block' ? 'block' : 'warn',
-      cover_download_dir: String(parsed.cover_download_dir || '').trim(),
     }
   } catch {
     return DEFAULT_AUTOMATION_PREFERENCES

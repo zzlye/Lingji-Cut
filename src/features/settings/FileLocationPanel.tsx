@@ -9,19 +9,15 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { settingsApi } from '@/lib/api'
 import { useLogStore } from '@/stores/logStore'
-import { usePrefsStore } from '@/stores/prefsStore'
 import type { ProjectPaths, ToolStatusMap } from '@/types'
 
 export function FileLocationPanel() {
   const [paths, setPaths] = useState<ProjectPaths | null>(null)
   const [tools, setTools] = useState<ToolStatusMap | null>(null)
   const [projectRoot, setProjectRoot] = useState('')
-  const [coverDirDraft, setCoverDirDraft] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isLoadingTools, setIsLoadingTools] = useState(false)
   const addLog = useLogStore((s) => s.addLog)
-  const coverDownloadDir = usePrefsStore((s) => s.preferences.cover_download_dir)
-  const updatePrefs = usePrefsStore((s) => s.update)
 
   const subDirectories = useMemo(() => {
     if (!paths) return []
@@ -60,10 +56,6 @@ export function FileLocationPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => {
-    setCoverDirDraft(coverDownloadDir)
-  }, [coverDownloadDir])
-
   const handleSelectDirectory = async () => {
     const picker = window.electron?.dialog?.selectDirectory
     if (!picker) {
@@ -76,32 +68,6 @@ export function FileLocationPanel() {
     } catch (error) {
       addLog('error', `选择目录失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
-  }
-
-  const handleSelectCoverDirectory = async () => {
-    const picker = window.electron?.dialog?.selectDirectory
-    if (!picker) {
-      addLog('warn', '当前环境不支持系统目录选择，请直接输入封面保存目录')
-      return
-    }
-    try {
-      const selected = await picker(coverDirDraft || projectRoot)
-      if (selected) setCoverDirDraft(selected)
-    } catch (error) {
-      addLog('error', `选择封面目录失败: ${error instanceof Error ? error.message : '未知错误'}`)
-    }
-  }
-
-  /** 封面目录保存到前端偏好，手动下载和一键自动保存都会读取这个位置 */
-  const handleSaveCoverDir = () => {
-    updatePrefs({ cover_download_dir: coverDirDraft.trim() })
-    addLog('info', coverDirDraft.trim() ? `封面保存目录已保存: ${coverDirDraft.trim()}` : '封面保存目录已恢复为默认视频目录')
-  }
-
-  const handleResetCoverDir = () => {
-    setCoverDirDraft('')
-    updatePrefs({ cover_download_dir: '' })
-    addLog('info', '封面保存目录已恢复为默认视频目录')
   }
 
   const handleSave = async () => {
@@ -155,26 +121,6 @@ export function FileLocationPanel() {
             <Button variant="outline" className="h-10 gap-1.5" onClick={handleReset} disabled={isSaving}><RotateCcw className="size-4" /> 恢复默认</Button>
             <Button variant="ghost" className="h-10 gap-1.5" onClick={loadPaths}><RefreshCw className="size-4" /> 重新读取</Button>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">封面保存目录</CardTitle>
-          <CardDescription>手动下载封面和一键完成自动保存封面都会使用这里；留空则保存到当前视频自己的下载目录。</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <Input value={coverDirDraft} onChange={(e) => setCoverDirDraft(e.target.value)} placeholder="留空使用当前视频目录，也可输入 D:\封面素材" className="h-10 min-w-64 flex-1" />
-            <Button variant="outline" className="h-10 gap-1.5" onClick={handleSelectCoverDirectory}><FolderOpen className="size-4" /> 选择位置</Button>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button className="h-10" onClick={handleSaveCoverDir}>保存封面位置</Button>
-            <Button variant="outline" className="h-10 gap-1.5" onClick={handleResetCoverDir}><RotateCcw className="size-4" /> 使用默认目录</Button>
-          </div>
-          <p className="break-all text-xs text-muted-foreground select-text">
-            当前生效：{coverDownloadDir || '当前视频文件夹 / downloads'}
-          </p>
         </CardContent>
       </Card>
 

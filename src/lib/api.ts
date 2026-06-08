@@ -400,7 +400,6 @@ export type AutomationStartParams = {
   glossary_terms?: import('@/types').GlossaryTerm[]
   banned_words?: string[]
   banned_word_action?: 'warn' | 'block'
-  cover_output_dir?: string
 }
 
 export const automationApi = {
