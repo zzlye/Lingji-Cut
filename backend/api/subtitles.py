@@ -94,6 +94,7 @@ class SubtitleTextProcessRequest(BaseModel):
     profile_id: int
     operation: str = "polish"
     target_language: Optional[str] = None
+    custom_instruction: Optional[str] = None
 
 
 class SubtitleTextProcessResponse(BaseModel):
@@ -112,11 +113,12 @@ class SubtitleEntryPayload(BaseModel):
 
 
 class SubtitleEntriesProcessRequest(BaseModel):
-    """按字幕条目执行 AI 润色/翻译/生成"""
+    """按字幕条目执行 AI 润色/翻译"""
     entries: list[SubtitleEntryPayload] = Field(default_factory=list)
     profile_id: int
     operation: str = "polish"
     target_language: Optional[str] = None
+    custom_instruction: Optional[str] = None
 
 
 class SubtitleEntriesProcessResponse(BaseModel):
@@ -422,6 +424,7 @@ async def process_subtitle_text(request: SubtitleTextProcessRequest, db: Session
             settings=_load_text_settings(profile),
             operation=request.operation,
             target_language=request.target_language or "",
+            custom_instruction=request.custom_instruction or "",
         )
         return SubtitleTextProcessResponse(
             message="字幕文本处理完成",
@@ -452,6 +455,7 @@ async def process_subtitle_entries(request: SubtitleEntriesProcessRequest, db: S
             settings=_load_text_settings(profile),
             operation=request.operation,
             target_language=request.target_language or "",
+            custom_instruction=request.custom_instruction or "",
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

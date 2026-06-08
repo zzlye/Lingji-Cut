@@ -22,10 +22,12 @@ class FakeTextEngine(TextEngine):
         """保存响应队列和调用次数"""
         self.responses = list(responses)
         self.calls = 0
+        self.prompts: list[str] = []
 
     async def _call_prompt_once(self, *args, **kwargs):
         """返回预设响应，Exception 用于模拟失败"""
         self.calls += 1
+        self.prompts.append(str(args[0] if args else kwargs.get("prompt", "")))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -74,6 +76,21 @@ class TextEngineTests(unittest.TestCase):
 
         self.assertIn("翻译成简体中文", prompt)
         self.assertNotIn("目标语言", prompt)
+
+    def test_custom_instruction_is_in_subtitle_prompt(self):
+        """弹窗填写的处理要求会进入字幕批处理提示词"""
+        engine = TextEngine()
+
+        prompt = engine._build_subtitle_entries_prompt(
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "hello"}],
+            operation="translate",
+            target_language="zh-CN",
+            settings={},
+            custom_instruction="保留 Minecraft 术语，不要扩写",
+        )
+
+        self.assertIn("用户额外要求：保留 Minecraft 术语，不要扩写", prompt)
+        self.assertIn("必须保持条目数量和 id 不变", prompt)
 
     def test_translate_requires_all_entries_to_avoid_untranslated_leftovers(self):
         """翻译批次返回不完整时抛错，避免部分原文混入结果"""

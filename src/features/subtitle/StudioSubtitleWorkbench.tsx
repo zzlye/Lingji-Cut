@@ -1,8 +1,8 @@
 // src/features/subtitle/StudioSubtitleWorkbench.tsx
-// 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 润色/翻译/生成，并保留时间轴
+// 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 翻译/润色，并保留时间轴
 
 import { startTransition, type UIEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Search, Settings2, Sparkles, Wand2 } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Search, Settings2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
@@ -12,6 +12,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { SelectField, SegmentedField, type FieldOption } from '@/components/fields'
 
 const SAMPLE_SUBTITLE_TEXT = `1
@@ -27,10 +29,15 @@ const AI_SCOPE_OPTIONS: FieldOption[] = [['checked', '已勾选'], ['current', '
 const SUBTITLE_LIST_ROW_HEIGHT = 64
 const SUBTITLE_LIST_OVERSCAN = 8
 const SUBTITLE_LIST_VISIBLE_COUNT = 20
-const AI_OPERATION_LABEL: Record<Exclude<SubtitleTextOperation, 'none'>, string> = {
+type ManualAiOperation = Extract<SubtitleTextOperation, 'translate' | 'polish'>
+
+const AI_OPERATION_LABEL: Record<ManualAiOperation, string> = {
   polish: 'AI 润色',
   translate: 'AI 翻译',
-  generate: 'AI 生成文案',
+}
+const AI_INSTRUCTION_PLACEHOLDER: Record<ManualAiOperation, string> = {
+  translate: '例如：翻译成自然中文，保留游戏术语，不要漏译，不要添加解释，不要扩写。',
+  polish: '例如：只优化表达和断句，保留原意和信息量，不要编造新内容。',
 }
 const JOB_STATUS_LABEL: Record<AutomationJob['status'], string> = {
   pending: '等待中',
@@ -83,6 +90,8 @@ export function StudioSubtitleWorkbench({
   const [aiScope, setAiScope] = useState<'checked' | 'current' | 'all'>('checked')
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
+  const [aiDialogOperation, setAiDialogOperation] = useState<ManualAiOperation | null>(null)
+  const [aiCustomInstruction, setAiCustomInstruction] = useState('')
   const [isReExporting, setIsReExporting] = useState(false)
   const [entryKeyword, setEntryKeyword] = useState('')
   const [checkedEntryIndexes, setCheckedEntryIndexes] = useState<number[]>([])
@@ -445,7 +454,20 @@ export function StudioSubtitleWorkbench({
     }
   }
 
-  const handleAiProcess = async (operation: Exclude<SubtitleTextOperation, 'none'>) => {
+  const openAiInstructionDialog = (operation: ManualAiOperation) => {
+    setAiDialogOperation(operation)
+    setAiCustomInstruction('')
+  }
+
+  const confirmAiProcess = async () => {
+    if (!aiDialogOperation) return
+    const operation = aiDialogOperation
+    const customInstruction = aiCustomInstruction.trim()
+    setAiDialogOperation(null)
+    await handleAiProcess(operation, customInstruction)
+  }
+
+  const handleAiProcess = async (operation: ManualAiOperation, customInstruction = '') => {
     if (!selectedProfileId) {
       setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
       return
@@ -480,6 +502,7 @@ export function StudioSubtitleWorkbench({
         profile_id: selectedProfileId,
         operation,
         target_language: operation === 'translate' ? targetLanguage : undefined,
+        custom_instruction: customInstruction || undefined,
       })
 
       setEntries((current) => {
@@ -894,7 +917,7 @@ export function StudioSubtitleWorkbench({
           <aside className="rounded-xl border bg-background/60 p-3">
             <div className="mb-2 shrink-0">
               <h3 className="text-sm font-medium">操作栏</h3>
-              <p className="mt-1 text-xs text-muted-foreground">AI 单独处理。</p>
+              <p className="mt-1 text-xs text-muted-foreground">只处理已有字幕的翻译和润色，不生成新剧情。</p>
             </div>
 
             <div className="space-y-2">
@@ -910,17 +933,13 @@ export function StudioSubtitleWorkbench({
                 <SegmentedField label="处理范围" value={aiScope} options={AI_SCOPE_OPTIONS} onChange={(value) => setAiScope(value as 'checked' | 'current' | 'all')} />
                 <SelectField label="翻译目标语言" value={targetLanguage} options={TARGET_LANG_OPTIONS} onChange={handleTargetLanguageChange} />
                 <div className="grid gap-1.5">
-                  <Button onClick={() => handleAiProcess('translate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
+                  <Button onClick={() => openAiInstructionDialog('translate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Languages className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.translate ? 'AI 翻译中…' : 'AI 翻译'}
                   </Button>
-                  <Button variant="outline" onClick={() => handleAiProcess('polish')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
+                  <Button variant="outline" onClick={() => openAiInstructionDialog('polish')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Wand2 className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.polish ? 'AI 润色中…' : 'AI 润色'}
-                  </Button>
-                  <Button variant="outline" onClick={() => handleAiProcess('generate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
-                    <Sparkles className="mr-2 size-4" />
-                    {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.generate ? 'AI 生成中…' : 'AI 生成文案'}
                   </Button>
                 </div>
                 {!textProfiles.length && (
@@ -933,6 +952,43 @@ export function StudioSubtitleWorkbench({
             </div>
           </aside>
         </div>
+
+        <Dialog open={Boolean(aiDialogOperation)} onOpenChange={(open) => !open && setAiDialogOperation(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{aiDialogOperation ? AI_OPERATION_LABEL[aiDialogOperation] : 'AI 处理字幕'}</DialogTitle>
+              <DialogDescription>
+                {aiDialogOperation === 'translate'
+                  ? '按当前范围翻译已有字幕，并保留原文对照和时间轴。'
+                  : '按当前范围润色已有字幕，只优化表达，不生成新内容。'}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                处理范围：{aiScope === 'checked' ? '已勾选字幕' : aiScope === 'current' ? '当前条字幕' : '全部字幕'}
+                {aiDialogOperation === 'translate' ? ` · 目标语言：${TARGET_LANG_OPTIONS.find(([value]) => value === targetLanguage)?.[1] || targetLanguage}` : ''}
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">处理要求</label>
+                <Textarea
+                  value={aiCustomInstruction}
+                  onChange={(event) => setAiCustomInstruction(event.target.value)}
+                  rows={5}
+                  placeholder={aiDialogOperation ? AI_INSTRUCTION_PLACEHOLDER[aiDialogOperation] : ''}
+                />
+                <p className="text-xs text-muted-foreground">
+                  可留空使用默认要求；这里写的内容会传给文本 API，不会单独生成新字幕。
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setAiDialogOperation(null)}>取消</Button>
+              <Button onClick={confirmAiProcess} disabled={isAiProcessing}>
+                {aiDialogOperation ? `开始${AI_OPERATION_LABEL[aiDialogOperation].replace('AI ', '')}` : '开始处理'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </CardContent>
     </Card>
   )

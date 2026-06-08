@@ -381,22 +381,25 @@ Language: ja
             profile_id=1,
             operation="translate",
             target_language="zh-CN",
+            custom_instruction="保留游戏术语",
             entries=[
                 SubtitleEntryPayload(index=1, start="00:00:01,000", end="00:00:02,500", text="hello"),
                 SubtitleEntryPayload(index=2, start="00:00:02,500", end="00:00:04,000", text="world"),
             ],
         )
 
-        with patch("backend.api.subtitles.TextEngine.process_subtitle_entries", new=AsyncMock(return_value=[
+        process_mock = AsyncMock(return_value=[
             {"index": 1, "start": "00:00:01,000", "end": "00:00:02,500", "text": "你好"},
             {"index": 2, "start": "00:00:02,500", "end": "00:00:04,000", "text": "世界"},
-        ])):
+        ])
+        with patch("backend.api.subtitles.TextEngine.process_subtitle_entries", new=process_mock):
             response = asyncio.run(process_subtitle_entries(request, db))
 
         self.assertEqual(response.operation, "translate")
         self.assertEqual(response.entries[0].start, "00:00:01,000")
         self.assertEqual(response.entries[1].end, "00:00:04,000")
         self.assertEqual([entry.text for entry in response.entries], ["你好", "世界"])
+        self.assertEqual(process_mock.call_args.kwargs["custom_instruction"], "保留游戏术语")
 
 
 if __name__ == "__main__":

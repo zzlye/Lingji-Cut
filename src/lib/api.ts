@@ -188,6 +188,7 @@ export const subtitleApi = {
     profile_id: number
     operation?: 'generate' | 'translate' | 'polish'
     target_language?: string
+    custom_instruction?: string
   }) =>
     request<{ message: string; text: string; operation: string }>('/subtitles/process-text', {
       method: 'POST',
@@ -200,6 +201,7 @@ export const subtitleApi = {
     profile_id: number
     operation?: 'generate' | 'translate' | 'polish'
     target_language?: string
+    custom_instruction?: string
   }) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; operation: string }>('/subtitles/process-entries', {
       method: 'POST',

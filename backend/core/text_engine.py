@@ -26,13 +26,14 @@ class TextEngine:
         settings: dict[str, Any] | None = None,
         operation: str = "polish",
         target_language: str = "",
+        custom_instruction: str = "",
     ) -> str:
         """根据渠道类型处理字幕文本"""
         if not text.strip():
             raise ValueError("文本不能为空")
 
         options = settings or {}
-        prompt = self._build_prompt(text, operation, target_language, options)
+        prompt = self._build_prompt(text, operation, target_language, options, custom_instruction)
         logger.info(f"调用文本模型处理字幕: {provider_type}, operation={operation}")
 
         return await self._call_prompt_with_retry(
@@ -54,6 +55,7 @@ class TextEngine:
         settings: dict[str, Any] | None = None,
         operation: str = "polish",
         target_language: str = "",
+        custom_instruction: str = "",
         progress_callback: Any | None = None,
     ) -> list[dict[str, Any]]:
         """
@@ -90,6 +92,7 @@ class TextEngine:
                     settings=options,
                     operation=operation,
                     target_language=target_language,
+                    custom_instruction=custom_instruction,
                 )
                 if progress_callback:
                     progress_callback((index + 1) / len(chunks) * 100)
@@ -155,9 +158,10 @@ class TextEngine:
         settings: dict[str, Any],
         operation: str,
         target_language: str,
+        custom_instruction: str = "",
     ) -> list[dict[str, Any]]:
         """处理单个字幕批次，模型输出解析失败时退回原条目"""
-        prompt = self._build_subtitle_entries_prompt(chunk, operation, target_language, settings)
+        prompt = self._build_subtitle_entries_prompt(chunk, operation, target_language, settings, custom_instruction)
         response_text = await self._call_prompt_with_retry(
             prompt=prompt,
             provider_type=provider_type,
@@ -168,7 +172,7 @@ class TextEngine:
         )
         return self._merge_processed_entries(chunk, response_text, require_all=operation == "translate")
 
-    def _build_prompt(self, text: str, operation: str, target_language: str, settings: dict[str, Any]) -> str:
+    def _build_prompt(self, text: str, operation: str, target_language: str, settings: dict[str, Any], custom_instruction: str = "") -> str:
         """生成字幕处理提示词"""
         system_prompt = settings.get("system_prompt") or "你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。"
         language = self._target_language_label(target_language)
@@ -178,9 +182,10 @@ class TextEngine:
             "polish": "请润色以下字幕，使其更适合短视频观看和口播，不要添加无关内容。",
         }
         instruction = operation_map.get(operation, operation_map["polish"])
-        return f"{system_prompt}\n\n{instruction}\n\n要求：只输出处理后的字幕正文，不要输出解释。\n\n原文：\n{text}"
+        custom_block = self._custom_instruction_block(custom_instruction)
+        return f"{system_prompt}\n\n{instruction}{custom_block}\n\n要求：只输出处理后的字幕正文，不要输出解释。\n\n原文：\n{text}"
 
-    def _build_subtitle_entries_prompt(self, entries: list[dict[str, Any]], operation: str, target_language: str, settings: dict[str, Any]) -> str:
+    def _build_subtitle_entries_prompt(self, entries: list[dict[str, Any]], operation: str, target_language: str, settings: dict[str, Any], custom_instruction: str = "") -> str:
         """生成保留字幕编号的批处理提示词"""
         system_prompt = settings.get("system_prompt") or "你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。"
         language = self._target_language_label(target_language)
@@ -190,6 +195,7 @@ class TextEngine:
             "polish": "请逐条润色字幕，使其更适合短视频观看和口播，不要添加无关信息。",
         }
         instruction = operation_map.get(operation, operation_map["polish"])
+        custom_block = self._custom_instruction_block(custom_instruction)
         payload = [
             {
                 "id": index + 1,
@@ -198,11 +204,16 @@ class TextEngine:
             for index, entry in enumerate(entries)
         ]
         return (
-            f"{system_prompt}\n\n{instruction}\n\n"
+            f"{system_prompt}\n\n{instruction}{custom_block}\n\n"
             "必须保持条目数量和 id 不变。只返回 JSON 数组，不要 Markdown，不要解释。\n"
             "JSON 格式示例：[{\"id\":1,\"text\":\"处理后的字幕\"}]\n\n"
             f"原字幕 JSON：\n{json.dumps(payload, ensure_ascii=False)}"
         )
+
+    def _custom_instruction_block(self, custom_instruction: str) -> str:
+        """把用户在弹窗里填写的处理要求拼进提示词"""
+        instruction = str(custom_instruction or "").strip()
+        return f"\n用户额外要求：{instruction}" if instruction else ""
 
     def _merge_processed_entries(self, original_entries: list[dict[str, Any]], response_text: str, require_all: bool = False) -> list[dict[str, Any]]:
         """将模型返回内容按 id 合并回原字幕时间轴"""
