@@ -109,24 +109,27 @@ export function LibraryPanel() {
                   <p className="min-w-0 flex-1 truncate text-sm font-medium">{job.title}</p>
                 </div>
                 <p className="break-all text-xs text-muted-foreground select-text">{output}</p>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" onClick={() => setPlaying({ job, output })}>
+                <div className="grid grid-cols-2 gap-2">
+                  <Button size="sm" className="h-9 w-full justify-center" onClick={() => setPlaying({ job, output })}>
                     <Play className="mr-1.5 size-4" />
                     播放
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => handleOpenFolder(job)} disabled={openingId === job.id}>
+                  <Button size="sm" variant="outline" className="h-9 w-full justify-center" onClick={() => handleOpenFolder(job)} disabled={openingId === job.id}>
                     <FolderOpen className="mr-1.5 size-4" />
                     {openingId === job.id ? '打开中…' : '打开文件夹'}
                   </Button>
-                  <Button size="sm" variant="outline" className="text-destructive" onClick={() => handleDelete(job)}>
+                  <Button size="sm" variant="outline" className="h-9 w-full justify-center text-destructive" onClick={() => handleDelete(job)}>
                     <Trash2 className="mr-1.5 size-4" />
                     删除记录
                   </Button>
-                  <Button size="sm" variant="destructive" onClick={() => setDeleteTarget({ job, output })} disabled={deletingFolderId === job.id}>
+                  <Button size="sm" variant="destructive" className="h-9 w-full justify-center" onClick={() => setDeleteTarget({ job, output })} disabled={deletingFolderId === job.id}>
                     <FolderX className="mr-1.5 size-4" />
                     {deletingFolderId === job.id ? '删除中…' : '删除文件夹'}
                   </Button>
                 </div>
+                <p className="text-[11px] text-muted-foreground">
+                  删除记录只移出列表；删除文件夹会删除硬盘上的该视频文件夹，并同步移出列表。
+                </p>
               </CardContent>
             </Card>
           ))}
@@ -157,7 +160,7 @@ export function LibraryPanel() {
             <AlertDialogTitle>删除整个素材文件夹？</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2 text-sm text-muted-foreground">
-                <p>这会删除该视频的独立文件夹，并同步删除素材库记录。此操作不可恢复。</p>
+                <p>这会删除硬盘上的该视频独立文件夹，并同步删除素材库记录。此操作不可恢复。</p>
                 <p className="break-all rounded-md bg-muted px-3 py-2 font-mono text-xs text-foreground select-text">
                   {deleteTarget?.output}
                 </p>
