@@ -5,6 +5,18 @@ import { loadAutomationPreferences } from '@/lib/automationPreferences'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import type { AutomationStartParams } from '@/lib/api'
 
+const LOCAL_VIDEO_PREFIX = 'local:'
+
+/** 把系统文件路径包装成后端可识别的本地视频来源 */
+export function toLocalVideoSource(filePath: string): string {
+  return `${LOCAL_VIDEO_PREFIX}${filePath}`
+}
+
+/** 判断一键流程来源是否为本地视频 */
+export function isLocalVideoSource(source: string): boolean {
+  return source.trim().toLowerCase().startsWith(LOCAL_VIDEO_PREFIX)
+}
+
 /** 根据本地设置生成一键自动化请求 */
 export function buildAutomationPayload(url: string): AutomationStartParams {
   const preferences = loadAutomationPreferences()

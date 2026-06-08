@@ -1,7 +1,7 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
 import { useEffect, useState } from 'react'
-import { Captions, Film, FolderOpen, FolderX, Loader2, Play, Upload } from 'lucide-react'
+import { Captions, Film, FolderOpen, FolderX, Play } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -23,13 +23,11 @@ type ProductItem = {
 export function LibraryPanel() {
   const jobs = useAutomationStore((s) => s.jobs)
   const removeJob = useAutomationStore((s) => s.removeJob)
-  const syncBackendJob = useAutomationStore((s) => s.syncBackendJob)
   const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
   const openSubtitleWorkbench = useUiStore((s) => s.openSubtitleWorkbench)
   const { addLog } = useTaskStore()
   const [playing, setPlaying] = useState<ProductItem | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<ProductItem | null>(null)
-  const [isImporting, setIsImporting] = useState(false)
   const [openingId, setOpeningId] = useState<string | null>(null)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
 
@@ -46,28 +44,6 @@ export function LibraryPanel() {
       const output = job.steps.find((step) => step.key === 'export')?.output_path
       return output ? [{ job, output }] : []
     })
-
-  const handleImportLocalVideo = async () => {
-    if (isImporting) return
-    const picker = window.electron?.dialog?.selectVideoFile
-    if (!picker) {
-      addLog('warn', '当前环境不支持选择本地视频，请在桌面应用中使用')
-      return
-    }
-
-    try {
-      const filePath = await picker()
-      if (!filePath) return
-      setIsImporting(true)
-      const job = await automationApi.importLocalVideo(filePath)
-      syncBackendJob(job)
-      addLog('info', `本地视频已导入素材库: ${job.title || filePath}`)
-    } catch (error) {
-      addLog('error', `导入本地视频失败: ${error instanceof Error ? error.message : '未知错误'}`)
-    } finally {
-      setIsImporting(false)
-    }
-  }
 
   const handleOpenFolder = async (job: AutomationJob) => {
     if (openingId) return
@@ -104,19 +80,15 @@ export function LibraryPanel() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold">素材库</h2>
-          <p className="text-sm text-muted-foreground">一键流程导出的成品视频和导入的本地视频会出现在这里。</p>
+          <p className="text-sm text-muted-foreground">一键流程导出的成品视频会出现在这里。</p>
         </div>
-        <Button className="h-10 gap-1.5" onClick={handleImportLocalVideo} disabled={isImporting}>
-          {isImporting ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
-          {isImporting ? '导入中…' : '选择本地视频'}
-        </Button>
       </div>
 
       {products.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-14 text-center">
           <Film className="size-8 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">暂无成品</p>
-          <p className="text-xs text-muted-foreground/70">完成一次处理，或选择本地视频导入素材库</p>
+          <p className="text-xs text-muted-foreground/70">完成一次一键处理后会自动出现在素材库</p>
         </div>
       ) : (
         <Card className="overflow-hidden">

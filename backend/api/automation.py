@@ -4,6 +4,7 @@
 import json
 import os
 import asyncio
+import hashlib
 import mimetypes
 import re
 import shutil
@@ -46,7 +47,8 @@ SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
-LOCAL_VIDEO_IMPORT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+LOCAL_VIDEO_SOURCE_PREFIX = "local:"
+LOCAL_VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 VIDEO_WORKSPACE_STAGE_DIRS = ("downloads", "output", "exports")
 
@@ -235,11 +237,6 @@ class AutomationJobFolderResponse(BaseModel):
     message: str
     job_id: str
     folder_path: str
-
-
-class LocalVideoImportRequest(BaseModel):
-    """导入本地视频请求"""
-    file_path: str
 
 
 def _default_stages() -> list[dict[str, Any]]:
@@ -779,6 +776,9 @@ def _create_task(db: Session, video_id: int, task_type: str, params: Optional[di
 
 def _parse_or_update_video(db: Session, url: str, downloader: Downloader) -> VideoSource:
     """解析视频并写入或更新入库记录"""
+    if _is_local_video_source(url):
+        return _parse_or_update_local_video(db, url)
+
     video_info = downloader.parse_video(url)
     dedup = DedupChecker(db)
     existing = dedup.check_by_video_id(video_info["platform"], video_info["video_id"])
@@ -1414,7 +1414,8 @@ def _seconds_to_srt_time(total_seconds: int) -> str:
 
 def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Optional[AutomationJobRecord] = None, resume_from_checkpoint: bool = False) -> AutomationRunResponse:
     """同步执行完整一键自动流程，供直接调用和后台任务复用"""
-    assert_required_tools_available()
+    is_local_source = _is_local_video_source(request.url)
+    assert_required_tools_available(require_yt_dlp=not is_local_source)
     downloader = Downloader()
     processor = FFmpegProcessor()
     stages: list[AutomationStageResult] = []
@@ -1427,7 +1428,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     warning_messages: list[str] = []
     preset_dict: dict[str, Any] = {}
 
-    video = _parse_or_update_video(db, request.url, downloader)
+    local_source_path = _resolve_local_video_source_path(request.url, job) if is_local_source else None
+    video = _parse_or_update_local_video(db, local_source_path) if local_source_path else _parse_or_update_video(db, request.url, downloader)
     paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     cover_asset_path: Optional[str] = None
     cover_warning_message: Optional[str] = None
@@ -1450,7 +1452,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         _mark_stage_reused(db, job, "download", downloaded_path)
         stages.append(AutomationStageResult(key="download", status="completed", progress=100, output_path=downloaded_path))
     else:
-        download_task = _create_task(db, video.id, "download", {"format_id": request.format_id}, job.id if job else None)
+        download_task = _create_task(db, video.id, "download", {"format_id": request.format_id, "source_type": "local" if local_source_path else "remote"}, job.id if job else None)
         if job:
             _update_job_stage(db, job, "download", "running", progress=0, task_id=download_task.id)
 
@@ -1463,14 +1465,19 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
 
         try:
             _check_control(db, job, download_task)
-            downloaded_path = downloader.download_video(
-                url=video.url,
-                output_dir=paths["downloads_dir"],
-                format_id=request.format_id,
-                output_format="mp4",
-                progress_callback=on_progress,
-                control_keys=_control_keys(job, download_task),
-            )
+            if local_source_path:
+                on_progress(15, "")
+                downloaded_path = _copy_local_video_into_downloads(local_source_path, paths)
+                on_progress(100, "")
+            else:
+                downloaded_path = downloader.download_video(
+                    url=video.url,
+                    output_dir=paths["downloads_dir"],
+                    format_id=request.format_id,
+                    output_format="mp4",
+                    progress_callback=on_progress,
+                    control_keys=_control_keys(job, download_task),
+                )
             _check_control(db, job, download_task)
             _complete_task(db, download_task, downloaded_path)
             if job:
@@ -2147,6 +2154,22 @@ def _get_job_params(job: AutomationJobRecord) -> dict[str, Any]:
         return {}
 
 
+def _job_requires_yt_dlp(job: AutomationJobRecord) -> bool:
+    """判断该任务来源是否需要 yt-dlp"""
+    params = _get_job_params(job)
+    source = str(params.get("url") or job.source_url or "").strip()
+    return not _is_local_video_source(source)
+
+
+def _batch_requires_yt_dlp(db: Session, batch_id: str) -> bool:
+    """判断批次里是否有网络链接任务需要 yt-dlp"""
+    jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.asc()).all()
+    for job in jobs:
+        if _get_batch_id_from_job(job) == batch_id and _job_requires_yt_dlp(job):
+            return True
+    return False
+
+
 def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
     """保存自动化任务参数 JSON"""
     job.params = json.dumps(params, ensure_ascii=False)
@@ -2162,117 +2185,116 @@ def _safe_media_file_path(path: str) -> str:
     return media_path
 
 
-def _safe_local_video_import_path(path: str) -> str:
-    """校验要导入素材库的本地视频路径"""
-    video_path = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+def _is_probable_local_file_path(value: str) -> bool:
+    """粗略判断输入是否像本地文件路径，兼容用户直接粘贴 Windows 路径"""
+    raw_value = str(value or "").strip()
+    return bool(re.match(r"^[A-Za-z]:[\\/]", raw_value) or raw_value.startswith(("~", "/", "\\")))
+
+
+def _is_local_video_source(source: str) -> bool:
+    """判断一键流程来源是否为本地视频"""
+    raw_source = str(source or "").strip()
+    if raw_source.lower().startswith(LOCAL_VIDEO_SOURCE_PREFIX):
+        return True
+    return _is_probable_local_file_path(raw_source)
+
+
+def _local_video_path_from_source(source: str) -> str:
+    """从一键流程来源中取出本地视频路径"""
+    raw_source = str(source or "").strip()
+    if raw_source.lower().startswith(LOCAL_VIDEO_SOURCE_PREFIX):
+        return raw_source[len(LOCAL_VIDEO_SOURCE_PREFIX):].strip()
+    return raw_source
+
+
+def _safe_local_video_source_path(source: str) -> str:
+    """校验一键流程选择的本地视频路径"""
+    video_path = os.path.abspath(os.path.expanduser(_local_video_path_from_source(source)))
     if not video_path or not os.path.isfile(video_path):
         raise HTTPException(status_code=404, detail="本地视频文件不存在")
-    if os.path.splitext(video_path)[1].lower() not in LOCAL_VIDEO_IMPORT_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="只支持导入常见视频文件")
+    if os.path.splitext(video_path)[1].lower() not in LOCAL_VIDEO_SOURCE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持常见视频文件")
     return video_path
 
 
+def _resolve_local_video_source_path(source: str, job: Optional[AutomationJobRecord] = None) -> str:
+    """解析本地视频来源；原文件丢失时回退到任务项目目录里的复制件"""
+    try:
+        return _safe_local_video_source_path(source)
+    except HTTPException:
+        if not job:
+            raise
+        params = _get_job_params(job)
+        for key in ("source_video_path", "downloaded_video_path"):
+            copied_path = _existing_file(str(params.get(key) or ""), LOCAL_VIDEO_SOURCE_EXTENSIONS)
+            if copied_path:
+                return copied_path
+        raise
+
+
 def _safe_local_video_file_name(path: str) -> str:
-    """生成导入视频在项目文件夹里的安全文件名"""
+    """生成本地视频在项目文件夹里的安全文件名"""
     base_name = os.path.splitext(os.path.basename(path))[0]
     safe_name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._ -]+", "_", base_name).strip(" ._-")
     return safe_name or "local_video"
 
 
-def _completed_import_stages(output_path: str, task_id: Optional[int] = None) -> list[dict[str, Any]]:
-    """生成本地视频导入后的完成状态，保证素材库和字幕调整都能直接读取"""
-    stages = _default_stages()
-    for stage in stages:
-        key = stage.get("key")
-        if key in {"parse", "download", "export"}:
-            stage["status"] = "completed"
-            stage["progress"] = 100
-        else:
-            stage["status"] = "skipped"
-            stage["progress"] = 100
-        if key in {"download", "export"}:
-            stage["output_path"] = output_path
-        if key == "export" and task_id is not None:
-            stage["task_id"] = task_id
-    return stages
+def _local_video_id_from_path(path: str) -> str:
+    """按路径、大小和修改时间生成稳定本地视频 ID"""
+    normalized = os.path.normcase(os.path.abspath(path))
+    stat = os.stat(path)
+    identity = f"{normalized}|{stat.st_size}|{stat.st_mtime_ns}"
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return f"local-{digest}"
 
 
-def _copy_local_video_into_workspace(source_path: str, paths: dict[str, str]) -> str:
-    """把本地视频复制到该视频的项目 exports 目录，作为素材库成品"""
+def _copy_local_video_into_downloads(source_path: str, paths: dict[str, str]) -> str:
+    """把本地视频复制到该视频的 downloads 目录，作为一键流程下载阶段产物"""
     extension = os.path.splitext(source_path)[1].lower()
     target_name = f"{_safe_local_video_file_name(source_path)}{extension}"
-    target_path = os.path.join(paths["exports_dir"], target_name)
+    target_path = os.path.join(paths["downloads_dir"], target_name)
     if _same_path(source_path, target_path):
         return target_path
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
     shutil.copy2(source_path, target_path)
     return target_path
 
 
-def _import_local_video_job(request: LocalVideoImportRequest, db: Session) -> AutomationJobRecord:
-    """导入本地视频并创建一条已完成素材记录"""
-    source_path = _safe_local_video_import_path(request.file_path)
+def _parse_or_update_local_video(db: Session, source: str) -> VideoSource:
+    """把本地视频来源写入视频表，后续流程按普通视频记录处理"""
+    source_path = _safe_local_video_source_path(source)
     title = os.path.splitext(os.path.basename(source_path))[0] or "本地视频"
-    local_video_id = f"local-{uuid.uuid4().hex[:16]}"
-    paths = ensure_video_workspace(local_video_id, title)
-    output_path = _copy_local_video_into_workspace(source_path, paths)
+    extension = os.path.splitext(source_path)[1].lower().lstrip(".") or "mp4"
+    video_id = _local_video_id_from_path(source_path)
+    formats = [{"format_id": "local", "resolution": "原始文件", "ext": extension}]
+    existing = DedupChecker(db).check_by_video_id("local", video_id)
+    if existing:
+        existing.url = source_path
+        existing.title = title
+        existing.author = "本地视频"
+        existing.duration = None
+        existing.thumbnail_url = None
+        existing.formats = json.dumps(formats, ensure_ascii=False)
+        existing.subtitles = json.dumps([], ensure_ascii=False)
+        db.commit()
+        db.refresh(existing)
+        return existing
 
     video = VideoSource(
         platform="local",
-        video_id=local_video_id,
+        video_id=video_id,
         url=source_path,
         title=title,
-        author="本地导入",
+        author="本地视频",
         duration=None,
         thumbnail_url=None,
-        formats=json.dumps([], ensure_ascii=False),
+        formats=json.dumps(formats, ensure_ascii=False),
         subtitles=json.dumps([], ensure_ascii=False),
     )
     db.add(video)
     db.commit()
     db.refresh(video)
-
-    job_id = f"local-{uuid.uuid4().hex[:16]}"
-    export_task = DownloadTask(
-        video_id=video.id,
-        task_type="export",
-        status="completed",
-        progress=100,
-        output_path=output_path,
-        params=json.dumps({"source_path": source_path, "imported": True}, ensure_ascii=False),
-        parent_job_id=job_id,
-        completed_at=datetime.now(),
-    )
-    db.add(export_task)
-    db.commit()
-    db.refresh(export_task)
-
-    params = {
-        "source_path": source_path,
-        "source_video_path": output_path,
-        "imported_local_video_path": output_path,
-        "workspace_dir": paths.get("workspace_dir"),
-        "workspace_name": paths.get("workspace_name"),
-        "video_downloads_dir": paths.get("downloads_dir"),
-        "video_output_dir": paths.get("output_dir"),
-        "video_exports_dir": paths.get("exports_dir"),
-    }
-    job = AutomationJobRecord(
-        id=job_id,
-        video_id=video.id,
-        source_url=f"local:{source_path}",
-        title=title,
-        status="completed",
-        progress=100,
-        current_step="已导入本地视频",
-        output_path=output_path,
-        stages=json.dumps(_completed_import_stages(output_path, export_task.id), ensure_ascii=False),
-        params=json.dumps(params, ensure_ascii=False),
-        completed_at=datetime.now(),
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+    return video
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -2643,10 +2665,10 @@ def _normalize_batch_urls(urls: list[str]) -> list[str]:
 def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db)):
     """执行完整一键自动流程"""
     if not request.url.strip():
-        raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
+        raise HTTPException(status_code=400, detail="请填写视频链接或选择本地视频")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=not _is_local_video_source(request.url))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2662,10 +2684,10 @@ def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db))
 def start_automation(request: AutomationRunRequest, db: Session = Depends(get_db)):
     """启动后台一键自动流程，立即返回任务 ID"""
     if not request.url.strip():
-        raise HTTPException(status_code=400, detail="请填写 YouTube 链接")
+        raise HTTPException(status_code=400, detail="请填写视频链接或选择本地视频")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=not _is_local_video_source(request.url))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2682,7 +2704,7 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
         raise HTTPException(status_code=400, detail="请至少填写一个有效链接")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=any(not _is_local_video_source(url) for url in normalized_urls))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2709,13 +2731,6 @@ def list_automation_jobs(db: Session = Depends(get_db)):
     """获取自动化任务列表"""
     jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.desc()).limit(50).all()
     return [_job_to_response(job, db) for job in jobs]
-
-
-@router.post("/import-local-video", response_model=AutomationJobResponse)
-def import_local_video(request: LocalVideoImportRequest, db: Session = Depends(get_db)):
-    """把用户选择的本地视频复制到项目文件夹，并加入素材库"""
-    job = _import_local_video_job(request, db)
-    return _job_to_response(job, db)
 
 
 @router.get("/media")
@@ -2791,7 +2806,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2814,7 +2829,7 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2835,7 +2850,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
         raise HTTPException(status_code=400, detail="任务仍在执行中，请稍后再重新导出")
 
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=False)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3046,7 +3061,7 @@ def pause_batch_automation(batch_id: str, db: Session = Depends(get_db)):
 def resume_batch_automation(batch_id: str, db: Session = Depends(get_db)):
     """恢复一个批次中暂停的自动化任务"""
     try:
-        assert_required_tools_available()
+        assert_required_tools_available(require_yt_dlp=_batch_requires_yt_dlp(db, batch_id))
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

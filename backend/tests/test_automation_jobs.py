@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, LocalVideoImportRequest, delete_automation_job_folder, import_local_video, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -117,6 +117,22 @@ class FakeAutomationDownloader:
         """记录封面下载参数并返回假封面文件"""
         self.thumbnail_calls.append(kwargs)
         return os.path.join(kwargs["output_dir"], "cover.jpg")
+
+
+class FailingLocalSourceDownloader:
+    """测试用下载器，本地视频流程不应调用任何网络解析或下载"""
+
+    def parse_video(self, *_args, **_kwargs):
+        """本地视频不应调用 yt-dlp 解析"""
+        raise AssertionError("本地视频流程不应调用链接解析")
+
+    def download_video(self, *_args, **_kwargs):
+        """本地视频不应调用 yt-dlp 下载"""
+        raise AssertionError("本地视频流程不应调用视频下载")
+
+    def download_thumbnail(self, *_args, **_kwargs):
+        """本地视频没有网络封面，不应触发封面下载"""
+        raise AssertionError("本地视频流程不应调用封面下载")
 
 
 class FakeAutomationProcessor:
@@ -1010,44 +1026,67 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
         self.assertEqual(db.tasks, [])
         self.assertEqual(db.commit_count, 1)
 
-    def test_import_local_video_copies_file_and_creates_library_job(self):
-        """导入本地视频会复制到独立项目文件夹，并生成素材库完成记录"""
+    def test_local_video_source_runs_full_automation_flow(self):
+        """本地视频会复制到下载阶段目录，并继续走一键流程"""
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
         Session = sessionmaker(bind=engine)
 
-        with tempfile.TemporaryDirectory(prefix="automation_import_local_") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="automation_local_source_") as temp_dir:
             source_path = os.path.join(temp_dir, "Local Clip.mp4")
             with open(source_path, "wb") as file:
                 file.write(b"local-video")
 
-            workspace_dir = os.path.join(temp_dir, "videos", "local__Local_Clip")
+            workspace_dir = os.path.join(temp_dir, "videos", "local-flow__Local_Clip")
             downloads_dir = os.path.join(workspace_dir, "downloads")
             output_dir = os.path.join(workspace_dir, "output")
             exports_dir = os.path.join(workspace_dir, "exports")
             for directory in (downloads_dir, output_dir, exports_dir):
                 os.makedirs(directory, exist_ok=True)
 
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
             db = Session()
             try:
-                with patch("backend.api.automation.ensure_video_workspace", return_value={
-                    "workspace_dir": workspace_dir,
-                    "workspace_name": "local__Local_Clip",
-                    "downloads_dir": downloads_dir,
-                    "output_dir": output_dir,
-                    "exports_dir": exports_dir,
-                }):
-                    response = import_local_video(LocalVideoImportRequest(file_path=source_path), db)
+                with (
+                    patch("backend.api.automation.assert_required_tools_available"),
+                    patch("backend.api.automation.Downloader", return_value=FailingLocalSourceDownloader()),
+                    patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                    patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                    patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                    patch("backend.api.automation._pick_text_profile", return_value=None),
+                    patch("backend.api.automation.ensure_video_workspace", return_value={
+                        "workspace_dir": workspace_dir,
+                        "workspace_name": "local-flow__Local_Clip",
+                        "downloads_dir": downloads_dir,
+                        "output_dir": output_dir,
+                        "exports_dir": exports_dir,
+                    }),
+                ):
+                    response = _run_automation_sync(
+                        AutomationRunRequest(
+                            url=f"local:{source_path}",
+                            enable_effects=False,
+                            processing_preset={},
+                            enable_voice=False,
+                            burn_subtitles=True,
+                            output_format="mp4",
+                        ),
+                        db,
+                    )
             finally:
                 db.close()
 
-            copied_path = os.path.join(exports_dir, "Local Clip.mp4")
+            copied_path = os.path.join(downloads_dir, "Local Clip.mp4")
+            stage_by_key = {stage.key: stage for stage in response.stages}
 
             self.assertTrue(os.path.isfile(copied_path))
-            self.assertEqual(response.status, "completed")
-            self.assertEqual(response.output_path, copied_path)
-            self.assertEqual(response.source_video_path, copied_path)
-            self.assertEqual(response.stages[-1].output_path, copied_path)
+            self.assertEqual(response.title, "Local Clip")
+            self.assertTrue(os.path.isfile(response.output_path))
+            self.assertEqual(stage_by_key["download"].output_path, copied_path)
+            self.assertEqual(fake_recognizer.video_paths, [copied_path])
+            self.assertEqual(stage_by_key["subtitle"].status, "completed")
+            self.assertEqual(stage_by_key["export"].status, "completed")
 
     def test_delete_job_folder_removes_workspace_and_record(self):
         """删除素材文件夹只允许删除单视频独立目录，并同步清理记录"""

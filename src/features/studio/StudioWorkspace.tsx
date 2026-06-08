@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
-  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download,
+  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FileVideo, X,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -17,6 +17,7 @@ import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
+import { toLocalVideoSource } from '@/lib/automationPayload'
 import { videoApi } from '@/lib/api'
 import { useParseVideo } from '@/hooks/useParseVideo'
 import { useAutoRun } from '@/hooks/useAutoRun'
@@ -51,8 +52,11 @@ interface StudioWorkspaceProps {
 
 export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
   const [url, setUrl] = useState('')
+  const [localVideoPath, setLocalVideoPath] = useState('')
+  const [isSelectingLocalVideo, setIsSelectingLocalVideo] = useState(false)
   const { parse, isParsing } = useParseVideo()
   const { start, isStarting } = useAutoRun()
+  const setCurrentVideo = useVideoStore((s) => s.setCurrentVideo)
   const currentVideo = useVideoStore((s) => s.currentVideo)
   const jobs = useAutomationStore((s) => s.jobs)
   const preferences = usePrefsStore((s) => s.preferences)
@@ -61,8 +65,58 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
   const activeJob = jobs.find((job) => job.status === 'running' || job.status === 'pending') ?? jobs[0]
   const displayVideo = currentVideo ?? activeJob?.video_info ?? null
 
+  const sourceForRun = localVideoPath ? toLocalVideoSource(localVideoPath) : url
+  const hasSource = Boolean(sourceForRun.trim())
+
+  const handleUrlChange = (value: string) => {
+    setUrl(value)
+    if (localVideoPath) {
+      setLocalVideoPath('')
+      setCurrentVideo(null)
+    }
+  }
+
+  const handleSelectLocalVideo = async () => {
+    if (isSelectingLocalVideo) return
+    const picker = window.electron?.dialog?.selectVideoFile
+    if (!picker) {
+      toast.warning('当前环境不支持选择本地视频，请在桌面应用中使用')
+      return
+    }
+
+    setIsSelectingLocalVideo(true)
+    try {
+      const filePath = await picker()
+      if (!filePath) return
+      const title = filePath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '本地视频'
+      setLocalVideoPath(filePath)
+      setUrl('')
+      setCurrentVideo({
+        id: 0,
+        video_id: 'local-preview',
+        platform: 'local',
+        title,
+        author: '本地视频',
+        duration: null,
+        thumbnail_url: null,
+        formats: [],
+        subtitles: [],
+      })
+      toast.success('已选择本地视频，可直接一键完成')
+    } catch (error) {
+      toast.error(`选择本地视频失败：${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsSelectingLocalVideo(false)
+    }
+  }
+
+  const handleClearLocalVideo = () => {
+    setLocalVideoPath('')
+    setCurrentVideo(null)
+  }
+
   const handleParse = () => parse(url)
-  const handleStart = () => start(url)
+  const handleStart = () => start(sourceForRun)
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
@@ -72,24 +126,39 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
           <div className="flex flex-wrap gap-2">
             <Input
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => handleUrlChange(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleParse()}
               placeholder="粘贴 YouTube 视频链接…"
               className="h-10 min-w-60 flex-1"
+              disabled={Boolean(localVideoPath)}
             />
             <Button variant="outline" className="h-10" onClick={handleParse} disabled={!url.trim() || isParsing}>
               {isParsing ? '解析中…' : '解析'}
             </Button>
+            <Button variant="secondary" className="h-10 gap-1.5" onClick={handleSelectLocalVideo} disabled={isSelectingLocalVideo || isStarting}>
+              {isSelectingLocalVideo ? <Loader2 className="size-4 animate-spin" /> : <FileVideo className="size-4" />}
+              {localVideoPath ? '重新选择本地视频' : '选择本地视频'}
+            </Button>
             <AutoRunConfirm
-              disabled={!url.trim()}
+              disabled={!hasSource}
               isStarting={isStarting}
               preferences={preferences}
               onConfirm={handleStart}
               onOpenSettings={onOpenSettings}
             />
           </div>
+          {localVideoPath && (
+            <div className="flex items-center gap-2 rounded-lg border bg-muted/35 px-3 py-2 text-xs">
+              <FileVideo className="size-4 shrink-0 text-primary" />
+              <span className="shrink-0 text-foreground">已选择本地视频</span>
+              <span className="min-w-0 flex-1 truncate text-muted-foreground select-text">{localVideoPath}</span>
+              <Button variant="ghost" size="icon" className="size-7 shrink-0" onClick={handleClearLocalVideo}>
+                <X className="size-3.5" />
+              </Button>
+            </div>
+          )}
           <p className="text-xs text-muted-foreground">
-            粘贴链接后可先「解析」预览信息，也可以直接「一键完成」；软件会先自动解析，再继续跑完整流程。
+            可以粘贴链接后先「解析」，也可以选择本地视频后直接「一键完成」；两种来源都会进入同一套处理流程。
           </p>
         </CardContent>
       </Card>
@@ -303,8 +372,8 @@ function ParseHint() {
     <Card className="border-dashed">
       <CardContent className="flex flex-col items-center gap-2 py-10 text-center">
         <Sparkles className="size-7 text-muted-foreground/60" />
-        <p className="text-sm text-muted-foreground">粘贴 YouTube 链接开始</p>
-        <p className="text-xs text-muted-foreground/70">解析后在此预览视频信息，并可逐步处理或一键完成</p>
+        <p className="text-sm text-muted-foreground">粘贴链接或选择本地视频开始</p>
+        <p className="text-xs text-muted-foreground/70">链接可先解析预览，本地视频可直接进入一键流程</p>
       </CardContent>
     </Card>
   )

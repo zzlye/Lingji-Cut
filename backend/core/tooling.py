@@ -107,9 +107,11 @@ def check_required_tools() -> dict[str, ToolStatus]:
     }
 
 
-def assert_required_tools_available() -> None:
+def assert_required_tools_available(require_yt_dlp: bool = True) -> None:
     """自动化任务启动前校验必需工具"""
     statuses = check_required_tools()
+    if not require_yt_dlp:
+        statuses.pop("yt_dlp", None)
     missing = [status for status in statuses.values() if not status.available]
     if missing:
         detail = "；".join(status.error_message or f"{status.name} 不可用" for status in missing)

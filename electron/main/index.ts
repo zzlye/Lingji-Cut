@@ -256,7 +256,7 @@ app.whenReady().then(async () => {
     return result.filePaths[0]
   })
 
-  // 选择本地视频文件，供素材库导入使用。
+  // 选择本地视频文件，供主流程直接处理使用。
   ipcMain.handle('dialog:select-video-file', async () => {
     const result = await dialog.showOpenDialog({
       title: '选择本地视频',
