@@ -22,6 +22,7 @@ interface ElectronAPI {
   /** 系统对话框 */
   dialog: {
     selectDirectory: (defaultPath?: string) => Promise<string | null>
+    selectVideoFile: () => Promise<string | null>
   }
 }
 

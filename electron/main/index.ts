@@ -256,6 +256,23 @@ app.whenReady().then(async () => {
     return result.filePaths[0]
   })
 
+  // 选择本地视频文件，供素材库导入使用。
+  ipcMain.handle('dialog:select-video-file', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择本地视频',
+      properties: ['openFile'],
+      filters: [
+        { name: '视频文件', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
+  })
+
   // 启动 Python 后端
   startPythonBackend()
 

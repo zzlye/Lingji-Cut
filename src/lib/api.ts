@@ -436,6 +436,13 @@ export const automationApi = {
   listJobs: () =>
     request<import('@/types').BackendAutomationJob[]>('/automation/jobs'),
 
+  /** 导入本地视频到项目文件夹并加入素材库 */
+  importLocalVideo: (filePath: string) =>
+    request<import('@/types').BackendAutomationJob>('/automation/import-local-video', {
+      method: 'POST',
+      body: JSON.stringify({ file_path: filePath }),
+    }),
+
   /** 获取后台一键流程进度 */
   getJob: (id: string) =>
     request<import('@/types').BackendAutomationJob>(`/automation/jobs/${id}`),

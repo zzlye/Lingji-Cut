@@ -46,6 +46,7 @@ SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+LOCAL_VIDEO_IMPORT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 VIDEO_WORKSPACE_STAGE_DIRS = ("downloads", "output", "exports")
 
@@ -234,6 +235,11 @@ class AutomationJobFolderResponse(BaseModel):
     message: str
     job_id: str
     folder_path: str
+
+
+class LocalVideoImportRequest(BaseModel):
+    """导入本地视频请求"""
+    file_path: str
 
 
 def _default_stages() -> list[dict[str, Any]]:
@@ -2156,6 +2162,119 @@ def _safe_media_file_path(path: str) -> str:
     return media_path
 
 
+def _safe_local_video_import_path(path: str) -> str:
+    """校验要导入素材库的本地视频路径"""
+    video_path = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not video_path or not os.path.isfile(video_path):
+        raise HTTPException(status_code=404, detail="本地视频文件不存在")
+    if os.path.splitext(video_path)[1].lower() not in LOCAL_VIDEO_IMPORT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持导入常见视频文件")
+    return video_path
+
+
+def _safe_local_video_file_name(path: str) -> str:
+    """生成导入视频在项目文件夹里的安全文件名"""
+    base_name = os.path.splitext(os.path.basename(path))[0]
+    safe_name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._ -]+", "_", base_name).strip(" ._-")
+    return safe_name or "local_video"
+
+
+def _completed_import_stages(output_path: str, task_id: Optional[int] = None) -> list[dict[str, Any]]:
+    """生成本地视频导入后的完成状态，保证素材库和字幕调整都能直接读取"""
+    stages = _default_stages()
+    for stage in stages:
+        key = stage.get("key")
+        if key in {"parse", "download", "export"}:
+            stage["status"] = "completed"
+            stage["progress"] = 100
+        else:
+            stage["status"] = "skipped"
+            stage["progress"] = 100
+        if key in {"download", "export"}:
+            stage["output_path"] = output_path
+        if key == "export" and task_id is not None:
+            stage["task_id"] = task_id
+    return stages
+
+
+def _copy_local_video_into_workspace(source_path: str, paths: dict[str, str]) -> str:
+    """把本地视频复制到该视频的项目 exports 目录，作为素材库成品"""
+    extension = os.path.splitext(source_path)[1].lower()
+    target_name = f"{_safe_local_video_file_name(source_path)}{extension}"
+    target_path = os.path.join(paths["exports_dir"], target_name)
+    if _same_path(source_path, target_path):
+        return target_path
+    shutil.copy2(source_path, target_path)
+    return target_path
+
+
+def _import_local_video_job(request: LocalVideoImportRequest, db: Session) -> AutomationJobRecord:
+    """导入本地视频并创建一条已完成素材记录"""
+    source_path = _safe_local_video_import_path(request.file_path)
+    title = os.path.splitext(os.path.basename(source_path))[0] or "本地视频"
+    local_video_id = f"local-{uuid.uuid4().hex[:16]}"
+    paths = ensure_video_workspace(local_video_id, title)
+    output_path = _copy_local_video_into_workspace(source_path, paths)
+
+    video = VideoSource(
+        platform="local",
+        video_id=local_video_id,
+        url=source_path,
+        title=title,
+        author="本地导入",
+        duration=None,
+        thumbnail_url=None,
+        formats=json.dumps([], ensure_ascii=False),
+        subtitles=json.dumps([], ensure_ascii=False),
+    )
+    db.add(video)
+    db.commit()
+    db.refresh(video)
+
+    job_id = f"local-{uuid.uuid4().hex[:16]}"
+    export_task = DownloadTask(
+        video_id=video.id,
+        task_type="export",
+        status="completed",
+        progress=100,
+        output_path=output_path,
+        params=json.dumps({"source_path": source_path, "imported": True}, ensure_ascii=False),
+        parent_job_id=job_id,
+        completed_at=datetime.now(),
+    )
+    db.add(export_task)
+    db.commit()
+    db.refresh(export_task)
+
+    params = {
+        "source_path": source_path,
+        "source_video_path": output_path,
+        "imported_local_video_path": output_path,
+        "workspace_dir": paths.get("workspace_dir"),
+        "workspace_name": paths.get("workspace_name"),
+        "video_downloads_dir": paths.get("downloads_dir"),
+        "video_output_dir": paths.get("output_dir"),
+        "video_exports_dir": paths.get("exports_dir"),
+    }
+    job = AutomationJobRecord(
+        id=job_id,
+        video_id=video.id,
+        source_url=f"local:{source_path}",
+        title=title,
+        status="completed",
+        progress=100,
+        current_step="已导入本地视频",
+        output_path=output_path,
+        stages=json.dumps(_completed_import_stages(output_path, export_task.id), ensure_ascii=False),
+        params=json.dumps(params, ensure_ascii=False),
+        completed_at=datetime.now(),
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
 def _same_path(left: str, right: str) -> bool:
     """判断两个路径是否指向同一位置，兼容 Windows 大小写差异"""
     return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
@@ -2590,6 +2709,13 @@ def list_automation_jobs(db: Session = Depends(get_db)):
     """获取自动化任务列表"""
     jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.desc()).limit(50).all()
     return [_job_to_response(job, db) for job in jobs]
+
+
+@router.post("/import-local-video", response_model=AutomationJobResponse)
+def import_local_video(request: LocalVideoImportRequest, db: Session = Depends(get_db)):
+    """把用户选择的本地视频复制到项目文件夹，并加入素材库"""
+    job = _import_local_video_job(request, db)
+    return _job_to_response(job, db)
 
 
 @router.get("/media")
