@@ -9,7 +9,7 @@ from fastapi import HTTPException
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.api.automation import _run_automation_sync  # noqa: E402
+from backend.api.automation import _download_cover_asset, _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 
 
@@ -99,6 +99,7 @@ class FakeAutomationDownloader:
     def __init__(self, download_path: str):
         self.download_path = download_path
         self.subtitle_download_calls = 0
+        self.thumbnail_calls: list[dict] = []
 
     def download_video(self, **_):
         """返回已准备好的本地视频路径"""
@@ -108,6 +109,11 @@ class FakeAutomationDownloader:
         """一键流程不应再下载字幕"""
         self.subtitle_download_calls += 1
         raise AssertionError("一键流程不应调用字幕下载")
+
+    def download_thumbnail(self, **kwargs):
+        """记录封面下载参数并返回假封面文件"""
+        self.thumbnail_calls.append(kwargs)
+        return os.path.join(kwargs["output_dir"], "cover.jpg")
 
 
 class FakeAutomationProcessor:
@@ -265,6 +271,32 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.video_info["title"], "200 Days in Minecraft Bedrock Edition")
         self.assertEqual(response.video_info["formats"][0]["format_id"], "18")
         self.assertEqual(response.video_info["subtitles"][0]["language"], "en")
+
+    def test_automation_cover_download_uses_custom_output_dir(self):
+        """一键流程自动保存封面时使用用户选择的封面目录"""
+        with tempfile.TemporaryDirectory(prefix="automation_cover_") as default_dir:
+            with tempfile.TemporaryDirectory(prefix="automation_cover_custom_") as custom_dir:
+                video = VideoSource(
+                    id=6,
+                    platform="youtube",
+                    video_id="cover-test",
+                    url="https://youtu.be/cover-test",
+                    title="Cover Test",
+                    thumbnail_url="https://example.test/cover.jpg",
+                )
+                downloader = FakeAutomationDownloader(os.path.join(default_dir, "video.mp4"))
+
+                output_path = _download_cover_asset(
+                    video,
+                    downloader,
+                    {"downloads_dir": default_dir},
+                    custom_dir,
+                )
+
+        self.assertEqual(output_path, os.path.join(custom_dir, "cover.jpg"))
+        self.assertEqual(downloader.thumbnail_calls[0]["output_dir"], custom_dir)
+        self.assertEqual(downloader.thumbnail_calls[0]["thumbnail_url"], video.thumbnail_url)
+        self.assertEqual(downloader.thumbnail_calls[0]["file_name"], "Cover_Test_cover")
 
     def test_job_response_recovers_legacy_flat_subtitle_asset_path(self):
         """旧版平铺目录任务即使没保存字幕参数，也能从 output 目录回推出可编辑字幕"""

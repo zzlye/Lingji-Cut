@@ -125,6 +125,7 @@ class AutomationRunRequest(BaseModel):
     glossary_terms: list[dict[str, Any]] = Field(default_factory=list)
     banned_words: list[str] = Field(default_factory=list)
     banned_word_action: str = "warn"
+    cover_output_dir: Optional[str] = None
 
 
 class AutomationStageResult(BaseModel):
@@ -612,7 +613,12 @@ def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Opt
     return None
 
 
-def _store_job_workspace_params(job: Optional[AutomationJobRecord], paths: dict[str, str], source_video_path: Optional[str] = None) -> None:
+def _store_job_workspace_params(
+    job: Optional[AutomationJobRecord],
+    paths: dict[str, str],
+    source_video_path: Optional[str] = None,
+    cover_asset_path: Optional[str] = None,
+) -> None:
     """把视频工作目录写回任务参数，后续重导出和字幕页都直接按目录找资源"""
     if not job:
         return
@@ -626,7 +632,36 @@ def _store_job_workspace_params(job: Optional[AutomationJobRecord], paths: dict[
     })
     if source_video_path:
         params["source_video_path"] = source_video_path
+    if cover_asset_path:
+        params["cover_asset_path"] = cover_asset_path
     _set_job_params(job, params)
+
+
+def _resolve_cover_output_dir(output_dir: Optional[str], default_dir: str) -> str:
+    """解析封面保存目录；未指定时使用当前视频工作目录"""
+    raw_dir = str(output_dir or "").strip()
+    target_dir = os.path.abspath(os.path.expanduser(raw_dir)) if raw_dir else default_dir
+    os.makedirs(target_dir, exist_ok=True)
+    return target_dir
+
+
+def _safe_cover_base_name(value: str) -> str:
+    """把视频标题转换成封面文件名片段"""
+    safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(value or "").strip())
+    safe_name = safe_name.strip("._") or "thumbnail"
+    return os.path.splitext(safe_name)[0]
+
+
+def _download_cover_asset(video: VideoSource, downloader: Downloader, paths: dict[str, str], output_dir: Optional[str]) -> Optional[str]:
+    """自动保存封面素材，失败交给调用方记录 warning，不阻断主流程"""
+    if not video.thumbnail_url:
+        return None
+    cover_name = f"{_safe_cover_base_name(video.title or video.video_id or 'thumbnail')}_cover"
+    return downloader.download_thumbnail(
+        thumbnail_url=video.thumbnail_url,
+        output_dir=_resolve_cover_output_dir(output_dir, paths["downloads_dir"]),
+        file_name=cover_name,
+    )
 
 
 def _job_workspace_paths(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[dict[str, str]]:
@@ -1388,14 +1423,20 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
 
     video = _parse_or_update_video(db, request.url, downloader)
     paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+    cover_asset_path: Optional[str] = None
+    cover_warning_message: Optional[str] = None
+    try:
+        cover_asset_path = _download_cover_asset(video, downloader, paths, request.cover_output_dir)
+    except Exception as cover_exc:
+        cover_warning_message = f"封面自动保存失败: {cover_exc}"
     _check_control(db, job)
     stages.append(AutomationStageResult(key="parse", status="completed"))
     if job:
         job.video_id = video.id
         job.title = video.title or "一键自动流程"
         job.status = "running"
-        _store_job_workspace_params(job, paths)
-        _update_job_stage(db, job, "parse", "completed")
+        _store_job_workspace_params(job, paths, cover_asset_path=cover_asset_path)
+        _update_job_stage(db, job, "parse", "completed", error_message=cover_warning_message)
 
     reusable_download_path = _stage_output_if_reusable(job, "download") if resume_from_checkpoint else None
     if reusable_download_path:

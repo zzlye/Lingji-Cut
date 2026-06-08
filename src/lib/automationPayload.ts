@@ -44,5 +44,6 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     glossary_terms: preferences.glossary_terms,
     banned_words: preferences.banned_words,
     banned_word_action: preferences.banned_word_action,
+    cover_output_dir: preferences.cover_download_dir || undefined,
   }
 }

@@ -1,9 +1,9 @@
 // src/features/studio/StudioWorkspace.tsx
 // 工作台 - 一条主线串起 URL→解析→一键完成→实时进度，开屏即见，取代原先空白的素材库首页
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
-  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download,
+  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FolderOpen,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -215,19 +215,47 @@ function PipelineStepper({ job }: { job?: AutomationJob }) {
 function VideoInfoCard({ video }: { video: VideoParseResult }) {
   const [isDownloadingCover, setIsDownloadingCover] = useState(false)
   const [lastCoverPath, setLastCoverPath] = useState('')
+  const [showCoverLocation, setShowCoverLocation] = useState(false)
+  const [coverDirDraft, setCoverDirDraft] = useState('')
+  const coverDownloadDir = usePrefsStore((s) => s.preferences.cover_download_dir)
+  const updatePrefs = usePrefsStore((s) => s.update)
+
+  useEffect(() => {
+    setCoverDirDraft(coverDownloadDir)
+  }, [coverDownloadDir])
 
   const handleDownloadCover = async () => {
     if (isDownloadingCover || !video.thumbnail_url) return
     setIsDownloadingCover(true)
     try {
-      const result = await videoApi.downloadThumbnail(video.id)
+      const result = await videoApi.downloadThumbnail(video.id, undefined, coverDownloadDir || undefined)
       setLastCoverPath(result.output_path)
-      toast.success('封面已保存到当前视频目录')
+      toast.success('封面已保存')
     } catch (error) {
       toast.error(`封面下载失败：${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setIsDownloadingCover(false)
     }
+  }
+
+  const handleSelectCoverDirectory = async () => {
+    const picker = window.electron?.dialog?.selectDirectory
+    if (!picker) {
+      toast.warning('当前环境不支持系统目录选择，请直接输入路径')
+      return
+    }
+    try {
+      const selected = await picker(coverDirDraft || coverDownloadDir)
+      if (selected) setCoverDirDraft(selected)
+    } catch (error) {
+      toast.error(`选择封面目录失败：${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  const handleSaveCoverDirectory = () => {
+    updatePrefs({ cover_download_dir: coverDirDraft.trim() })
+    toast.success(coverDirDraft.trim() ? '封面保存位置已保存' : '封面保存位置已恢复默认')
+    setShowCoverLocation(false)
   }
 
   return (
@@ -256,7 +284,34 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
               <Download className="mr-1.5 size-3.5" />
               {isDownloadingCover ? '保存封面中…' : '手动下载封面'}
             </Button>
+            <Button variant="ghost" size="sm" className="gap-1.5" onClick={() => {
+              setCoverDirDraft(coverDownloadDir)
+              setShowCoverLocation((value) => !value)
+            }}>
+              <FolderOpen className="size-3.5" />
+              封面位置
+            </Button>
           </div>
+          {showCoverLocation && (
+            <div className="space-y-2 rounded-lg border bg-muted/25 p-2.5">
+              <p className="text-xs text-muted-foreground">留空会保存到当前视频文件夹的 downloads；一键完成自动保存封面也使用这里。</p>
+              <div className="flex flex-wrap gap-2">
+                <Input
+                  value={coverDirDraft}
+                  onChange={(event) => setCoverDirDraft(event.target.value)}
+                  placeholder="封面保存目录，例如 D:\封面素材"
+                  className="h-9 min-w-52 flex-1 text-xs"
+                />
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={handleSelectCoverDirectory}>
+                  <FolderOpen className="size-3.5" /> 选择
+                </Button>
+                <Button size="sm" onClick={handleSaveCoverDirectory}>保存</Button>
+              </div>
+            </div>
+          )}
+          <p className="break-all text-[11px] text-muted-foreground">
+            封面位置：{coverDownloadDir || '当前视频文件夹 / downloads'}
+          </p>
           {lastCoverPath && (
             <p className="break-all text-[11px] text-muted-foreground">
               封面已保存：{lastCoverPath}

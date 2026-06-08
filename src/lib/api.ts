@@ -46,10 +46,10 @@ export const videoApi = {
     }),
 
   /** 手动下载视频封面 */
-  downloadThumbnail: (videoId: number, fileName?: string) =>
+  downloadThumbnail: (videoId: number, fileName?: string, outputDir?: string) =>
     request<{ message: string; output_path: string }>('/videos/download-thumbnail', {
       method: 'POST',
-      body: JSON.stringify({ video_id: videoId, file_name: fileName }),
+      body: JSON.stringify({ video_id: videoId, file_name: fileName, output_dir: outputDir }),
     }),
 }
 
@@ -398,6 +398,7 @@ export type AutomationStartParams = {
   glossary_terms?: import('@/types').GlossaryTerm[]
   banned_words?: string[]
   banned_word_action?: 'warn' | 'block'
+  cover_output_dir?: string
 }
 
 export const automationApi = {

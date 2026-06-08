@@ -47,6 +47,7 @@ class ThumbnailDownloadRequest(BaseModel):
     """手动下载封面请求"""
     video_id: int
     file_name: Optional[str] = None
+    output_dir: Optional[str] = None
 
 
 class ThumbnailDownloadResponse(BaseModel):
@@ -178,11 +179,12 @@ def download_thumbnail(request: ThumbnailDownloadRequest, db: Session = Depends(
     workspace_paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     raw_file_name = str(request.file_name or "").strip()
     cover_name = raw_file_name or f"{_safe_cover_base_name(video.title or video.video_id or 'thumbnail')}_cover"
+    output_dir = _resolve_cover_output_dir(request.output_dir, workspace_paths["downloads_dir"])
 
     try:
         output_path = Downloader().download_thumbnail(
             thumbnail_url=video.thumbnail_url,
-            output_dir=workspace_paths["downloads_dir"],
+            output_dir=output_dir,
             file_name=cover_name,
         )
     except Exception as exc:
@@ -199,3 +201,11 @@ def _safe_cover_base_name(value: str) -> str:
     safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(value or "").strip())
     safe_name = safe_name.strip("._") or "thumbnail"
     return os.path.splitext(safe_name)[0]
+
+
+def _resolve_cover_output_dir(output_dir: Optional[str], default_dir: str) -> str:
+    """解析封面保存目录；用户未填写时回落到当前视频工作目录"""
+    raw_dir = str(output_dir or "").strip()
+    target_dir = os.path.abspath(os.path.expanduser(raw_dir)) if raw_dir else default_dir
+    os.makedirs(target_dir, exist_ok=True)
+    return target_dir

@@ -1,10 +1,11 @@
 // src/features/tasks/VideoInfoCard.tsx
 // 视频信息卡片 - 显示解析后的视频详细信息
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { VideoParseResult } from '@/types'
 import { videoApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
+import { usePrefsStore } from '@/stores/prefsStore'
 
 /** 视频信息卡片属性 */
 interface VideoInfoCardProps {
@@ -20,7 +21,15 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
   const [isDownloading, setIsDownloading] = useState(false)
   const [isDownloadingCover, setIsDownloadingCover] = useState(false)
   const [lastCoverPath, setLastCoverPath] = useState('')
+  const [coverDirDraft, setCoverDirDraft] = useState('')
+  const [showCoverLocation, setShowCoverLocation] = useState(false)
   const { addTask, addLog } = useTaskStore()
+  const coverDownloadDir = usePrefsStore((s) => s.preferences.cover_download_dir)
+  const updatePrefs = usePrefsStore((s) => s.update)
+
+  useEffect(() => {
+    setCoverDirDraft(coverDownloadDir)
+  }, [coverDownloadDir])
 
   /** 格式化时长 */
   const formatDuration = (seconds: number | null) => {
@@ -66,7 +75,7 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
 
     setIsDownloadingCover(true)
     try {
-      const result = await videoApi.downloadThumbnail(video.id)
+      const result = await videoApi.downloadThumbnail(video.id, undefined, coverDownloadDir || undefined)
       setLastCoverPath(result.output_path)
       addLog('info', `封面已保存: ${result.output_path}`)
     } catch (error) {
@@ -74,6 +83,27 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
     } finally {
       setIsDownloadingCover(false)
     }
+  }
+
+  /** 选择封面保存目录，和一键自动保存封面共用同一个偏好 */
+  const handleSelectCoverDirectory = async () => {
+    const picker = window.electron?.dialog?.selectDirectory
+    if (!picker) {
+      addLog('warn', '当前环境不支持系统目录选择，请直接输入封面保存目录')
+      return
+    }
+    try {
+      const selected = await picker(coverDirDraft || coverDownloadDir)
+      if (selected) setCoverDirDraft(selected)
+    } catch (error) {
+      addLog('error', `选择封面目录失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  const handleSaveCoverDirectory = () => {
+    updatePrefs({ cover_download_dir: coverDirDraft.trim() })
+    addLog('info', coverDirDraft.trim() ? `封面保存目录已保存: ${coverDirDraft.trim()}` : '封面保存目录已恢复默认')
+    setShowCoverLocation(false)
   }
 
   return (
@@ -169,6 +199,26 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
           >
             {isDownloadingCover ? '保存中...' : '下载封面'}
           </button>
+        </div>
+        <div className="space-y-2 rounded-md border border-border p-2">
+          <div className="flex items-center justify-between gap-2 text-xs text-foreground-muted">
+            <span className="min-w-0 truncate">封面位置：{coverDownloadDir || '当前视频文件夹 / downloads'}</span>
+            <button className="shrink-0 text-primary" onClick={() => setShowCoverLocation((value) => !value)}>
+              {showCoverLocation ? '收起' : '更改'}
+            </button>
+          </div>
+          {showCoverLocation && (
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={coverDirDraft}
+                onChange={(event) => setCoverDirDraft(event.target.value)}
+                placeholder="封面保存目录，留空使用默认"
+                className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs"
+              />
+              <button className="h-9 rounded-md border border-border px-2 text-xs" onClick={handleSelectCoverDirectory}>选择</button>
+              <button className="h-9 rounded-md bg-primary px-2 text-xs text-primary-foreground" onClick={handleSaveCoverDirectory}>保存</button>
+            </div>
+          )}
         </div>
         {lastCoverPath && (
           <p className="text-xs break-all text-foreground-muted">

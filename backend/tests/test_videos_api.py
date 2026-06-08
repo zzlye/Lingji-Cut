@@ -65,6 +65,27 @@ class VideosApiTests(unittest.TestCase):
         self.assertEqual(download_mock.call_args.kwargs["thumbnail_url"], video.thumbnail_url)
         self.assertEqual(download_mock.call_args.kwargs["file_name"], "Test_Video_cover")
 
+    def test_download_thumbnail_uses_custom_output_dir(self):
+        """手动下载封面指定目录时保存到用户选择的位置"""
+        video = VideoSource(
+            id=8,
+            video_id="custom123",
+            platform="youtube",
+            url="https://example.com/watch?v=custom123",
+            title="Custom Cover",
+            thumbnail_url="https://example.com/cover.jpg",
+        )
+
+        with tempfile.TemporaryDirectory() as workspace_dir:
+            with tempfile.TemporaryDirectory() as custom_dir:
+                expected_path = os.path.join(custom_dir, "Custom_Cover_cover.jpg")
+                with patch("backend.api.videos.ensure_video_workspace", return_value={"downloads_dir": workspace_dir}):
+                    with patch("backend.api.videos.Downloader.download_thumbnail", return_value=expected_path) as download_mock:
+                        response = download_thumbnail(ThumbnailDownloadRequest(video_id=8, output_dir=custom_dir), db=VideoDb(video))
+
+        self.assertEqual(response.output_path, expected_path)
+        self.assertEqual(download_mock.call_args.kwargs["output_dir"], custom_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
