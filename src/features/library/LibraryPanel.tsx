@@ -1,7 +1,7 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
 import { useEffect, useState } from 'react'
-import { Film, FolderOpen, FolderX, Play } from 'lucide-react'
+import { Captions, Film, FolderOpen, FolderX, Play } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
+import { useUiStore } from '@/stores/uiStore'
 import type { AutomationJob } from '@/types'
 
 type ProductItem = {
@@ -23,6 +24,7 @@ export function LibraryPanel() {
   const jobs = useAutomationStore((s) => s.jobs)
   const removeJob = useAutomationStore((s) => s.removeJob)
   const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
+  const openSubtitleWorkbench = useUiStore((s) => s.openSubtitleWorkbench)
   const { addLog } = useTaskStore()
   const [playing, setPlaying] = useState<ProductItem | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<ProductItem | null>(null)
@@ -98,10 +100,14 @@ export function LibraryPanel() {
                   <p className="min-w-0 flex-1 truncate text-sm font-medium">{job.title}</p>
                 </div>
                 <p className="break-all text-xs text-muted-foreground select-text">{output}</p>
-                <div className="grid grid-cols-3 gap-2">
+                <div className="grid grid-cols-2 gap-2">
                   <Button size="sm" className="h-9 w-full justify-center" onClick={() => setPlaying({ job, output })}>
                     <Play className="mr-1.5 size-4" />
                     播放
+                  </Button>
+                  <Button size="sm" variant="secondary" className="h-9 w-full justify-center" onClick={() => openSubtitleWorkbench(job.id)}>
+                    <Captions className="mr-1.5 size-4" />
+                    字幕调整
                   </Button>
                   <Button size="sm" variant="outline" className="h-9 w-full justify-center" onClick={() => handleOpenFolder(job)} disabled={openingId === job.id}>
                     <FolderOpen className="mr-1.5 size-4" />
