@@ -1235,11 +1235,15 @@ function isMeaninglessSubtitleText(text: string) {
 
 function cleanSubtitleTextForDisplay(text: string) {
   return String(text || '')
-    .replace(/\.{3,}|…+|[，。,.]/g, '')
+    .replace(/\.{3,}|…+|[，。、,.]/g, ' ')
     .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .map((line) => normalizeCjkDigitSpacing(line.replace(/\s+/g, ' ').trim()))
     .filter(Boolean)
     .join('\n')
+}
+
+function normalizeCjkDigitSpacing(text: string) {
+  return text.replace(/(?<=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[0-9０-９])|(?<=[0-9０-９])\s+(?=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])/g, '')
 }
 
 function timeToMs(value: string) {

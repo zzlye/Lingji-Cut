@@ -357,14 +357,22 @@ Language: ja
 
         self.assertEqual([entry["text"] for entry in entries], ["有效字幕"])
 
-    def test_output_subtitle_text_removes_comma_period_and_ellipsis(self):
-        """输出字幕正文会移除逗号、句号和省略号"""
+    def test_output_subtitle_text_replaces_removed_punctuation_with_spacing(self):
+        """输出字幕正文会把逗号、句号和省略号转成分隔空格"""
         engine = SubtitleEngine()
 
         text = engine.clean_subtitle_text_for_output("Hello, world...\\N这是中文，保留、文字。")
 
-        self.assertEqual(text, "Hello world\n这是中文保留文字")
+        self.assertEqual(text, "Hello world\n这是中文 保留 文字")
         self.assertNotRegex(text, r"[，。、,.]|\.{3,}|…")
+
+    def test_output_subtitle_text_removes_cjk_digit_spaces(self):
+        """中文和数字之间不应保留 AI 或识别误加的空格"""
+        engine = SubtitleEngine()
+
+        text = engine.clean_subtitle_text_for_output("哟这一下就有 80 点血了！")
+
+        self.assertEqual(text, "哟这一下就有80点血了！")
 
     def test_process_subtitle_entries_keeps_original_timeline(self):
         """字幕条目 AI 处理接口返回后仍保持原始时间轴"""

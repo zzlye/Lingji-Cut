@@ -19,7 +19,8 @@ ASS_OVERRIDE_TAG_RE = re.compile(r"\{[^}]*\}")
 LEADING_PUNCTUATION_RE = re.compile(r"^[，。、！？；：,.!?;:…]+")
 PUNCTUATION_ONLY_RE = re.compile(r"^[\s，。、！？；：,.!?;:…]+$")
 MEANINGFUL_CHAR_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-DISALLOWED_SUBTITLE_PUNCTUATION_RE = re.compile(r"\.{3,}|…+|[，。、,.]")
+DISALLOWED_SUBTITLE_SEPARATOR_RE = re.compile(r"\.{3,}|…+|[，。、,.]")
+CJK_DIGIT_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[0-9０-９])|(?<=[0-9０-９])\s+(?=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])")
 
 
 class SubtitleEngine:
@@ -527,13 +528,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     def clean_subtitle_text_for_output(self, text: str) -> str:
         """输出字幕前移除用户不需要的逗号、句号和省略号"""
-        normalized = DISALLOWED_SUBTITLE_PUNCTUATION_RE.sub("", str(text or "").replace("\\N", "\n"))
+        normalized = self._normalize_disallowed_punctuation(str(text or "").replace("\\N", "\n"))
         lines = [
-            WHITESPACE_RE.sub(" ", line).strip()
+            self._normalize_cjk_digit_spacing(WHITESPACE_RE.sub(" ", line).strip())
             for line in normalized.splitlines()
-            if WHITESPACE_RE.sub(" ", line).strip()
+            if self._normalize_cjk_digit_spacing(WHITESPACE_RE.sub(" ", line).strip())
         ]
         return "\n".join(lines).strip()
+
+    def _normalize_disallowed_punctuation(self, text: str) -> str:
+        """把禁用标点转成分隔空格，避免句子被硬删后粘在一起"""
+        return DISALLOWED_SUBTITLE_SEPARATOR_RE.sub(" ", text)
+
+    def _normalize_cjk_digit_spacing(self, text: str) -> str:
+        """去掉中文、日文、韩文和数字之间误插入的空格"""
+        return CJK_DIGIT_SPACE_RE.sub("", text)
 
     def _should_merge_fragment(self, text: str) -> bool:
         """判断碎片是否需要并回前后文，重点处理纯标点和单个有效字"""

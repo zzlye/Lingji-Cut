@@ -1143,7 +1143,7 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
 
             dialogue_text = cleaned_content.split("Dialogue:", 1)[1].rsplit(",,", 1)[1]
             self.assertNotRegex(dialogue_text, r"[，。、,.]|\.{3,}|…")
-            self.assertIn("我已经度过了前100天等等还有顿号", dialogue_text)
+            self.assertIn("我已经度过了前100天 等等 还有 顿号", dialogue_text)
 
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""

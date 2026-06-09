@@ -94,7 +94,7 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,这里还有，句号。省略
                 cleaned_content = file.read()
             dialogue_text = cleaned_content.split("Dialogue:", 1)[1].rsplit(",,", 1)[1]
             self.assertNotRegex(dialogue_text, r"[，。、,.]|\.{3,}|…")
-            self.assertIn("这里还有句号省略号和顿号", dialogue_text)
+            self.assertIn("这里还有 句号 省略号 和 顿号", dialogue_text)
 
 
 if __name__ == "__main__":
