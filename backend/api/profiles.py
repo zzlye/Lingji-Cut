@@ -322,7 +322,8 @@ async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> No
             settings = {}
     voice = settings.get("voice") or _default_voice_id(profile.provider_type)
     model = profile.voice or _default_voice_model(profile.provider_type)
-    audio_format = "wav" if profile.provider_type == "xiaomi_mimo_tts" else str(settings.get("format") or "mp3")
+    effective_provider_type = VoiceEngine.resolve_provider_type(profile.provider_type, model)
+    audio_format = "wav" if effective_provider_type == "xiaomi_mimo_tts" else str(settings.get("format") or "mp3")
     output_path = os.path.join(tempfile.gettempdir(), f"youtube_voice_test_{profile.id}.{audio_format}")
     engine = VoiceEngine()
     await engine.generate_voice(

@@ -88,23 +88,24 @@ VOICE_CATALOGS = {
 }
 
 
-def _audio_format_for_preview(provider_type: str, settings: dict[str, Any]) -> str:
+def _audio_format_for_preview(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """读取试听文件格式，保持和配音引擎一致"""
-    if provider_type == "gemini_tts":
+    effective_provider_type = VoiceEngine.resolve_provider_type(provider_type, model)
+    if effective_provider_type == "gemini_tts":
         return "wav"
-    if provider_type == "xiaomi_mimo_tts":
+    if effective_provider_type == "xiaomi_mimo_tts":
         value = str(settings.get("format") or "wav").lower()
         return value if value in {"wav", "pcm16"} else "wav"
     value = str(settings.get("format") or "mp3").lower()
     return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
 
 
-def _preview_output_path(provider_type: str, settings: dict[str, Any]) -> str:
+def _preview_output_path(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """生成不会互相覆盖的试听输出路径"""
     import uuid
     import tempfile
 
-    audio_format = _audio_format_for_preview(provider_type, settings)
+    audio_format = _audio_format_for_preview(provider_type, settings, model)
     return os.path.join(tempfile.gettempdir(), f"youtube_voice_preview_{uuid.uuid4().hex}.{audio_format}")
 
 
@@ -204,7 +205,8 @@ async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_
 
     profile_settings = _load_profile_settings(profile) if profile else {}
     settings = {**profile_settings, **request.settings}
-    output_path = _preview_output_path(provider_type, settings)
+    model = request.model or (profile.voice if profile else "")
+    output_path = _preview_output_path(provider_type, settings, model)
     engine = VoiceEngine()
 
     try:
@@ -215,7 +217,7 @@ async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_
             voice=request.voice or settings.get("voice") or "alloy",
             api_key=api_key,
             base_url=base_url,
-            model=request.model or (profile.voice if profile else ""),
+            model=model,
             settings=settings,
         )
         return {"message": "试听音频已生成", "output_path": output_path, "audio_url": f"/voice/audio?path={quote(output_path)}"}

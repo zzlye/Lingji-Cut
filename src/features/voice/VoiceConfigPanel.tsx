@@ -22,6 +22,8 @@ const VOICE_PROVIDERS = [
   { id: 'custom_tts', name: '自定义 OpenAI 兼容', baseUrl: '', model: '' },
 ]
 
+const VOICE_PROVIDER_DEFAULT_BASE_URLS = VOICE_PROVIDERS.map((provider) => provider.baseUrl).filter(Boolean)
+
 /** 默认试听文本 */
 const DEFAULT_PREVIEW_TEXT = '这是一段配音试听，用来确认音色、语速、音量和情绪是否适合当前视频。'
 
@@ -149,7 +151,19 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
   const updateProvider = (providerType: string) => {
     const provider = VOICE_PROVIDERS.find((item) => item.id === providerType) || VOICE_PROVIDERS[0]
-    setProfileForm((current) => ({ ...current, provider_type: provider.id, base_url: provider.baseUrl || current.base_url, model: provider.model || current.model, custom_model: '', name: current.name || provider.name }))
+    setProfileForm((current) => {
+      const currentBaseUrl = current.base_url.trim()
+      const shouldUseProviderDefault = !currentBaseUrl || VOICE_PROVIDER_DEFAULT_BASE_URLS.includes(currentBaseUrl)
+      return {
+        ...current,
+        provider_type: provider.id,
+        // 用户填了 NewAPI 这类自定义网关地址时，切换渠道不能强行覆盖成官方地址。
+        base_url: shouldUseProviderDefault ? (provider.baseUrl || current.base_url) : current.base_url,
+        model: provider.model || current.model,
+        custom_model: '',
+        name: current.name || provider.name,
+      }
+    })
     setModelOptions(provider.model ? [{ id: provider.model, label: provider.model, owned_by: provider.id }] : [])
     setNotice({ type: 'info', message: `已切换到 ${provider.name}，请确认模型、音色和密钥。` })
   }

@@ -124,6 +124,21 @@ class VoiceProfileTests(unittest.TestCase):
         """Gemini TTS 返回 PCM，试听文件需要封装为浏览器可播放的 WAV"""
         self.assertEqual(_audio_format_for_preview("gemini_tts", {"format": "mp3"}), "wav")
         self.assertEqual(VoiceEngine()._provider_audio_format("gemini_tts", {"format": "mp3"}), "wav")
+        self.assertEqual(_audio_format_for_preview("custom_tts", {"format": "mp3"}, "mimo-v2.5-tts"), "wav")
+
+    def test_xiaomi_mimo_headers_support_newapi_bearer_token(self):
+        """小米 MiMo 经过 NewAPI 时必须发送 Bearer Token，否则会被判定为 Invalid token"""
+        headers = VoiceEngine()._xiaomi_mimo_headers("sk-test")
+
+        self.assertEqual(headers["Authorization"], "Bearer sk-test")
+        self.assertEqual(headers["api-key"], "sk-test")
+        self.assertEqual(headers["x-api-key"], "sk-test")
+
+    def test_mimo_model_uses_mimo_protocol_even_in_custom_channel(self):
+        """NewAPI 里的 MiMo 模型即使放在自定义渠道，也不能走 OpenAI audio/speech"""
+        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "mimo-v2.5-tts"), "xiaomi_mimo_tts")
+        self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "mimo-v2-tts"), "xiaomi_mimo_tts")
+        self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "gpt-4o-mini-tts"), "openai_tts")
 
 
 if __name__ == "__main__":

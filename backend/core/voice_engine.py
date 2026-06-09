@@ -44,26 +44,36 @@ class VoiceEngine:
             raise ValueError("文本不能为空")
 
         options = settings or {}
-        audio_format = self._provider_audio_format(provider_type, options)
+        effective_provider_type = self.resolve_provider_type(provider_type, model)
+        audio_format = self._provider_audio_format(effective_provider_type, options)
         if output_path is None:
             output_path = os.path.join(ensure_project_dirs()["output_dir"], f"voice_output.{audio_format}")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        logger.info(f"生成配音: {provider_type}, 语音: {voice}")
+        logger.info(f"生成配音: {effective_provider_type}, 语音: {voice}")
 
-        if provider_type == "openai_tts":
+        if effective_provider_type == "openai_tts":
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
-        if provider_type == "gemini_tts":
+        if effective_provider_type == "gemini_tts":
             return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url, model, options)
-        if provider_type == "minimax_tts":
+        if effective_provider_type == "minimax_tts":
             return await self._generate_minimax_tts(text, output_path, voice, api_key, base_url, model, options)
-        if provider_type == "xiaomi_mimo_tts":
+        if effective_provider_type == "xiaomi_mimo_tts":
             return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, options)
-        if provider_type == "custom_tts":
+        if effective_provider_type == "custom_tts":
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
 
         raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
+
+    @staticmethod
+    def resolve_provider_type(provider_type: str, model: str = "") -> str:
+        """按模型修正真实调用协议，NewAPI 里的 MiMo 模型不能走 OpenAI audio/speech"""
+        normalized_provider = str(provider_type or "").strip()
+        normalized_model = str(model or "").strip().lower()
+        if normalized_provider in {"openai_tts", "custom_tts"} and normalized_model.startswith("mimo-"):
+            return "xiaomi_mimo_tts"
+        return normalized_provider
 
     async def generate_timed_voice_track(
         self,
@@ -88,7 +98,7 @@ class VoiceEngine:
             raise ValueError("没有可生成配音的字幕分段")
 
         options = settings or {}
-        audio_format = self._provider_audio_format(provider_type, options)
+        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # 分段音频临时目录跟最终输出放在同一视频目录，避免又落回全局 output 里。
@@ -406,10 +416,7 @@ class VoiceEngine:
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "api-key": api_key,
-                    "Content-Type": "application/json",
-                },
+                headers=self._xiaomi_mimo_headers(api_key),
                 json=payload,
             )
 
@@ -428,6 +435,15 @@ class VoiceEngine:
 
         logger.info(f"小米 MiMo TTS 生成完成: {output_path}")
         return output_path
+
+    def _xiaomi_mimo_headers(self, api_key: str) -> dict[str, str]:
+        """同时兼容 NewAPI Bearer 鉴权和小米原生 api-key 鉴权"""
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "api-key": api_key,
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+        }
 
     def merge_segments(self, audio_paths: List[str], output_path: str) -> str:
         """合并多个音频片段"""

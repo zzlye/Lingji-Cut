@@ -1067,12 +1067,13 @@ def _voice_for_segment(segment: dict[str, Any], default_voice: str, speaker_voic
     return speaker_voice_map.get(speaker) or speaker_voice_map.get(speaker.lower()) or default_voice
 
 
-def _voice_output_extension(provider_type: str, settings: dict[str, Any]) -> str:
+def _voice_output_extension(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """按配音渠道和设置决定输出音频扩展名"""
+    effective_provider_type = VoiceEngine.resolve_provider_type(provider_type, model)
     value = str(settings.get("format") or "").lower()
     if value:
         return "wav" if value == "pcm16" else value
-    return "wav" if provider_type == "xiaomi_mimo_tts" else "mp3"
+    return "wav" if effective_provider_type == "xiaomi_mimo_tts" else "mp3"
 
 
 def _srt_time_to_milliseconds(value: str) -> int:
@@ -1738,11 +1739,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             banned_hits = _find_banned_words(voice_text, request.banned_words)
             if banned_hits and request.banned_word_action == "block":
                 raise BannedWordsDetected(f"配音文案命中禁词: {', '.join(banned_hits)}")
-            output_ext = _voice_output_extension(voice_profile.provider_type, settings)
+            model = voice_profile.voice or ""
+            output_ext = _voice_output_extension(voice_profile.provider_type, settings, model)
             audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
             voice_engine = VoiceEngine()
             api_key = decrypt_api_key(voice_profile.api_key_encrypted)
-            model = voice_profile.voice or ""
             segments = subtitle_entries_to_voice_segments(subtitle_entries)
             if request.voice_mode == "segmented" and segments and not request.voice_text:
                 try:
