@@ -360,6 +360,31 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(downloader.thumbnail_calls[0]["thumbnail_url"], video.thumbnail_url)
         self.assertEqual(downloader.thumbnail_calls[0]["file_name"], "Cover_Test_cover")
 
+    def test_automation_cover_download_defaults_to_workspace_root(self):
+        """一键流程自动保存封面默认放到视频项目根目录，方便打开文件夹后直接看到"""
+        with tempfile.TemporaryDirectory(prefix="automation_cover_root_") as workspace_dir:
+            downloads_dir = os.path.join(workspace_dir, "downloads")
+            os.makedirs(downloads_dir, exist_ok=True)
+            video = VideoSource(
+                id=7,
+                platform="youtube",
+                video_id="cover-root",
+                url="https://youtu.be/cover-root",
+                title="Cover Root",
+                thumbnail_url="https://example.test/cover.jpg",
+            )
+            downloader = FakeAutomationDownloader(os.path.join(downloads_dir, "video.mp4"))
+
+            output_path = _download_cover_asset(
+                video,
+                downloader,
+                {"workspace_dir": workspace_dir, "downloads_dir": downloads_dir},
+                None,
+            )
+
+        self.assertEqual(output_path, os.path.join(workspace_dir, "cover.jpg"))
+        self.assertEqual(downloader.thumbnail_calls[0]["output_dir"], workspace_dir)
+
     def test_job_response_recovers_legacy_flat_subtitle_asset_path(self):
         """旧版平铺目录任务即使没保存字幕参数，也能从 output 目录回推出可编辑字幕"""
         with tempfile.TemporaryDirectory(prefix="automation_legacy_assets_") as temp_dir:

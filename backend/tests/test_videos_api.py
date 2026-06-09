@@ -42,8 +42,8 @@ class VideoDb:
 class VideosApiTests(unittest.TestCase):
     """视频接口测试"""
 
-    def test_download_thumbnail_uses_video_workspace_download_dir(self):
-        """手动下载封面默认保存到该视频独立工作目录的 downloads 子目录"""
+    def test_download_thumbnail_uses_video_workspace_root_dir(self):
+        """手动下载封面默认保存到该视频独立工作目录根目录"""
         video = VideoSource(
             id=7,
             video_id="abc123",
@@ -55,7 +55,7 @@ class VideosApiTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             expected_path = os.path.join(temp_dir, "Test_Video_cover.webp")
-            with patch("backend.api.videos.ensure_video_workspace", return_value={"downloads_dir": temp_dir}):
+            with patch("backend.api.videos.ensure_video_workspace", return_value={"workspace_dir": temp_dir, "downloads_dir": os.path.join(temp_dir, "downloads")}):
                 with patch("backend.api.videos.Downloader.download_thumbnail", return_value=expected_path) as download_mock:
                     response = download_thumbnail(ThumbnailDownloadRequest(video_id=7), db=VideoDb(video))
 
@@ -79,7 +79,7 @@ class VideosApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace_dir:
             with tempfile.TemporaryDirectory() as custom_dir:
                 expected_path = os.path.join(custom_dir, "Custom_Cover_cover.jpg")
-                with patch("backend.api.videos.ensure_video_workspace", return_value={"downloads_dir": workspace_dir}):
+                with patch("backend.api.videos.ensure_video_workspace", return_value={"workspace_dir": workspace_dir, "downloads_dir": os.path.join(workspace_dir, "downloads")}):
                     with patch("backend.api.videos.Downloader.download_thumbnail", return_value=expected_path) as download_mock:
                         response = download_thumbnail(ThumbnailDownloadRequest(video_id=8, output_dir=custom_dir), db=VideoDb(video))
 

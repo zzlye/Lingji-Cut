@@ -179,7 +179,7 @@ def download_thumbnail(request: ThumbnailDownloadRequest, db: Session = Depends(
     workspace_paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     raw_file_name = str(request.file_name or "").strip()
     cover_name = raw_file_name or f"{_safe_cover_base_name(video.title or video.video_id or 'thumbnail')}_cover"
-    output_dir = _resolve_cover_output_dir(request.output_dir, workspace_paths["downloads_dir"])
+    output_dir = _resolve_cover_output_dir(request.output_dir, workspace_paths.get("workspace_dir") or workspace_paths["downloads_dir"])
 
     try:
         output_path = Downloader().download_thumbnail(

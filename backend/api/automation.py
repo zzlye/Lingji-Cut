@@ -679,7 +679,7 @@ def _download_cover_asset(video: VideoSource, downloader: Downloader, paths: dic
     cover_name = f"{_safe_cover_base_name(video.title or video.video_id or 'thumbnail')}_cover"
     return downloader.download_thumbnail(
         thumbnail_url=video.thumbnail_url,
-        output_dir=_resolve_cover_output_dir(output_dir, paths["downloads_dir"]),
+        output_dir=_resolve_cover_output_dir(output_dir, paths.get("workspace_dir") or paths["downloads_dir"]),
         file_name=cover_name,
     )
 
