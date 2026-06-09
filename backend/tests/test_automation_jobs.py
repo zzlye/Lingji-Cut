@@ -260,6 +260,49 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.source_video_path, download_path)
         self.assertEqual(response.voice_asset_path, voice_path)
 
+    def test_job_response_prefers_comparison_subtitle_and_exposes_pair_paths(self):
+        """字幕调整页优先拿中英对照字幕，同时暴露原文和译文路径用于旧任务补全"""
+        with tempfile.TemporaryDirectory(prefix="automation_subtitle_pair_") as temp_dir:
+            source_path = os.path.join(temp_dir, "source_en_local.srt")
+            translated_path = os.path.join(temp_dir, "source_en_translated.srt")
+            comparison_path = os.path.join(temp_dir, "source_en_comparison.srt")
+            ass_path = os.path.join(temp_dir, "source_en.ass")
+            for path in (source_path, translated_path, comparison_path, ass_path):
+                with open(path, "w", encoding="utf-8") as file:
+                    file.write("1\n00:00:00,000 --> 00:00:01,000\nhello\n")
+
+            job = AutomationJobRecord(
+                id="auto-subtitle-pair",
+                source_url="https://youtube.com/watch?v=test",
+                title="字幕对照任务",
+                status="completed",
+                stages=json.dumps([
+                    {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 7, "output_path": ass_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            subtitle_task = DownloadTask(
+                id=7,
+                video_id=1,
+                task_type="subtitle",
+                status="completed",
+                progress=100,
+                output_path=ass_path,
+                params=json.dumps({
+                    "source_subtitle_path": source_path,
+                    "translated_subtitle_path": translated_path,
+                    "comparison_subtitle_path": comparison_path,
+                    "editable_subtitle_path": comparison_path,
+                    "subtitle_ass_path": ass_path,
+                }, ensure_ascii=False),
+                parent_job_id="auto-subtitle-pair",
+            )
+
+            response = _job_to_response(job, FakeTaskDb([job], [subtitle_task]))
+
+        self.assertEqual(response.subtitle_asset_path, comparison_path)
+        self.assertEqual(response.source_subtitle_path, source_path)
+        self.assertEqual(response.translated_subtitle_path, translated_path)
+
     def test_job_response_includes_cached_video_info(self):
         """任务响应会带上缓存视频信息，工作台刷新后不再一直显示准备中"""
         video = VideoSource(
@@ -423,6 +466,94 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
         self.assertEqual(fake_processor.burn_calls[0]["preset"]["bitrate"]["fixed_kbps"]["value"], 2200)
         self.assertEqual(fake_processor.burn_calls[0]["preset"]["acceleration"]["quality"], "size")
+
+    def test_automation_translation_saves_comparison_subtitle_for_review(self):
+        """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""
+        class EnglishRecognizer:
+            """测试用英文识别器"""
+
+            def transcribe_video(self, video_path, progress_callback=None):
+                if progress_callback:
+                    progress_callback(100)
+                return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,200", "text": "hello world"}], "en")
+
+        class FakeTextEngine:
+            """测试用文本引擎，模拟翻译接口返回中文"""
+
+            async def process_subtitle_entries(self, entries, **_kwargs):
+                return [{**entry, "text": "你好世界"} for entry in entries]
+
+        with tempfile.TemporaryDirectory(prefix="automation_translate_review_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="translate-save", url="https://example.test/video", title="Translate Save")
+            text_profile = TextProviderProfile(
+                id=11,
+                name="测试文本",
+                provider_type="openai_compatible",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                model="test-model",
+                extra_params="{}",
+            )
+            task_ids = iter(range(20, 30))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "translate-save",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=EnglishRecognizer()),
+                patch("backend.api.automation.TextEngine", return_value=FakeTextEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=text_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        processing_preset={},
+                        enable_voice=False,
+                        burn_subtitles=False,
+                        subtitle_operation="translate",
+                        subtitle_target_language="zh-CN",
+                        text_profile_id=11,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+            comparison_path = os.path.join(temp_dir, "downloaded_en_comparison.srt")
+            translated_path = os.path.join(temp_dir, "downloaded_en_translated.srt")
+            ass_path = os.path.join(temp_dir, "downloaded_en.ass")
+
+            self.assertTrue(os.path.isfile(comparison_path))
+            self.assertTrue(os.path.isfile(translated_path))
+            self.assertTrue(os.path.isfile(ass_path))
+            with open(comparison_path, "r", encoding="utf-8") as file:
+                comparison_content = file.read()
+
+        self.assertIn("你好世界", comparison_content)
+        self.assertIn("hello world", comparison_content)
 
     def test_retry_reset_clears_previous_runtime_state(self):
         job = AutomationJobRecord(

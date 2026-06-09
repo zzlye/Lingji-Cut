@@ -13,7 +13,13 @@ export function SubtitleWorkbenchPage() {
   const setSubtitleJobId = useUiStore((state) => state.setSubtitleJobId)
 
   const selectableJobs = useMemo(
-    () => jobs.filter((job) => job.id === subtitleJobId || job.subtitle_asset_path || job.source_video_path),
+    () => jobs.filter((job) => (
+      job.id === subtitleJobId
+      || job.subtitle_asset_path
+      || job.source_subtitle_path
+      || job.translated_subtitle_path
+      || job.source_video_path
+    )),
     [jobs, subtitleJobId],
   )
   const fallbackJob = selectableJobs.find((job) => job.status === 'running' || job.status === 'pending') ?? selectableJobs[0] ?? null
@@ -32,7 +38,7 @@ export function SubtitleWorkbenchPage() {
         availableJobs={selectableJobs}
         selectedJob={selectedJob}
         onSelectJob={setSubtitleJobId}
-        suggestedSubtitlePath={isEditableSubtitlePath(selectedJob?.subtitle_asset_path) ? selectedJob?.subtitle_asset_path : null}
+        suggestedSubtitlePath={firstEditableSubtitlePath(selectedJob?.subtitle_asset_path, selectedJob?.translated_subtitle_path, selectedJob?.source_subtitle_path)}
         onOpenTextSettings={() => openSettings('api')}
       />
     </div>
@@ -41,4 +47,8 @@ export function SubtitleWorkbenchPage() {
 
 function isEditableSubtitlePath(path: string | null | undefined) {
   return Boolean(path && /\.(srt|vtt|ass)$/i.test(path))
+}
+
+function firstEditableSubtitlePath(...paths: Array<string | null | undefined>) {
+  return paths.find((path) => isEditableSubtitlePath(path)) || null
 }

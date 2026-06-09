@@ -193,6 +193,8 @@ export interface AutomationJob {
   can_resume?: boolean
   can_retry?: boolean
   subtitle_asset_path?: string | null
+  source_subtitle_path?: string | null
+  translated_subtitle_path?: string | null
   source_video_path?: string | null
   voice_asset_path?: string | null
 }
@@ -219,6 +221,8 @@ export interface BackendAutomationJob {
   can_resume?: boolean
   can_retry?: boolean
   subtitle_asset_path?: string | null
+  source_subtitle_path?: string | null
+  translated_subtitle_path?: string | null
   source_video_path?: string | null
   voice_asset_path?: string | null
 }

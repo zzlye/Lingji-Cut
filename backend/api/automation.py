@@ -159,6 +159,8 @@ class AutomationJobResponse(BaseModel):
     can_resume: bool = False
     can_retry: bool = False
     subtitle_asset_path: Optional[str] = None
+    source_subtitle_path: Optional[str] = None
+    translated_subtitle_path: Optional[str] = None
     source_video_path: Optional[str] = None
     voice_asset_path: Optional[str] = None
     stages: list[AutomationStageResult] = Field(default_factory=list)
@@ -386,6 +388,8 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         can_resume=job.status in {"paused", "failed", CANCELLED_STATUS, "completed"},
         can_retry=job.status in {"failed", CANCELLED_STATUS, "completed"},
         subtitle_asset_path=_find_job_editable_subtitle_path(job, db),
+        source_subtitle_path=_find_job_subtitle_param_path(job, db, ("source_subtitle_path", "original_subtitle_path")),
+        translated_subtitle_path=_find_job_subtitle_param_path(job, db, ("translated_subtitle_path",)),
         source_video_path=_find_job_source_video_path(job),
         voice_asset_path=_find_job_voice_asset_path(job),
         stages=stages,
@@ -581,17 +585,18 @@ def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Opt
     if manual_override:
         return manual_override
 
+    subtitle_task = _subtitle_task_record(job, db)
+    task_params = _read_task_params(subtitle_task)
+    # 显式保存的校对字幕优先于阶段 output；阶段 output 可能是单行 ASS 或已烧录视频。
+    for key in ("comparison_subtitle_path", "editable_subtitle_path", "translated_subtitle_path", "subtitle_ass_path", "source_subtitle_path", "subtitle_path"):
+        candidate = _existing_file(str(task_params.get(key) or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+        if candidate:
+            return candidate
+
     subtitle_stage = _stage_by_key(job, "subtitle")
     stage_output = _existing_file(str((subtitle_stage or {}).get("output_path") or ""), EDITABLE_SUBTITLE_EXTENSIONS)
     if stage_output:
         return stage_output
-
-    subtitle_task = _subtitle_task_record(job, db)
-    task_params = _read_task_params(subtitle_task)
-    for key in ("editable_subtitle_path", "subtitle_ass_path", "source_subtitle_path", "subtitle_path"):
-        candidate = _existing_file(str(task_params.get(key) or ""), EDITABLE_SUBTITLE_EXTENSIONS)
-        if candidate:
-            return candidate
 
     source_video_path = _find_job_source_video_path(job)
     subtitle_stage_output = _existing_file(str((subtitle_stage or {}).get("output_path") or ""))
@@ -613,6 +618,18 @@ def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Opt
                 matched = _latest_matching_file(directory, pattern)
                 if matched:
                     return matched
+    return None
+
+
+def _find_job_subtitle_param_path(job: Optional[AutomationJobRecord], db: Optional[Session], keys: tuple[str, ...]) -> Optional[str]:
+    """从字幕任务参数里读取指定字幕资产路径，用于前端自动拼出中英对照"""
+    if not job:
+        return None
+    task_params = _read_task_params(_subtitle_task_record(job, db))
+    for key in keys:
+        candidate = _existing_file(str(task_params.get(key) or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+        if candidate:
+            return candidate
     return None
 
 
@@ -1597,6 +1614,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 raise RuntimeError("本地字幕识别结果为空，无法继续自动字幕处理")
             original_entries_for_display = [dict(entry) for entry in entries]
             translated_entries_for_display: Optional[list[dict[str, Any]]] = None
+            subtitle_was_translated = False
             subtitle_text = entries_to_plain_text(entries)
             text_profile = _pick_text_profile(db, request.text_profile_id)
             if text_profile and request.subtitle_operation != "none":
@@ -1631,8 +1649,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         ))
                         if processed_entries:
                             entries = processed_entries
-                            if request.subtitle_operation == "translate":
-                                translated_entries_for_display = [dict(entry) for entry in entries]
+                            subtitle_was_translated = request.subtitle_operation == "translate"
                             subtitle_text = entries_to_plain_text(entries)
                     except TaskControlRequested:
                         raise
@@ -1650,8 +1667,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         processed_entries = map_text_to_timed_entries(processed_text, entries)
                         if processed_entries:
                             entries = processed_entries
-                            if request.subtitle_operation == "translate":
-                                translated_entries_for_display = [dict(entry) for entry in entries]
+                            subtitle_was_translated = request.subtitle_operation == "translate"
                             subtitle_text = processed_text
                 except TaskControlRequested:
                     raise
@@ -1661,15 +1677,22 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     pass
             entries = _apply_glossary_terms(entries, request.glossary_terms)
             subtitle_text = entries_to_plain_text(entries)
+            if subtitle_was_translated:
+                translated_entries_for_display = [dict(entry) for entry in entries]
             banned_hits = _find_banned_words(subtitle_text, request.banned_words)
             if banned_hits:
                 message = f"禁词命中: {', '.join(banned_hits)}"
                 if request.banned_word_action == "block":
                     raise BannedWordsDetected(message)
                 warning_messages.append(message)
-            display_source_entries = (
+            comparison_entries = (
                 combine_original_and_translated_entries(original_entries_for_display, translated_entries_for_display)
-                if translated_entries_for_display and str(preset_dict.get("line_mode") or "").lower() == "double"
+                if translated_entries_for_display
+                else None
+            )
+            display_source_entries = (
+                comparison_entries
+                if comparison_entries and str(preset_dict.get("line_mode") or "").lower() == "double"
                 else entries
             )
             display_entries = engine.normalize_entries_for_display(display_source_entries, preset_dict)
@@ -1679,6 +1702,13 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 job.subtitle_text = subtitle_text
                 _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
             base_name = os.path.splitext(os.path.basename(effects_path))[0]
+            translated_subtitle_path = os.path.join(paths["output_dir"], f"{base_name}_{language}_translated.srt") if translated_entries_for_display else None
+            comparison_subtitle_path = os.path.join(paths["output_dir"], f"{base_name}_{language}_comparison.srt") if comparison_entries else None
+            if translated_entries_for_display and translated_subtitle_path:
+                engine.save_srt(translated_entries_for_display, translated_subtitle_path)
+            if comparison_entries and comparison_subtitle_path:
+                # 校对页永远读取这份中英对照 SRT，不再受烧录预设单行/双行影响。
+                engine.save_srt(comparison_entries, comparison_subtitle_path)
             subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
             engine.generate_ass(display_entries, subtitle_ass_path, preset_dict)
             if request.burn_subtitles:
@@ -1695,7 +1725,10 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 db.commit()
             subtitle_task.params = json.dumps({
                 "source_subtitle_path": subtitle_path,
-                "editable_subtitle_path": subtitle_ass_path,
+                "translated_subtitle_path": translated_subtitle_path,
+                "comparison_subtitle_path": comparison_subtitle_path,
+                "editable_subtitle_path": comparison_subtitle_path or subtitle_ass_path,
+                "subtitle_ass_path": subtitle_ass_path,
                 "rendered_video_path": video_for_export if request.burn_subtitles else None,
                 "subtitle_language": language,
             }, ensure_ascii=False)

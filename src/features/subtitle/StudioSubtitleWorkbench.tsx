@@ -52,6 +52,18 @@ type CorrectionNotice = {
   type: 'info' | 'success' | 'warning' | 'error'
   message: string
 } | null
+type SubtitleCandidateLoadOptions = {
+  jobId?: string
+  silent?: boolean
+  sourceSubtitlePath?: string
+  translatedSubtitlePath?: string
+}
+type ParsedSubtitleCandidate = {
+  path: string
+  message: string
+  entries: SubtitleEntry[]
+  output_path?: string
+}
 
 interface StudioSubtitleWorkbenchProps {
   suggestedSubtitlePath?: string | null
@@ -120,6 +132,8 @@ export function StudioSubtitleWorkbench({
   )
   const selectedJobResolvedSubtitle = selectedJob?.id ? (resolvedJobSubtitlePaths[selectedJob.id] || '').trim() : ''
   const selectedJobSourceVideo = useMemo(() => resolveJobSourceVideo(selectedJob), [selectedJob])
+  const selectedJobSourceSubtitleFile = useMemo(() => editableSubtitlePath(selectedJob?.source_subtitle_path), [selectedJob?.source_subtitle_path])
+  const selectedJobTranslatedSubtitleFile = useMemo(() => editableSubtitlePath(selectedJob?.translated_subtitle_path), [selectedJob?.translated_subtitle_path])
   const selectedJobSubtitleCandidates = useMemo(
     () => buildJobSubtitleCandidates(selectedJob, selectedJobSourceVideo, selectedJobResolvedSubtitle),
     [selectedJob, selectedJobSourceVideo, selectedJobResolvedSubtitle],
@@ -198,7 +212,12 @@ export function StudioSubtitleWorkbench({
       return
     }
     autoLoadKeyRef.current = autoLoadKey
-    void loadSubtitleCandidates(selectedJobSubtitleCandidates, { jobId: selectedJob.id, silent: true })
+    void loadSubtitleCandidates(selectedJobSubtitleCandidates, {
+      jobId: selectedJob.id,
+      silent: true,
+      sourceSubtitlePath: selectedJobSourceSubtitleFile,
+      translatedSubtitlePath: selectedJobTranslatedSubtitleFile,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedJob?.id, selectedJobSubtitleCandidates.join('|')])
 
@@ -249,8 +268,25 @@ export function StudioSubtitleWorkbench({
     }
   }
 
-  const loadSubtitleCandidates = async (rawCandidates: string[], options?: { jobId?: string; silent?: boolean }) => {
-    const candidates = Array.from(new Set(rawCandidates.map((item) => item.trim()).filter(Boolean)))
+  const applyParsedSubtitleCandidate = (candidate: ParsedSubtitleCandidate, options?: SubtitleCandidateLoadOptions) => {
+    const resolvedPath = candidate.output_path || candidate.path
+    applyParsedEntries(candidate.entries, candidate.message, resolvedPath)
+    if (options?.jobId && resolvedPath) {
+      setResolvedJobSubtitlePaths((current) => (
+        current[options.jobId!] === resolvedPath
+          ? current
+          : { ...current, [options.jobId!]: resolvedPath }
+      ))
+    }
+    addLog('info', candidate.message)
+  }
+
+  const loadSubtitleCandidates = async (rawCandidates: string[], options?: SubtitleCandidateLoadOptions) => {
+    const candidates = Array.from(new Set([
+      ...rawCandidates,
+      options?.translatedSubtitlePath,
+      options?.sourceSubtitlePath,
+    ].map((item) => (item || '').trim()).filter(Boolean)))
     if (!candidates.length) {
       if (!options?.silent) {
         setNotice({ type: 'warning', message: '请先填写字幕文件路径。' })
@@ -263,23 +299,50 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'info', message: '正在读取字幕文件...' })
     }
     let lastErrorMessage = ''
+    let firstParsedCandidate: ParsedSubtitleCandidate | null = null
+    let translatedOnlyCandidate: ParsedSubtitleCandidate | null = null
+    const sourceSubtitlePath = (options?.sourceSubtitlePath || '').trim()
     try {
       for (const path of candidates) {
         try {
           const result = await subtitleApi.parseFile(path)
-          applyParsedEntries(result.entries, result.message, result.output_path)
-          if (options?.jobId && result.output_path) {
-            setResolvedJobSubtitlePaths((current) => (
-              current[options.jobId!] === result.output_path
-                ? current
-                : { ...current, [options.jobId!]: result.output_path }
-            ))
+          const parsedCandidate = { path, ...result }
+          if (hasComparedSubtitleEntries(result.entries)) {
+            applyParsedSubtitleCandidate(parsedCandidate, options)
+            return true
           }
-          addLog('info', result.message)
-          return true
+          if (!firstParsedCandidate) {
+            firstParsedCandidate = parsedCandidate
+          }
+          if (sourceSubtitlePath && !isSameLocalPath(path, sourceSubtitlePath) && !translatedOnlyCandidate) {
+            translatedOnlyCandidate = parsedCandidate
+          }
         } catch (error) {
           lastErrorMessage = error instanceof Error ? error.message : '未知错误'
         }
+      }
+
+      if (sourceSubtitlePath && translatedOnlyCandidate) {
+        try {
+          const sourceResult = await subtitleApi.parseFile(sourceSubtitlePath)
+          const mergedEntries = mergeOriginalAndTranslatedEntries(sourceResult.entries, translatedOnlyCandidate.entries)
+          if (mergedEntries.length) {
+            applyParsedSubtitleCandidate({
+              path: translatedOnlyCandidate.path,
+              output_path: translatedOnlyCandidate.output_path,
+              entries: mergedEntries,
+              message: `已合并原文和译文 ${mergedEntries.length} 条`,
+            }, options)
+            return true
+          }
+        } catch (error) {
+          lastErrorMessage = error instanceof Error ? error.message : '未知错误'
+        }
+      }
+
+      if (firstParsedCandidate) {
+        applyParsedSubtitleCandidate(firstParsedCandidate, options)
+        return true
       }
 
       if (!options?.silent) {
@@ -303,7 +366,12 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'warning', message: '请先填写字幕文件路径。' })
       return
     }
-    await loadSubtitleCandidates(candidates, { jobId: selectedJob?.id, silent: false })
+    await loadSubtitleCandidates(candidates, {
+      jobId: selectedJob?.id,
+      silent: false,
+      sourceSubtitlePath: selectedJobSourceSubtitleFile,
+      translatedSubtitlePath: selectedJobTranslatedSubtitleFile,
+    })
   }
 
   const handleParseText = async () => {
@@ -1093,6 +1161,66 @@ function combineComparedSubtitleText(originalText: string, translatedText: strin
   return `${normalizedTranslated}\n${normalizedOriginal}`
 }
 
+function hasComparedSubtitleEntries(entries: SubtitleEntry[]) {
+  return entries.some((entry) => {
+    const { original, translation } = splitSubtitleByLanguage(entry.text)
+    return Boolean(original.trim() && translation.trim())
+  })
+}
+
+function mergeOriginalAndTranslatedEntries(originalEntries: SubtitleEntry[], translatedEntries: SubtitleEntry[]) {
+  return translatedEntries
+    .map((translatedEntry, index) => {
+      const originalEntry = findBestOriginalEntry(originalEntries, translatedEntry, index)
+      const originalText = originalEntry ? subtitleEntryOriginalText(originalEntry) : ''
+      const translatedText = subtitleEntryTranslatedText(translatedEntry)
+      return {
+        ...translatedEntry,
+        index: index + 1,
+        text: combineComparedSubtitleText(originalText, translatedText),
+      }
+    })
+    .filter((entry) => entry.text.trim())
+}
+
+function findBestOriginalEntry(originalEntries: SubtitleEntry[], translatedEntry: SubtitleEntry, fallbackIndex: number) {
+  let bestEntry = originalEntries[Math.min(fallbackIndex, Math.max(0, originalEntries.length - 1))] || null
+  let bestScore = 0
+  for (const originalEntry of originalEntries) {
+    const score = subtitleTimeOverlapScore(originalEntry, translatedEntry)
+    if (score > bestScore) {
+      bestScore = score
+      bestEntry = originalEntry
+    }
+  }
+  return bestEntry
+}
+
+function subtitleEntryOriginalText(entry: SubtitleEntry) {
+  const { original } = splitSubtitleByLanguage(entry.text)
+  return original || subtitleEntryPlainText(entry)
+}
+
+function subtitleEntryTranslatedText(entry: SubtitleEntry) {
+  const { original, translation } = splitSubtitleByLanguage(entry.text)
+  return translation || original || subtitleEntryPlainText(entry)
+}
+
+function subtitleEntryPlainText(entry: SubtitleEntry) {
+  return splitSubtitleLines(entry.text).all.join('\n')
+}
+
+function subtitleTimeOverlapScore(left: SubtitleEntry, right: SubtitleEntry) {
+  const start = Math.max(timeToMs(left.start), timeToMs(right.start))
+  const end = Math.min(timeToMs(left.end), timeToMs(right.end))
+  return Math.max(0, end - start)
+}
+
+function isSameLocalPath(left: string, right: string) {
+  const normalize = (value: string) => value.trim().replace(/\//g, '\\').toLowerCase()
+  return Boolean(left && right && normalize(left) === normalize(right))
+}
+
 function isChineseText(value: string) {
   return /[\u3400-\u9fff]/.test(value)
 }
@@ -1157,9 +1285,16 @@ function pickSubtitleWorkspaceSource(...candidates: Array<string | null | undefi
   return undefined
 }
 
+function editableSubtitlePath(value?: string | null) {
+  const path = (value || '').trim()
+  return isEditableSubtitlePath(path) ? path : ''
+}
+
 function resolveExplicitSubtitlePath(job: AutomationJob | null, resolvedPath = '') {
-  const directPath = (job?.subtitle_asset_path || '').trim()
-  if (isEditableSubtitlePath(directPath)) return directPath
+  const directPath = editableSubtitlePath(job?.subtitle_asset_path)
+  if (directPath) return directPath
+  const translatedPath = editableSubtitlePath(job?.translated_subtitle_path)
+  if (translatedPath) return translatedPath
   if (isEditableSubtitlePath(resolvedPath)) return resolvedPath
   const stagePath = (job?.steps.find((step) => step.key === 'subtitle')?.output_path || '').trim()
   return isEditableSubtitlePath(stagePath) ? stagePath : ''
@@ -1182,6 +1317,11 @@ function buildJobSubtitleCandidates(job: AutomationJob | null, sourceVideoPath: 
     candidates.add(directPath)
   }
 
+  const translatedPath = editableSubtitlePath(job?.translated_subtitle_path)
+  if (translatedPath) {
+    candidates.add(translatedPath)
+  }
+
   const subtitleStagePath = (job?.steps.find((step) => step.key === 'subtitle')?.output_path || '').trim()
   if (isEditableSubtitlePath(subtitleStagePath)) {
     candidates.add(subtitleStagePath)
@@ -1190,6 +1330,11 @@ function buildJobSubtitleCandidates(job: AutomationJob | null, sourceVideoPath: 
   const legacyCandidates = buildLegacySubtitleCandidates(subtitleStagePath, sourceVideoPath)
   for (const candidate of legacyCandidates) {
     candidates.add(candidate)
+  }
+
+  const sourceSubtitlePath = editableSubtitlePath(job?.source_subtitle_path)
+  if (sourceSubtitlePath) {
+    candidates.add(sourceSubtitlePath)
   }
 
   return Array.from(candidates)
