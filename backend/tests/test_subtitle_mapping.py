@@ -64,6 +64,19 @@ class SubtitleMappingTest(unittest.TestCase):
         self.assertEqual([item["end"] for item in mapped], [item["end"] for item in original])
         self.assertLessEqual(max(len(str(item["text"])) for item in mapped), 20)
 
+    def test_map_single_translated_line_avoids_cjk_word_boundary_breaks(self):
+        """整段翻译回填时不能把“产生”切成“产 / 生”两条字幕"""
+        original = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "aaaaaaaaaaaaaa"},
+            {"index": 2, "start": "00:00:03,000", "end": "00:00:04,000", "text": "bbb"},
+        ]
+
+        mapped = map_text_to_timed_entries("为了让你再也无法对别的女人产生反应", original)
+
+        self.assertEqual("".join(str(item["text"]) for item in mapped), "为了让你再也无法对别的女人产生反应")
+        self.assertFalse(str(mapped[0]["text"]).endswith("产"))
+        self.assertTrue(str(mapped[1]["text"]).startswith("产生"))
+
     def test_map_more_lines_distributes_text_into_original_slots(self):
         """AI 返回行数更多时，多行文本会分配回原字幕槽位"""
         original = [

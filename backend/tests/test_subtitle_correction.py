@@ -344,6 +344,17 @@ Language: ja
         self.assertFalse(any(re.fullmatch(r"[\s，。、！？；：,.!?;:…]+", part) for part in parts))
         self.assertFalse(any(len(re.findall(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", part)) == 1 for part in parts))
 
+    def test_split_subtitle_text_avoids_common_chinese_word_breaks(self):
+        """字幕显示拆分不能把常见中文词切成“产 / 生”这种断词"""
+        parts = SubtitleEngine()._split_subtitle_text(
+            "为了让你再也无法对别的女人产生反应",
+            14,
+        )
+
+        self.assertGreater(len(parts), 1)
+        self.assertFalse(any(part.endswith("产") for part in parts[:-1]))
+        self.assertTrue(any(part.startswith("产生") or "产生" in part for part in parts))
+
     def test_normalize_entries_for_display_drops_punctuation_only_entries(self):
         """显示字幕会丢弃只有逗号、句号或省略号的无意义条目"""
         entries = SubtitleEngine().normalize_entries_for_display(

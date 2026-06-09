@@ -7,6 +7,7 @@ import re
 import time
 from typing import Any
 
+from .subtitle_engine import adjust_cjk_unit_boundary
 from ..utils import get_logger
 
 
@@ -224,7 +225,14 @@ class TextEngine:
                 processed_map = {index + 1: line for index, line in enumerate(lines)}
 
         if require_all and len(processed_map) < len(original_entries):
-            raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
+            if processed_map:
+                raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
+            fallback_lines = self._fallback_response_lines(response_text)
+            distributed_lines = self._distribute_fallback_lines(fallback_lines, original_entries)
+            if distributed_lines:
+                processed_map = {index + 1: line for index, line in enumerate(distributed_lines) if line}
+            if len(processed_map) < len(original_entries):
+                raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
 
         merged: list[dict[str, Any]] = []
         for index, entry in enumerate(original_entries, 1):
@@ -234,6 +242,74 @@ class TextEngine:
                 next_entry["text"] = text
             merged.append(next_entry)
         return merged
+
+    def _fallback_response_lines(self, response_text: str) -> list[str]:
+        """把非结构化模型返回转成可回填的文本行"""
+        cleaned = self._strip_markdown_fence(str(response_text or "").strip())
+        if not cleaned:
+            return []
+        return [line.strip() for line in cleaned.splitlines() if line.strip()]
+
+    def _distribute_fallback_lines(self, lines: list[str], original_entries: list[dict[str, Any]]) -> list[str]:
+        """把当前批次的非结构化译文回填到原字幕槽位，避免整段视频级粗切"""
+        if not lines or not original_entries:
+            return []
+        text = self._join_fallback_lines(lines)
+        units = self._fallback_text_units(text)
+        if not units:
+            return []
+
+        weights = [max(1, len(str(entry.get("text") or "").replace("\\N", " ").strip())) for entry in original_entries]
+        total_units = len(units)
+        total_weight = max(1, sum(weights))
+        distributed: list[str] = []
+        unit_start = 0
+        elapsed_weight = 0
+        for index, weight in enumerate(weights):
+            elapsed_weight += weight
+            unit_end = total_units if index == len(weights) - 1 else round(total_units * elapsed_weight / total_weight)
+            unit_end = max(unit_start + 1, min(total_units, unit_end))
+            if index < len(weights) - 1:
+                unit_end = adjust_cjk_unit_boundary(units, unit_end, min_index=unit_start + 1, max_index=total_units - 1)
+            distributed.append(self._join_fallback_units(units[unit_start:unit_end]))
+            unit_start = unit_end
+            if unit_start >= total_units:
+                distributed.extend(["" for _ in range(index + 1, len(weights))])
+                break
+        return distributed[:len(original_entries)]
+
+    def _join_fallback_lines(self, lines: list[str]) -> str:
+        """合并模型兜底文本，中文不插空格，英文单词间保留空格"""
+        text = ""
+        for line in lines:
+            cleaned = " ".join(str(line or "").split())
+            if not cleaned:
+                continue
+            if not text:
+                text = cleaned
+                continue
+            separator = " " if re.match(r"[\w\]]$", text, re.ASCII) and re.match(r"^[\w\[]", cleaned, re.ASCII) else ""
+            text = f"{text}{separator}{cleaned}"
+        return text
+
+    def _fallback_text_units(self, text: str) -> list[str]:
+        """生成字幕回填单元，中文按字、英文按词，方便保留时间轴数量"""
+        normalized = " ".join(str(text or "").split())
+        tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+        if len(tokens) >= 2:
+            return tokens
+        return [char for char in normalized if not char.isspace()]
+
+    def _join_fallback_units(self, units: list[str]) -> str:
+        """合并字幕回填单元，避免中文被加空格"""
+        text = ""
+        for unit in [item.strip() for item in units if item.strip()]:
+            if not text:
+                text = unit
+                continue
+            separator = " " if re.match(r"[A-Za-z0-9]$", text) and re.match(r"^[A-Za-z0-9]", unit) else ""
+            text = f"{text}{separator}{unit}"
+        return text.strip()
 
     def _parse_processed_subtitle_response(self, response_text: str) -> dict[int, str]:
         """解析模型返回的 JSON 或编号列表"""

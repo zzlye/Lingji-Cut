@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
+from ..core.subtitle_engine import adjust_cjk_unit_boundary
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
 from ..core.tooling import assert_required_tools_available
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
@@ -1207,6 +1208,8 @@ def _distribute_text_to_original_slots(lines: list[str], original_entries: list[
         elapsed_weight += weight
         unit_end = total_units if index == len(weights) - 1 else round(total_units * elapsed_weight / total_weight)
         unit_end = max(unit_start + 1, min(total_units, unit_end))
+        if index < len(weights) - 1:
+            unit_end = adjust_cjk_unit_boundary(units, unit_end, min_index=unit_start + 1, max_index=total_units - 1)
         distributed.append(_join_mapping_units(units[unit_start:unit_end]))
         unit_start = unit_end
         if unit_start >= total_units:

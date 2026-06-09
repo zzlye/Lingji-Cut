@@ -166,6 +166,24 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(engine.calls, 3)
         self.assertEqual([entry["text"] for entry in result], ["第一批", "第二批"])
 
+    def test_translate_fallback_avoids_cjk_word_boundary_breaks(self):
+        """模型返回非 JSON 整句译文时，也不能把“产生”切成“产 / 生”"""
+        original_entries = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "aaaaaaaaaaaaaa"},
+            {"index": 2, "start": "00:00:03,000", "end": "00:00:04,000", "text": "bbb"},
+        ]
+
+        merged = TextEngine()._merge_processed_entries(
+            original_entries,
+            "为了让你再也无法对别的女人产生反应",
+            require_all=True,
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual("".join(str(entry["text"]) for entry in merged), "为了让你再也无法对别的女人产生反应")
+        self.assertFalse(str(merged[0]["text"]).endswith("产"))
+        self.assertTrue(str(merged[1]["text"]).startswith("产生"))
+
 
 if __name__ == "__main__":
     unittest.main()

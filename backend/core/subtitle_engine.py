@@ -21,6 +21,66 @@ PUNCTUATION_ONLY_RE = re.compile(r"^[\s，。、！？；：,.!?;:…]+$")
 MEANINGFUL_CHAR_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 DISALLOWED_SUBTITLE_SEPARATOR_RE = re.compile(r"\.{3,}|…+|[，。、,.]")
 CJK_DIGIT_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[0-9０-９])|(?<=[0-9０-９])\s+(?=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])")
+CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+CJK_UNSAFE_SPLIT_PAIRS = {
+    "产生", "发生", "反应", "生成", "无法", "别的", "女人", "男人",
+    "字幕", "翻译", "原文", "识别", "视频", "导出", "保存", "下载",
+    "处理", "设置", "文件", "路径", "时间", "开始", "结束", "素材",
+}
+
+
+def adjust_cjk_split_boundary(text: str, split_at: int, min_index: int = 1, max_index: Optional[int] = None) -> int:
+    """避开常见中文词中间的硬切点，例如不要切成“产 / 生”"""
+    value = str(text or "")
+    if len(value) < 2:
+        return split_at
+    upper_bound = len(value) - 1 if max_index is None else min(max_index, len(value) - 1)
+    lower_bound = max(1, min_index)
+    safe_split = max(lower_bound, min(split_at, upper_bound))
+    if not _is_unsafe_cjk_split_pair(value[safe_split - 1], value[safe_split]):
+        return safe_split
+
+    for candidate in range(safe_split - 1, lower_bound - 1, -1):
+        if not _is_unsafe_cjk_split_pair(value[candidate - 1], value[candidate]):
+            return candidate
+    for candidate in range(safe_split + 1, upper_bound + 1):
+        if not _is_unsafe_cjk_split_pair(value[candidate - 1], value[candidate]):
+            return candidate
+    return safe_split
+
+
+def adjust_cjk_unit_boundary(units: list[str], split_at: int, min_index: int = 1, max_index: Optional[int] = None) -> int:
+    """按文本单元回填字幕时避开中文词中间的切点"""
+    if len(units) < 2:
+        return split_at
+    upper_bound = len(units) - 1 if max_index is None else min(max_index, len(units) - 1)
+    lower_bound = max(1, min_index)
+    safe_split = max(lower_bound, min(split_at, upper_bound))
+    if not _is_unsafe_unit_boundary(units, safe_split):
+        return safe_split
+
+    for candidate in range(safe_split - 1, lower_bound - 1, -1):
+        if not _is_unsafe_unit_boundary(units, candidate):
+            return candidate
+    for candidate in range(safe_split + 1, upper_bound + 1):
+        if not _is_unsafe_unit_boundary(units, candidate):
+            return candidate
+    return safe_split
+
+
+def _is_unsafe_unit_boundary(units: list[str], split_at: int) -> bool:
+    """判断文本单元边界是否落在常见中文词中间"""
+    left = str(units[split_at - 1] or "").strip()
+    right = str(units[split_at] or "").strip()
+    if not left or not right:
+        return False
+    return _is_unsafe_cjk_split_pair(left[-1], right[0])
+
+
+def _is_unsafe_cjk_split_pair(left: str, right: str) -> bool:
+    """判断两个相邻中文字符是否不应该被拆到两条字幕"""
+    pair = f"{left or ''}{right or ''}"
+    return bool(CJK_CHAR_RE.fullmatch(left or "") and CJK_CHAR_RE.fullmatch(right or "") and pair in CJK_UNSAFE_SPLIT_PAIRS)
 
 
 class SubtitleEngine:
@@ -494,7 +554,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if char not in break_chars:
                 continue
             return index - 1 if char == " " else index
-        return max_chars
+        return adjust_cjk_split_boundary(text, max_chars, min_index=search_start, max_index=max_chars)
 
     def _merge_invalid_subtitle_parts(self, parts: list[str]) -> list[str]:
         """合并纯标点碎片和单字尾巴，避免生成无意义字幕条目"""

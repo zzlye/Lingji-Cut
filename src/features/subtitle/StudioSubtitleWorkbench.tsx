@@ -1115,9 +1115,17 @@ function splitSubtitleByLanguage(text: string) {
   const lines = splitSubtitleLines(text).all
   const originalLines: string[] = []
   const translationLines: string[] = []
+  const classifiedLines = lines.map((line) => ({
+    line,
+    role: detectSubtitleLineRole(line),
+  }))
 
-  for (const line of lines) {
-    if (isChineseText(line)) {
+  for (const { line, role } of classifiedLines) {
+    if (role === 'translation') {
+      translationLines.push(line)
+    } else if (role === 'original') {
+      originalLines.push(line)
+    } else if (translationLines.length || !originalLines.length) {
       translationLines.push(line)
     } else {
       originalLines.push(line)
@@ -1222,11 +1230,24 @@ function isSameLocalPath(left: string, right: string) {
 }
 
 function isChineseText(value: string) {
-  return /[\u3400-\u9fff]/.test(value)
+  return detectSubtitleLineRole(value) === 'translation'
 }
 
 function isLikelyTranslatedChinese(value: string) {
   return isChineseText(value)
+}
+
+type SubtitleLineRole = 'original' | 'translation' | 'unknown'
+
+function detectSubtitleLineRole(value: string): SubtitleLineRole {
+  const text = String(value || '').trim()
+  if (!text) return 'unknown'
+  // 日文会混用汉字，必须先看假名；否则“目”这类汉字会被误判成中文译文。
+  if (/[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]/.test(text)) return 'original'
+  if (/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(text)) return 'original'
+  if (/[\u3400-\u9fff]/.test(text)) return 'translation'
+  if (/[A-Za-z]/.test(text)) return 'original'
+  return 'unknown'
 }
 
 function isMeaninglessSubtitleText(text: string) {
