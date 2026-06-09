@@ -45,10 +45,19 @@ export function LibraryPanel() {
       return output ? [{ job, output }] : []
     })
 
-  const handleOpenFolder = async (job: AutomationJob) => {
+  const handleOpenFolder = async (item: ProductItem) => {
     if (openingId) return
+    const { job, output } = item
     setOpeningId(job.id)
     try {
+      const localFolder = resolveProductFolderPath(job, output)
+      const openLocalPath = window.electron?.shell?.openPath
+      if (openLocalPath && localFolder) {
+        const error = await openLocalPath(localFolder)
+        if (error) throw new Error(error)
+        addLog('info', `素材文件夹已打开: ${localFolder}`)
+        return
+      }
       const result = await automationApi.openJobFolder(job.id)
       addLog('info', `素材文件夹已打开: ${result.folder_path}`)
     } catch (error) {
@@ -113,7 +122,7 @@ export function LibraryPanel() {
                     <Captions className="mr-1.5 size-4" />
                     字幕调整
                   </Button>
-                  <Button size="sm" variant="outline" className="h-9 justify-center" onClick={() => handleOpenFolder(job)} disabled={openingId === job.id}>
+                  <Button size="sm" variant="outline" className="h-9 justify-center" onClick={() => handleOpenFolder({ job, output })} disabled={openingId === job.id}>
                     <FolderOpen className="mr-1.5 size-4" />
                     {openingId === job.id ? '打开中…' : '打开文件夹'}
                   </Button>
@@ -172,4 +181,37 @@ export function LibraryPanel() {
       </AlertDialog>
     </div>
   )
+}
+
+function resolveProductFolderPath(job: AutomationJob, output: string) {
+  for (const candidate of [
+    output,
+    job.source_video_path,
+    job.subtitle_asset_path,
+    job.voice_asset_path,
+    ...job.steps.map((step) => step.output_path || ''),
+  ]) {
+    const folderPath = folderPathFromMediaPath(candidate || '')
+    if (folderPath) return folderPath
+  }
+  return ''
+}
+
+function folderPathFromMediaPath(path: string) {
+  const normalized = path.trim()
+  if (!normalized) return ''
+  const parts = normalized.split(/[\\/]/).filter(Boolean)
+  if (parts.length < 2) return ''
+  const stageName = parts[parts.length - 2]?.toLowerCase()
+  if (stageName && ['downloads', 'output', 'exports'].includes(stageName)) {
+    const workspaceParts = parts.slice(0, -2)
+    if (workspaceParts.length >= 2 && workspaceParts[workspaceParts.length - 2]?.toLowerCase() === 'videos') {
+      return pathPrefix(normalized) + workspaceParts.join('\\')
+    }
+  }
+  return normalized.replace(/[\\/][^\\/]+$/, '')
+}
+
+function pathPrefix(path: string) {
+  return /^[A-Za-z]:[\\/]/.test(path) ? '' : path.startsWith('\\\\') ? '\\\\' : ''
 }

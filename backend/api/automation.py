@@ -2361,9 +2361,34 @@ def _job_output_candidates(job: AutomationJobRecord) -> list[str]:
 
 
 def _job_folder_for_open(job: AutomationJobRecord) -> str:
-    """推导素材库“打开文件夹”要打开的位置，允许旧版公共 exports 目录只打开不删除"""
+    """推导素材库“打开文件夹”要打开的位置，优先打开单视频工作目录"""
     params = _get_job_params(job)
-    for key in ("video_exports_dir", "video_output_dir", "video_downloads_dir", "workspace_dir"):
+
+    workspace_dir = str(params.get("workspace_dir") or "").strip()
+    if workspace_dir:
+        folder_path = os.path.abspath(os.path.expanduser(workspace_dir))
+        if os.path.isdir(folder_path):
+            return folder_path
+
+    for key in ("video_exports_dir", "video_output_dir", "video_downloads_dir"):
+        candidate = _workspace_candidate_from_stage_dir(str(params.get(key) or ""))
+        if candidate:
+            workspace_path = os.path.abspath(os.path.expanduser(candidate["workspace_dir"]))
+            if os.path.isdir(workspace_path) and _looks_like_video_workspace(workspace_path):
+                return workspace_path
+
+    for candidate in _job_output_candidates(job):
+        file_path = os.path.abspath(os.path.expanduser(str(candidate).strip()))
+        if not os.path.isfile(file_path):
+            continue
+        detected = detect_video_workspace(file_path)
+        if detected:
+            workspace_path = os.path.abspath(os.path.expanduser(detected["workspace_dir"]))
+            if os.path.isdir(workspace_path) and _looks_like_video_workspace(workspace_path):
+                return workspace_path
+
+    # 旧版平铺目录没有单视频工作目录，只允许打开对应阶段目录，不用于删除。
+    for key in ("video_exports_dir", "video_output_dir", "video_downloads_dir"):
         path = str(params.get(key) or "").strip()
         folder_path = os.path.abspath(os.path.expanduser(path)) if path else ""
         if folder_path and os.path.isdir(folder_path):
@@ -2375,6 +2400,11 @@ def _job_folder_for_open(job: AutomationJobRecord) -> str:
             return os.path.dirname(file_path)
 
     raise HTTPException(status_code=404, detail="没有找到可打开的素材文件夹")
+
+
+def _looks_like_video_workspace(workspace_path: str) -> bool:
+    """只把 videos 目录下的项目目录当作单视频工作目录，避免误判公共 exports"""
+    return os.path.basename(os.path.dirname(os.path.abspath(workspace_path))).lower() == "videos"
 
 
 def _open_folder_in_file_manager(folder_path: str) -> None:

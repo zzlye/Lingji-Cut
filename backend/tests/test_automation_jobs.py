@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _run_automation_sync  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -1218,6 +1218,85 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             self.assertEqual(fake_recognizer.video_paths, [copied_path])
             self.assertEqual(stage_by_key["subtitle"].status, "completed")
             self.assertEqual(stage_by_key["export"].status, "completed")
+
+    def test_open_job_folder_prefers_video_workspace_root(self):
+        """素材库打开文件夹应打开单视频根目录，而不是 exports 子目录"""
+        with tempfile.TemporaryDirectory(prefix="automation_open_folder_") as temp_dir:
+            videos_dir = os.path.join(temp_dir, "videos")
+            workspace_dir = os.path.join(videos_dir, "video-1__测试视频")
+            exports_dir = os.path.join(workspace_dir, "exports")
+            output_dir = os.path.join(workspace_dir, "output")
+            downloads_dir = os.path.join(workspace_dir, "downloads")
+            for directory in (exports_dir, output_dir, downloads_dir):
+                os.makedirs(directory, exist_ok=True)
+            output_path = os.path.join(exports_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+
+            job = AutomationJobRecord(
+                id="auto-open-folder",
+                source_url="https://youtube.com/watch?v=1",
+                status="completed",
+                output_path=output_path,
+                params=json.dumps({
+                    "workspace_dir": workspace_dir,
+                    "video_downloads_dir": downloads_dir,
+                    "video_output_dir": output_dir,
+                    "video_exports_dir": exports_dir,
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+
+            self.assertEqual(_job_folder_for_open(job), workspace_dir)
+
+    def test_open_job_folder_recovers_workspace_from_export_path(self):
+        """旧参数缺失时也能从 videos/<项目>/exports/成品 反推单视频根目录"""
+        with tempfile.TemporaryDirectory(prefix="automation_open_detect_") as temp_dir:
+            videos_dir = os.path.join(temp_dir, "videos")
+            workspace_dir = os.path.join(videos_dir, "video-2__测试视频")
+            exports_dir = os.path.join(workspace_dir, "exports")
+            output_dir = os.path.join(workspace_dir, "output")
+            downloads_dir = os.path.join(workspace_dir, "downloads")
+            for directory in (exports_dir, output_dir, downloads_dir):
+                os.makedirs(directory, exist_ok=True)
+            output_path = os.path.join(exports_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+
+            job = AutomationJobRecord(
+                id="auto-open-detect",
+                source_url="https://youtube.com/watch?v=2",
+                status="completed",
+                output_path=output_path,
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+
+            self.assertEqual(_job_folder_for_open(job), workspace_dir)
+
+    def test_open_job_folder_falls_back_to_legacy_exports_dir(self):
+        """旧版公共 exports 成品没有独立目录时，打开文件所在目录而不是报错"""
+        with tempfile.TemporaryDirectory(prefix="automation_open_legacy_") as temp_dir:
+            exports_dir = os.path.join(temp_dir, "exports")
+            os.makedirs(exports_dir, exist_ok=True)
+            output_path = os.path.join(exports_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+
+            job = AutomationJobRecord(
+                id="auto-open-legacy",
+                source_url="https://youtube.com/watch?v=3",
+                status="completed",
+                output_path=output_path,
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+
+            self.assertEqual(_job_folder_for_open(job), exports_dir)
 
     def test_delete_job_folder_removes_workspace_and_record(self):
         """删除素材文件夹只允许删除单视频独立目录，并同步清理记录"""
