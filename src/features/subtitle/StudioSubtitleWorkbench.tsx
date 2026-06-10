@@ -1115,12 +1115,16 @@ function splitSubtitleByLanguage(text: string) {
   const lines = splitSubtitleLines(text).all
   const originalLines: string[] = []
   const translationLines: string[] = []
-  const classifiedLines = lines.map((line) => ({
-    line,
-    role: detectSubtitleLineRole(line),
-  }))
 
-  for (const { line, role } of classifiedLines) {
+  for (const line of lines) {
+    const mixedLine = splitMixedComparedSubtitleLine(line)
+    if (mixedLine) {
+      if (mixedLine.translation) translationLines.push(mixedLine.translation)
+      if (mixedLine.original) originalLines.push(mixedLine.original)
+      continue
+    }
+
+    const role = detectSubtitleLineRole(line)
     if (role === 'translation') {
       translationLines.push(line)
     } else if (role === 'original') {
@@ -1243,11 +1247,42 @@ function detectSubtitleLineRole(value: string): SubtitleLineRole {
   const text = String(value || '').trim()
   if (!text) return 'unknown'
   // 日文会混用汉字，必须先看假名；否则“目”这类汉字会被误判成中文译文。
-  if (/[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]/.test(text)) return 'original'
-  if (/[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(text)) return 'original'
+  if (hasJapaneseKana(text)) return 'original'
+  if (hasKoreanText(text)) return 'original'
   if (/[\u3400-\u9fff]/.test(text)) return 'translation'
   if (/[A-Za-z]/.test(text)) return 'original'
   return 'unknown'
+}
+
+function splitMixedComparedSubtitleLine(value: string) {
+  const text = String(value || '').trim()
+  const parts = text.split(/[\s　]+/).filter(Boolean)
+  if (parts.length < 2) return null
+
+  for (let index = 1; index < parts.length; index += 1) {
+    const left = parts.slice(0, index).join(' ')
+    const right = parts.slice(index).join(' ')
+    // 有些旧字幕会把“中文译文 日文原文”保存成同一行，这里按语言边界拆回双栏。
+    if (isChineseTranslationLine(left) && hasJapaneseKana(right)) {
+      return { translation: left, original: right }
+    }
+    if (hasJapaneseKana(left) && isChineseTranslationLine(right)) {
+      return { translation: right, original: left }
+    }
+  }
+  return null
+}
+
+function hasJapaneseKana(value: string) {
+  return /[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]/.test(value)
+}
+
+function hasKoreanText(value: string) {
+  return /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/.test(value)
+}
+
+function isChineseTranslationLine(value: string) {
+  return /[\u3400-\u9fff]/.test(value) && !hasJapaneseKana(value) && !hasKoreanText(value)
 }
 
 function isMeaninglessSubtitleText(text: string) {
