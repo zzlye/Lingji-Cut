@@ -333,6 +333,17 @@ Language: ja
         self.assertGreater(entries[0]["end"], "00:00:02,500")
         self.assertEqual(entries[-1]["end"], "00:00:04,000")
 
+    def test_normalize_entries_for_display_caps_short_single_line_duration(self):
+        """短字幕不会因为识别段过长而在画面上挂很多秒"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [{"index": 1, "start": "00:01:03,290", "end": "00:01:11,320", "text": "今天尝试了御姐风穿搭哦"}],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["start"], "00:01:03,290")
+        self.assertLess(entries[0]["end"], "00:01:07,000")
+
     def test_split_subtitle_text_does_not_leave_punctuation_only_or_single_char_fragments(self):
         """字幕切分不能留下纯标点条目，也不能把最后一个有效字单独切成一条"""
         parts = SubtitleEngine()._split_subtitle_text(

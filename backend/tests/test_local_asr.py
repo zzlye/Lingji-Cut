@@ -114,6 +114,9 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[0]["compute_type"], "int8")
         self.assertEqual(FakeWhisperModel.init_calls[0]["cpu_threads"], 2)
         self.assertTrue(FakeWhisperModel.transcribe_calls[0]["vad_filter"])
+        self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["vad_parameters"]["threshold"], 0.35)
+        self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["vad_parameters"]["min_speech_duration_ms"], 120)
+        self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["no_speech_threshold"], 0.85)
         self.assertTrue(FakeWhisperModel.transcribe_calls[0]["word_timestamps"])
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["beam_size"], 3)
         self.assertEqual(progress_values[-1], 100)
@@ -218,6 +221,32 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(entries[0]["start"], "00:00:00,000")
         self.assertEqual(entries[0]["end"], "00:00:02,800")
         self.assertEqual(entries[1]["start"], "00:00:02,800")
+
+    def test_word_timestamps_split_on_long_pause_even_for_short_text(self):
+        """短句后有明显停顿时也要断开，避免字幕挂到下一句话已经开始之后"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class PauseWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    FakeSegment(0.0, 3.5, "ignored", words=[
+                        FakeWord(0.0, 0.5, "どう?"),
+                        FakeWord(2.4, 3.0, "次です"),
+                    ]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = PauseWhisperModel
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["end"], "00:00:00,500")
+        self.assertEqual(entries[1]["start"], "00:00:02,400")
 
     def test_word_timestamps_avoid_splitting_short_japanese_tail(self):
         """词级硬断不会把日语短词尾单独甩到下一条字幕"""

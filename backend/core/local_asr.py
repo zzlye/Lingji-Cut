@@ -201,9 +201,11 @@ class LocalSpeechRecognizer:
         return model.transcribe(
             video_path,
             language=language or None,
-            vad_filter=True,
+            vad_filter=self._vad_filter_enabled(),
+            vad_parameters=self._vad_parameters(),
             word_timestamps=True,
             beam_size=self._beam_size(),
+            no_speech_threshold=self._no_speech_threshold(),
             condition_on_previous_text=False,
         )
 
@@ -293,10 +295,10 @@ class LocalSpeechRecognizer:
         pause = max(0.0, next_start - end)
         if text[-1] in break_chars and len(text) >= min_punctuation_chars:
             return True
+        if pause >= pause_seconds and not self._is_short_japanese_tail(next_text):
+            return True
         if len(text) < max_chars and duration < max_duration:
             return False
-        if pause >= pause_seconds:
-            return True
         if len(text) >= hard_limit:
             return not self._is_short_japanese_tail(next_text)
         return duration >= max_duration and not self._is_short_japanese_tail(next_text)
@@ -442,6 +444,40 @@ class LocalSpeechRecognizer:
             except ValueError:
                 pass
         return 5 if self.device == "cuda" else 3
+
+    def _vad_filter_enabled(self) -> bool:
+        """读取 VAD 开关；默认开启但降低阈值，尽量保留细声细语"""
+        configured = str(os.environ.get("YTV_ASR_VAD_FILTER") or "true").strip().lower()
+        return configured not in {"0", "false", "no", "off"}
+
+    def _vad_parameters(self) -> dict[str, int | float]:
+        """生成更适合短视频低音量说话的 VAD 参数"""
+        return {
+            "threshold": self._env_float("YTV_ASR_VAD_THRESHOLD", 0.3, 0.05, 0.9),
+            "min_speech_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
+            "min_silence_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
+            "speech_pad_ms": self._env_int("YTV_ASR_VAD_SPEECH_PAD_MS", 300, 0, 1000),
+        }
+
+    def _no_speech_threshold(self) -> float:
+        """放宽 Whisper 的静音判定，避免低声句子被当成无语音跳过"""
+        return self._env_float("YTV_ASR_NO_SPEECH_THRESHOLD", 0.8, 0.1, 1.0)
+
+    def _env_int(self, key: str, default: int, minimum: int, maximum: int) -> int:
+        """读取整数环境变量，并限制在安全范围内"""
+        try:
+            value = int(os.environ.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    def _env_float(self, key: str, default: float, minimum: float, maximum: float) -> float:
+        """读取浮点环境变量，并限制在安全范围内"""
+        try:
+            value = float(os.environ.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
 
     def _should_fallback_to_cpu(self) -> bool:
         """判断当前识别失败时是否允许回退 CPU"""

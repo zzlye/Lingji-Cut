@@ -454,6 +454,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             end_ms = self._time_to_milliseconds(str(entry.get("end") or "00:00:00,000"))
             if end_ms <= start_ms:
                 end_ms = start_ms + 1000
+            if len(parts) == 1:
+                end_ms = self._cap_short_display_end_ms(start_ms, end_ms, parts[0])
             duration = max(1, end_ms - start_ms)
             weights = [max(1, len(part)) for part in parts]
             total_weight = max(1, sum(weights))
@@ -522,6 +524,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         """根据字号估算单行可读字符数"""
         font_size = int(preset.get("font_size") or 48)
         return max(12, min(30, int(1150 / max(font_size, 1))))
+
+    def _cap_short_display_end_ms(self, start_ms: int, end_ms: int, text: str) -> int:
+        """短字幕识别段过长时收紧显示时间，避免话已结束字幕还挂在画面上"""
+        duration = max(1, end_ms - start_ms)
+        meaningful_count = self._meaningful_char_count(text)
+        if meaningful_count <= 0:
+            return end_ms
+        cap_ms = max(1200, min(4200, 900 + meaningful_count * 150))
+        if duration <= cap_ms + 500:
+            return end_ms
+        return max(start_ms + 700, min(end_ms, start_ms + cap_ms))
 
     def _split_subtitle_text(self, text: str, max_chars: int) -> list[str]:
         """按显示宽度拆字幕文本，优先在标点或空格处断开"""
