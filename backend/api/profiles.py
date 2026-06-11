@@ -140,6 +140,26 @@ def _voice_requires_api_key(provider_type: str) -> bool:
     return provider_type in {"openai_tts", "gemini_tts", "minimax_tts", "xiaomi_mimo_tts"}
 
 
+def _has_saved_api_key(encrypted_key: str) -> bool:
+    """判断数据库里是否真的保存了可用 API Key"""
+    try:
+        return bool(decrypt_api_key(encrypted_key).strip())
+    except Exception:
+        return False
+
+
+def _require_api_key_for_create(api_key: str, label: str) -> None:
+    """新建配置必须写入密钥，避免保存出看似可用的空配置"""
+    if not str(api_key or "").strip():
+        raise HTTPException(status_code=400, detail=f"新建{label}配置需要填写 API Key")
+
+
+def _require_api_key_for_update(existing_encrypted_key: str, label: str) -> None:
+    """更新旧配置时允许留空保留旧密钥，但旧密钥为空时必须补填"""
+    if not _has_saved_api_key(existing_encrypted_key):
+        raise HTTPException(status_code=400, detail=f"当前{label}配置还没有 API Key，请填写后再保存")
+
+
 def _parse_openai_models(payload: dict) -> list[TextModelOption]:
     """解析 OpenAI / OpenAI 兼容模型列表"""
     models = []
@@ -428,6 +448,7 @@ async def get_text_profile_secret(profile_id: int, db: Session = Depends(get_db)
 @router.post("/text", response_model=ProfileResponse)
 async def create_text_profile(profile: ProfileCreate, db: Session = Depends(get_db)):
     """创建文本 API 配置"""
+    _require_api_key_for_create(profile.api_key, "文本 API")
     encrypted_key = encrypt_api_key(profile.api_key)
     db_profile = TextProviderProfile(
         name=profile.name,
@@ -453,6 +474,8 @@ async def update_text_profile(profile_id: int, profile: ProfileUpdate, db: Sessi
     db_profile.base_url = profile.base_url
     if profile.api_key is not None and profile.api_key.strip():
         db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
+    else:
+        _require_api_key_for_update(db_profile.api_key_encrypted, "文本 API")
     db_profile.model = profile.model
     db_profile.extra_params = profile.extra_params
     db.commit()
@@ -542,6 +565,7 @@ async def get_voice_profile_secret(profile_id: int, db: Session = Depends(get_db
 @router.post("/voice", response_model=ProfileResponse)
 async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get_db)):
     """创建配音 API 配置"""
+    _require_api_key_for_create(profile.api_key, "配音 API")
     encrypted_key = encrypt_api_key(profile.api_key)
     db_profile = VoiceProviderProfile(
         name=profile.name,
@@ -567,6 +591,8 @@ async def update_voice_profile(profile_id: int, profile: ProfileUpdate, db: Sess
     db_profile.base_url = profile.base_url
     if profile.api_key is not None and profile.api_key.strip():
         db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
+    else:
+        _require_api_key_for_update(db_profile.api_key_encrypted, "配音 API")
     db_profile.voice = profile.model
     db_profile.extra_params = profile.extra_params
     db.commit()

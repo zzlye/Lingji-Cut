@@ -13,20 +13,45 @@ export const BASE_URL = (import.meta.env.VITE_API_BASE_URL?.trim() || 'http://12
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = `${BASE_URL}${path}`
 
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    })
+  } catch (error) {
+    // fetch 在后端未启动、端口被占用或连接被系统拒绝时只会抛 TypeError，这里转成用户能理解的中文。
+    const detail = error instanceof Error && error.message ? `（${error.message}）` : ''
+    throw new Error(`本地后端服务连接失败，请确认灵剪工坊后端已启动${detail}`)
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(error.detail || `HTTP ${response.status}`)
+    throw new Error(normalizeApiErrorDetail(error.detail) || `HTTP ${response.status}`)
   }
 
   return response.json()
+}
+
+/** 把 FastAPI / Pydantic 的 detail 统一转成适合 Toast 的一句话 */
+function normalizeApiErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === 'object' && 'msg' in item) return String((item as { msg?: unknown }).msg || '')
+        return String(item || '')
+      })
+      .filter(Boolean)
+      .join('；')
+  }
+  if (detail && typeof detail === 'object') {
+    return JSON.stringify(detail)
+  }
+  return ''
 }
 
 /** 视频 API */

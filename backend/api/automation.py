@@ -342,6 +342,8 @@ def _job_video_info(job: AutomationJobRecord, db: Optional[Session]) -> Optional
         return None
     if not video or not hasattr(video, "video_id") or not hasattr(video, "platform"):
         return None
+    formats = _json_list_from_model(video.formats)
+    subtitles = _json_list_from_model(video.subtitles)
     return {
         "id": video.id,
         "video_id": video.video_id,
@@ -350,8 +352,11 @@ def _job_video_info(job: AutomationJobRecord, db: Optional[Session]) -> Optional
         "author": video.author,
         "duration": video.duration,
         "thumbnail_url": video.thumbnail_url,
-        "formats": _json_list_from_model(video.formats),
-        "subtitles": _json_list_from_model(video.subtitles),
+        # 任务列表会频繁轮询，不能返回完整 YouTube 字幕轨，否则单个任务就可能有上千条记录拖慢界面。
+        "formats": formats[:12],
+        "subtitles": subtitles[:12],
+        "format_count": len(formats),
+        "subtitle_count": len(subtitles),
     }
 
 
@@ -982,6 +987,51 @@ def _pick_text_profile(db: Session, profile_id: Optional[int]) -> Optional[TextP
     if not profile:
         raise HTTPException(status_code=404, detail="文本 API 配置不存在")
     return profile
+
+
+SUBTITLE_API_OPERATION_LABELS = {
+    "generate": "生成",
+    "translate": "翻译",
+    "polish": "润色",
+}
+
+
+def _profile_has_saved_api_key(profile: VoiceProviderProfile | TextProviderProfile) -> bool:
+    """判断配置是否真的保存过可用密钥，避免空密钥任务进入后台后才失败"""
+    try:
+        return bool(decrypt_api_key(profile.api_key_encrypted).strip())
+    except Exception:
+        return False
+
+
+def _validate_saved_api_profile(profile: VoiceProviderProfile | TextProviderProfile, label: str) -> None:
+    """校验一键流程依赖的 API 配置是否完整"""
+    if not str(profile.base_url or "").strip():
+        raise HTTPException(status_code=400, detail=f"{label} 配置缺少 Base URL，请先到设置里补全")
+    model = str(getattr(profile, "model", None) or getattr(profile, "voice", None) or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail=f"{label} 配置缺少模型，请先到设置里选择或填写模型")
+    if not _profile_has_saved_api_key(profile):
+        raise HTTPException(status_code=400, detail=f"{label} 配置没有保存 API Key，请先到设置里填写并保存")
+
+
+def validate_automation_request_profiles(db: Session, request: AutomationRunRequest) -> None:
+    """一键流程启动前校验 API 配置，缺配置时直接拦截而不是生成卡住任务"""
+    operation_label = SUBTITLE_API_OPERATION_LABELS.get(request.subtitle_operation)
+    if operation_label:
+        text_profile = _pick_text_profile(db, request.text_profile_id)
+        if not text_profile:
+            raise HTTPException(
+                status_code=400,
+                detail=f"当前字幕策略是“{operation_label}”，需要先在 设置 > 文本 API 保存可用配置",
+            )
+        _validate_saved_api_profile(text_profile, "文本 API")
+
+    if request.enable_voice:
+        voice_profile = _pick_voice_profile(db, request.voice_profile_id)
+        if not voice_profile:
+            raise HTTPException(status_code=400, detail="已开启配音，但没有保存配音 API 配置，请先到 设置 > 配音 配好渠道")
+        _validate_saved_api_profile(voice_profile, "配音 API")
 
 
 def _load_profile_settings(profile: VoiceProviderProfile | TextProviderProfile) -> dict[str, Any]:
@@ -2733,6 +2783,7 @@ def run_automation(request: AutomationRunRequest, db: Session = Depends(get_db))
     """执行完整一键自动流程"""
     if not request.url.strip():
         raise HTTPException(status_code=400, detail="请填写视频链接或选择本地视频")
+    validate_automation_request_profiles(db, request)
 
     try:
         assert_required_tools_available(require_yt_dlp=not _is_local_video_source(request.url))
@@ -2752,6 +2803,7 @@ def start_automation(request: AutomationRunRequest, db: Session = Depends(get_db
     """启动后台一键自动流程，立即返回任务 ID"""
     if not request.url.strip():
         raise HTTPException(status_code=400, detail="请填写视频链接或选择本地视频")
+    validate_automation_request_profiles(db, request)
 
     try:
         assert_required_tools_available(require_yt_dlp=not _is_local_video_source(request.url))
@@ -2769,6 +2821,7 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
     normalized_urls = _normalize_batch_urls(request.urls)
     if not normalized_urls:
         raise HTTPException(status_code=400, detail="请至少填写一个有效链接")
+    validate_automation_request_profiles(db, request.template)
 
     try:
         assert_required_tools_available(require_yt_dlp=any(not _is_local_video_source(url) for url in normalized_urls))
@@ -2871,6 +2924,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="只有失败、已取消或已完成的自动化任务可以重试")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
+    validate_automation_request_profiles(db, AutomationRunRequest(**_get_job_params(job)))
 
     try:
         assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
@@ -2894,6 +2948,7 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="只有暂停、失败、已取消或已完成的自动化任务可以继续处理")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
+    validate_automation_request_profiles(db, AutomationRunRequest(**_get_job_params(job)))
 
     try:
         assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
@@ -3127,6 +3182,9 @@ def pause_batch_automation(batch_id: str, db: Session = Depends(get_db)):
 @router.post("/batch/{batch_id}/resume", response_model=AutomationBatchControlResponse)
 def resume_batch_automation(batch_id: str, db: Session = Depends(get_db)):
     """恢复一个批次中暂停的自动化任务"""
+    for job in db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.asc()).all():
+        if _get_batch_id_from_job(job) == batch_id and job.status == "paused":
+            validate_automation_request_profiles(db, AutomationRunRequest(**_get_job_params(job)))
     try:
         assert_required_tools_available(require_yt_dlp=_batch_requires_yt_dlp(db, batch_id))
     except RuntimeError as exc:

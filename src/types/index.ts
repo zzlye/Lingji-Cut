@@ -27,6 +27,8 @@ export interface VideoParseResult {
   thumbnail_url: string | null
   formats: VideoFormat[]
   subtitles: SubtitleTrack[]
+  format_count?: number
+  subtitle_count?: number
 }
 
 /** 视频格式 */

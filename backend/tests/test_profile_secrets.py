@@ -5,13 +5,14 @@ import os
 import sys
 import unittest
 
+from fastapi import HTTPException
 
 # 嵌入式 Python 直接运行测试时手动加入项目根目录。
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.api.profiles import get_text_profile_secret, get_voice_profile_secret  # noqa: E402
+from backend.api.profiles import ProfileCreate, ProfileUpdate, create_text_profile, get_text_profile_secret, get_voice_profile_secret, update_text_profile  # noqa: E402
 from backend.models import TextProviderProfile, VoiceProviderProfile  # noqa: E402
 from backend.utils import encrypt_api_key  # noqa: E402
 
@@ -43,6 +44,18 @@ class FakeDb:
             return FakeQuery(self.voice_profiles)
         return FakeQuery([])
 
+    def add(self, item):
+        if isinstance(item, TextProviderProfile):
+            self.text_profiles.append(item)
+        elif isinstance(item, VoiceProviderProfile):
+            self.voice_profiles.append(item)
+
+    def commit(self):
+        return None
+
+    def refresh(self, _item):
+        return None
+
 
 class ProfileSecretTests(unittest.TestCase):
     """配置密钥读取测试"""
@@ -66,6 +79,26 @@ class ProfileSecretTests(unittest.TestCase):
         result = asyncio.run(get_voice_profile_secret(2, db))
 
         self.assertEqual(result.api_key, "sk-voice")
+
+    def test_create_text_profile_rejects_empty_api_key(self):
+        """新建文本 API 配置时不允许保存空密钥"""
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(create_text_profile(ProfileCreate(name="文本", provider_type="openai", base_url="https://example.com", api_key="", model="gpt"), FakeDb()))
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("API Key", context.exception.detail)
+
+    def test_update_text_profile_requires_key_when_old_secret_is_empty(self):
+        """旧配置没有密钥时，更新不能继续留空"""
+        db = FakeDb(text_profiles=[
+            TextProviderProfile(id=1, name="文本", provider_type="openai", base_url="https://example.com", api_key_encrypted="", model="gpt"),
+        ])
+
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(update_text_profile(1, ProfileUpdate(name="文本", provider_type="openai", base_url="https://example.com", api_key=None, model="gpt"), db))
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("API Key", context.exception.detail)
 
 
 if __name__ == "__main__":

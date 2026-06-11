@@ -9,11 +9,17 @@ import { net } from 'electron'
 
 // Python 后端进程引用
 let pythonProcess: ChildProcess | null = null
+// 应用主动退出或主动停止后端时不触发自动重启
+let isQuitting = false
+let isStoppingBackend = false
+let backendRestartTimer: NodeJS.Timeout | null = null
+let backendRestartAttempts = 0
 // 后端服务地址
 const BACKEND_URL = 'http://127.0.0.1:8765'
 // 优先使用 D:\tools 下的 Python，避免 Windows Store python.exe 占位程序导致后端启动失败
 const TOOLS_PYTHON = 'D:\\tools\\python-3.12.10-embed\\python.exe'
 const LEGACY_APP_NAMES = ['YouTube视频处理器', 'youtube-video-processor']
+const MAX_BACKEND_RESTART_ATTEMPTS = 3
 
 // 固定用户数据目录名称，避免 productName 调整后历史记录和设置换目录。
 app.setName('灵剪工坊')
@@ -99,6 +105,13 @@ function createWindow(): BrowserWindow {
  * 使用 child_process.spawn 启动后端进程
  */
 function startPythonBackend(): void {
+  if (pythonProcess) return
+  isStoppingBackend = false
+  if (backendRestartTimer) {
+    clearTimeout(backendRestartTimer)
+    backendRestartTimer = null
+  }
+
   // 公共环境变量
   const env: NodeJS.ProcessEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' }
   let command: string
@@ -150,7 +163,33 @@ function startPythonBackend(): void {
   pythonProcess.on('close', (code) => {
     console.log(`[Python] 后端进程退出，退出码: ${code}`)
     pythonProcess = null
+    if (!isQuitting && !isStoppingBackend) {
+      schedulePythonBackendRestart()
+    }
+    isStoppingBackend = false
   })
+}
+
+/** 后端异常退出时自动拉起，避免界面还在但所有请求都变成 Failed to fetch */
+function schedulePythonBackendRestart(): void {
+  if (backendRestartTimer || backendRestartAttempts >= MAX_BACKEND_RESTART_ATTEMPTS) {
+    if (backendRestartAttempts >= MAX_BACKEND_RESTART_ATTEMPTS) {
+      console.error('[Main] Python 后端连续异常退出，已停止自动重启')
+    }
+    return
+  }
+
+  backendRestartAttempts += 1
+  console.warn(`[Main] Python 后端异常退出，准备第 ${backendRestartAttempts} 次自动重启`)
+  backendRestartTimer = setTimeout(() => {
+    backendRestartTimer = null
+    startPythonBackend()
+    checkBackendHealth().then((healthy) => {
+      if (healthy) {
+        backendRestartAttempts = 0
+      }
+    })
+  }, 1500)
 }
 
 /**
@@ -160,6 +199,7 @@ function startPythonBackend(): void {
 function stopPythonBackend(): void {
   if (!pythonProcess) return
   const pid = pythonProcess.pid
+  isStoppingBackend = true
   pythonProcess = null
   if (!pid) return
   if (process.platform === 'win32') {
@@ -278,6 +318,9 @@ app.whenReady().then(async () => {
 
   // 等待后端就绪
   const isHealthy = await checkBackendHealth()
+  if (isHealthy) {
+    backendRestartAttempts = 0
+  }
   if (!isHealthy) {
     console.error('[Main] Python 后端启动超时')
     // 后端未就绪时明确告知用户，避免静默进入一个所有请求都失败的空界面
@@ -310,6 +353,7 @@ app.whenReady().then(async () => {
 
 // 所有窗口关闭时退出应用（macOS 除外）
 app.on('window-all-closed', () => {
+  isQuitting = true
   // 关闭 Python 后端及其子进程
   stopPythonBackend()
 
@@ -320,5 +364,6 @@ app.on('window-all-closed', () => {
 
 // 应用退出前清理
 app.on('before-quit', () => {
+  isQuitting = true
   stopPythonBackend()
 })

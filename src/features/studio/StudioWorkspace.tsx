@@ -320,8 +320,8 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
           <p className="text-xs text-muted-foreground">{video.author ?? '未知作者'}</p>
           <div className="flex flex-wrap gap-1.5">
             <Badge variant="secondary">{formatDuration(video.duration)}</Badge>
-            <Badge variant="outline">{video.formats.length} 个清晰度</Badge>
-            <Badge variant="outline">{video.subtitles.length} 条字幕轨</Badge>
+            <Badge variant="outline">{video.format_count ?? video.formats.length} 个清晰度</Badge>
+            <Badge variant="outline">{video.subtitle_count ?? video.subtitles.length} 条字幕轨</Badge>
           </div>
           <div className="flex flex-wrap gap-2 pt-1">
             <Button
@@ -382,6 +382,14 @@ function ParseHint() {
 /** 当前任务实时进度卡 */
 function JobProgressCard({ job }: { job: AutomationJob }) {
   const setWorkspace = useUiStore((s) => s.setWorkspace)
+  const jobMessage = job.steps.find((step) => step.error_message)?.error_message
+  const statusMessage = job.status === 'cancelled'
+    ? (jobMessage || '任务已中断，可在任务队列点击断点续跑')
+    : job.status === 'failed'
+      ? (jobMessage || '任务失败，请到任务队列查看并重试')
+      : job.status === 'paused'
+        ? (jobMessage || '任务已暂停，可继续处理')
+        : ''
   return (
     <Card>
       <CardHeader>
@@ -409,9 +417,12 @@ function JobProgressCard({ job }: { job: AutomationJob }) {
           )
         })}
         {(job.status === 'failed' || job.status === 'paused' || job.status === 'cancelled') && (
-          <Button variant="outline" size="sm" className="mt-1 w-full" onClick={() => setWorkspace('queue')}>
-            前往任务队列重试或断点续跑
-          </Button>
+          <div className="mt-3 space-y-2 rounded-lg border border-warning/40 bg-warning/10 p-3">
+            <p className="text-xs text-warning">{statusMessage}</p>
+            <Button variant="outline" size="sm" className="w-full" onClick={() => setWorkspace('queue')}>
+              前往任务队列重试或断点续跑
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>

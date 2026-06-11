@@ -21,6 +21,8 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
   const [isDownloadingCover, setIsDownloadingCover] = useState(false)
   const [lastCoverPath, setLastCoverPath] = useState('')
   const { addTask, addLog } = useTaskStore()
+  const formatCount = video.format_count ?? video.formats.length
+  const subtitleCount = video.subtitle_count ?? video.subtitles.length
 
   /** 格式化时长 */
   const formatDuration = (seconds: number | null) => {
@@ -123,7 +125,7 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
         </div>
 
         {/* 可用清晰度 */}
-        {video.formats.length > 0 && (
+        {formatCount > 0 && (
           <div>
             <p className="text-xs text-foreground-muted mb-1">可用清晰度</p>
             <div className="flex flex-wrap gap-1">
@@ -135,9 +137,9 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
                   {format.resolution}
                 </span>
               ))}
-              {video.formats.length > 5 && (
+              {formatCount > 5 && (
                 <span className="px-2 py-0.5 text-xs text-foreground-muted">
-                  +{video.formats.length - 5}
+                  +{formatCount - 5}
                 </span>
               )}
             </div>
@@ -145,7 +147,7 @@ export function VideoInfoCard({ video }: VideoInfoCardProps) {
         )}
 
         {/* 可用字幕 */}
-        {video.subtitles.length > 0 && (
+        {subtitleCount > 0 && (
           <div>
             <p className="text-xs text-foreground-muted mb-1">可用字幕</p>
             <div className="flex flex-wrap gap-1">

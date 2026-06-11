@@ -8,6 +8,30 @@ import { useAutomationStore, selectActiveJobIds } from '@/stores/automationStore
 import { useLogStore } from '@/stores/logStore'
 import type { BackendAutomationJob } from '@/types'
 
+const ACTIVE_JOB_POLL_INTERVAL_MS = 4000
+
+/** 后端重启或 SSE 断线后兜底同步完整任务列表，避免界面停在旧进度 */
+async function syncAutomationJobs(): Promise<boolean> {
+  try {
+    const list = await automationApi.listJobs()
+    useAutomationStore.getState().syncBackendJobs(list)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 优先同步单个任务，失败时退回完整列表 */
+async function syncAutomationJob(id: string): Promise<boolean> {
+  try {
+    const job = await automationApi.getJob(id)
+    useAutomationStore.getState().syncBackendJob(job)
+    return true
+  } catch {
+    return syncAutomationJobs()
+  }
+}
+
 export function useAutomationStream() {
   const jobs = useAutomationStore((s) => s.jobs)
   const activeIds = selectActiveJobIds(jobs)
@@ -24,11 +48,12 @@ export function useAutomationStream() {
 
     const syncJobs = () => {
       attempts += 1
-      automationApi.listJobs()
-        .then((list) => {
-          if (!cancelled) useAutomationStore.getState().syncBackendJobs(list)
-        })
-        .catch(() => {
+      syncAutomationJobs()
+        .then((ok) => {
+          if (!cancelled && ok) {
+            attempts = 0
+            return
+          }
           if (cancelled || attempts >= 20) return
           retryTimer = setTimeout(syncJobs, 1500)
         })
@@ -40,6 +65,16 @@ export function useAutomationStream() {
       if (retryTimer) clearTimeout(retryTimer)
     }
   }, [])
+
+  // SSE 断线、后端自动重启、或 EventSource 没有重连时，用低频轮询兜底同步活跃任务。
+  useEffect(() => {
+    if (activeIds.length === 0) return
+    const timer = window.setInterval(() => {
+      void syncAutomationJobs()
+    }, ACTIVE_JOB_POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKey])
 
   // 为每个活跃任务建立 SSE 连接
   useEffect(() => {
@@ -62,11 +97,18 @@ export function useAutomationStream() {
           addLog('error', `一键流程失败: ${job.error_message || '未知错误'}`)
           source.close()
         } else if (job.status === 'cancelled' || job.status === 'paused') {
+          if (!notifiedRef.current.has(job.id)) {
+            notifiedRef.current.add(job.id)
+            const message = job.error_message || (job.status === 'paused' ? '任务已暂停' : '任务已取消')
+            addLog(job.status === 'paused' ? 'info' : 'warn', `一键流程${job.status === 'paused' ? '已暂停' : '已中断'}: ${message}`)
+            if (job.status === 'cancelled') toast.warning('任务已中断，可在任务队列点击断点续跑')
+          }
           source.close()
         }
       })
       source.addEventListener('error', () => {
-        // 连接异常时关闭，下一轮活跃集合变化或轮询会重新同步
+        // 连接异常时立即拉一次最新状态，避免后端重启后页面一直显示旧的“运行中”。
+        void syncAutomationJob(id)
         source.close()
       })
       return source
