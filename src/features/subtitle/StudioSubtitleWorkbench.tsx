@@ -307,7 +307,8 @@ export function StudioSubtitleWorkbench({
         try {
           const result = await subtitleApi.parseFile(path)
           const parsedCandidate = { path, ...result }
-          if (hasComparedSubtitleEntries(result.entries)) {
+          // 原文字幕文件本身永远不当对照文件直接采用，否则译文会被丢掉
+          if (hasComparedSubtitleEntries(result.entries) && !(sourceSubtitlePath && isSameLocalPath(path, sourceSubtitlePath))) {
             applyParsedSubtitleCandidate(parsedCandidate, options)
             return true
           }
@@ -1174,10 +1175,14 @@ function combineComparedSubtitleText(originalText: string, translatedText: strin
 }
 
 function hasComparedSubtitleEntries(entries: SubtitleEntry[]) {
-  return entries.some((entry) => {
+  // 单行日文“純汉字词 + 假名词”会被误判成中英对照，必须要求足够比例的条目都含双语才算对照文件
+  const nonEmptyEntries = entries.filter((entry) => entry.text.trim())
+  if (!nonEmptyEntries.length) return false
+  const comparedCount = nonEmptyEntries.filter((entry) => {
     const { original, translation } = splitSubtitleByLanguage(entry.text)
     return Boolean(original.trim() && translation.trim())
-  })
+  }).length
+  return comparedCount >= 2 && comparedCount / nonEmptyEntries.length >= 0.3
 }
 
 function mergeOriginalAndTranslatedEntries(originalEntries: SubtitleEntry[], translatedEntries: SubtitleEntry[]) {

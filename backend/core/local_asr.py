@@ -65,12 +65,11 @@ def default_asr_model_name() -> str:
     return os.environ.get("YTV_ASR_MODEL") or "base"
 
 
-@lru_cache(maxsize=1)
-def cuda_memory_mib() -> int:
-    """读取第一块 CUDA 显卡显存，用于自动选择本地识别模型大小"""
+def _query_nvidia_smi_mib(field: str) -> int:
+    """查询第一块 CUDA 显卡的显存数值（MiB），失败时返回 0"""
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", f"--query-gpu={field}", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -91,8 +90,28 @@ def cuda_memory_mib() -> int:
         return 0
 
 
+@lru_cache(maxsize=1)
+def cuda_memory_mib() -> int:
+    """读取第一块 CUDA 显卡总显存，用于自动选择本地识别模型大小"""
+    return _query_nvidia_smi_mib("memory.total")
+
+
+@lru_cache(maxsize=1)
+def cuda_free_memory_mib() -> int:
+    """读取第一块 CUDA 显卡空闲显存；壁纸、浏览器等会常驻占用显存，必须按空闲量选模型"""
+    return _query_nvidia_smi_mib("memory.free")
+
+
 def default_gpu_asr_model_name() -> str:
-    """按 GPU 显存选择更准的模型，避免低显存机器被大模型拖垮"""
+    """优先按空闲显存选择模型，显存被其他程序占用时自动降级，避免推理中途显存不足崩溃"""
+    free_mib = cuda_free_memory_mib()
+    if free_mib >= 3500:
+        return "medium"
+    if free_mib >= 2000:
+        return "small"
+    if free_mib > 0:
+        return "base"
+    # 空闲显存查询失败时退回按总显存估算
     memory_mib = cuda_memory_mib()
     if memory_mib >= 7000:
         return "medium"
@@ -193,11 +212,15 @@ class LocalSpeechRecognizer:
                     )
                     progress_callback(min(95.0, 5.0 + end / duration * 90.0))
 
+            # 解码一次音频数组，供空洞补漏和 VAD 边界校准共用
+            audio_array = self._decode_audio_array(audio_path)
             # 二次补漏：长时间没字幕的空洞关闭 VAD 重识别，找回被 VAD 滤掉的轻声细语
-            rescued = self._rescue_gap_entries(audio_path, entries, duration, detected_language)
+            rescued = self._rescue_gap_entries(audio_array, entries, duration, detected_language)
             if rescued:
                 entries.extend(rescued)
                 entries.sort(key=lambda item: self._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
+            # 用 VAD 语音边界校准字幕起止，纠正单音节语气词字幕比声音慢的问题
+            self._calibrate_entries_with_vad(entries, audio_array)
         finally:
             # 识别结束后清理预处理生成的临时音频
             if temp_audio_path:
@@ -294,19 +317,21 @@ class LocalSpeechRecognizer:
         """静音超过该秒数时跳过其中的幻觉词，避免字幕挂在没有人声的位置"""
         return self._env_float("YTV_ASR_HALLUCINATION_SILENCE", 2.0, 0.5, 10.0)
 
-    def _rescue_gap_entries(self, audio_path: str, entries: list[dict], duration: float, language: str) -> list[dict]:
+    def _decode_audio_array(self, audio_path: str) -> Optional[Any]:
+        """把音频解码成 16k 采样数组，供补漏识别和 VAD 校准共用"""
+        try:
+            from faster_whisper.audio import decode_audio
+            return decode_audio(audio_path, sampling_rate=16000)
+        except Exception as exc:
+            logger.warning(f"音频解码失败，跳过空洞补漏和 VAD 校准: {exc}")
+            return None
+
+    def _rescue_gap_entries(self, audio: Optional[Any], entries: list[dict], duration: float, language: str) -> list[dict]:
         """对长时间没有字幕的空洞关闭 VAD 重新识别，找回被 VAD 过滤掉的轻声细语"""
-        if not self._gap_rescue_enabled():
+        if audio is None or not self._gap_rescue_enabled():
             return []
         gaps = self._find_uncovered_gaps(entries, duration)
         if not gaps:
-            return []
-
-        try:
-            from faster_whisper.audio import decode_audio
-            audio = decode_audio(audio_path, sampling_rate=16000)
-        except Exception as exc:
-            logger.warning(f"补漏识别加载音频失败，跳过空洞补漏: {exc}")
             return []
 
         model = self._load_model()
@@ -393,6 +418,77 @@ class LocalSpeechRecognizer:
             word_end = min(max_end, gap_start + float(getattr(word, "end", 0) or 0))
             words.append(SimpleNamespace(word=str(getattr(word, "word", "") or ""), start=word_start, end=word_end))
         return SimpleNamespace(start=start, end=max(start, end), text=str(getattr(segment, "text", "") or ""), words=words)
+
+    def _calibrate_entries_with_vad(self, entries: list[dict], audio: Optional[Any]) -> None:
+        """用 VAD 语音区间边界校准字幕起止：单音节语气词的词级对齐常偏慢，VAD 对声音起点更准"""
+        if audio is None or not entries or not self._vad_calibrate_enabled():
+            return
+        try:
+            from faster_whisper.vad import get_speech_timestamps, VadOptions
+            options = VadOptions(
+                threshold=self._env_float("YTV_ASR_VAD_THRESHOLD", 0.2, 0.05, 0.9),
+                min_speech_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
+                min_silence_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
+                speech_pad_ms=0,
+            )
+            regions = [(chunk["start"] / 16000.0, chunk["end"] / 16000.0) for chunk in get_speech_timestamps(audio, options)]
+        except Exception as exc:
+            logger.warning(f"VAD 边界校准失败，保留原始时间轴: {exc}")
+            return
+        if not regions:
+            return
+
+        # 把字幕时间换算成秒，并记录每个语音区间的第一条/最后一条字幕
+        timeline = [
+            [self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000")),
+             self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000")),
+             entry]
+            for entry in entries
+        ]
+        adjusted = 0
+        for index, item in enumerate(timeline):
+            start, end, entry = item
+            overlapping = [region for region in regions if start < region[1] and end > region[0]]
+            if not overlapping:
+                continue
+            first_region = overlapping[0]
+            last_region = overlapping[-1]
+            is_first_in_region = not any(
+                other is not item and other[0] < first_region[1] and other[1] > first_region[0] and other[0] < start
+                for other in timeline
+            )
+            is_last_in_region = not any(
+                other is not item and other[0] < last_region[1] and other[1] > last_region[0] and other[1] > end
+                for other in timeline
+            )
+            prev_end = timeline[index - 1][1] if index > 0 else 0.0
+            if is_first_in_region:
+                new_start = start
+                if start - first_region[0] > 0.3:
+                    # 字幕比语音起点慢时贴回语音边界，让声音一出字幕就出
+                    new_start = first_region[0] + 0.05
+                elif first_region[0] - start > 0.3:
+                    # 字幕比语音起点早时往后收，避免声音没出字幕先出
+                    new_start = first_region[0] - 0.1
+                new_start = max(new_start, prev_end)
+                if abs(new_start - start) > 0.01 and new_start < end:
+                    item[0] = new_start
+                    entry["start"] = self._seconds_to_srt_time(new_start)
+                    adjusted += 1
+            if is_last_in_region and end - last_region[1] > 0.5:
+                # 字幕结尾拖到语音结束之后太久时收回，避免声音停了字幕还挂着
+                new_end = last_region[1] + 0.25
+                if new_end > item[0]:
+                    item[1] = new_end
+                    entry["end"] = self._seconds_to_srt_time(new_end)
+                    adjusted += 1
+        if adjusted:
+            logger.info(f"VAD 边界校准调整了 {adjusted} 处字幕时间")
+
+    def _vad_calibrate_enabled(self) -> bool:
+        """读取 VAD 边界校准开关，默认开启提升音画同步"""
+        configured = str(os.environ.get("YTV_ASR_VAD_CALIBRATE") or "true").strip().lower()
+        return configured not in {"0", "false", "no", "off"}
 
     def _segment_to_entries(self, segment: Any) -> list[dict]:
         """优先用词级时间戳切分字幕，没有词时间戳时退回整段时间"""

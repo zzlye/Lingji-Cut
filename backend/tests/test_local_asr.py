@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.core.local_asr import LocalSpeechRecognizer, _MODEL_CACHE, cuda_device_count, cuda_memory_mib
+from backend.core.local_asr import LocalSpeechRecognizer, _MODEL_CACHE, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 
 
 class FakeSegment:
@@ -77,6 +77,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         _MODEL_CACHE.clear()
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
+        cuda_free_memory_mib.cache_clear()
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
         # 测试中关闭音频预处理，避免真实调用 ffmpeg
@@ -93,6 +94,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         _MODEL_CACHE.clear()
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
+        cuda_free_memory_mib.cache_clear()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_transcribe_video_uses_cpu_int8_defaults_and_returns_srt_entries(self):
@@ -138,6 +140,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
             patch("backend.core.local_asr.cuda_device_count", return_value=1),
             patch("backend.core.local_asr.cuda_memory_mib", return_value=4096),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=2500),
         ):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, language = recognizer.transcribe_video(self.video_path)
@@ -158,6 +161,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
             patch("backend.core.local_asr.cuda_device_count", return_value=1),
             patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
         ):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, language = recognizer.transcribe_video(self.video_path)
@@ -176,6 +180,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
             patch("backend.core.local_asr.cuda_device_count", return_value=1),
             patch("backend.core.local_asr.cuda_memory_mib", return_value=4096),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=2500),
         ):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, language = recognizer.transcribe_video(self.video_path)
@@ -468,6 +473,51 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         # 补漏调用必须关闭 VAD
         rescue_call = GapRescueWhisperModel.transcribe_calls[-1]
         self.assertFalse(rescue_call["vad_filter"])
+
+
+    def test_vad_calibration_fixes_late_and_dragging_subtitle(self):
+        """词级对齐偏慢的单音节字幕按 VAD 语音边界回贴，拖尾也会收回"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class LateWordWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    # 实际语音 0.3 秒就开始了，词级对齐却从 1.0 秒才开始
+                    FakeSegment(1.0, 2.8, "ignored", words=[FakeWord(1.0, 2.8, "なんでですかね?")]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = LateWordWhisperModel
+        fake_audio_module = types.ModuleType("faster_whisper.audio")
+        fake_audio_module.decode_audio = lambda path, sampling_rate=16000: [0.0] * (sampling_rate * 4)
+        fake_vad_module = types.ModuleType("faster_whisper.vad")
+
+        class FakeVadOptions:
+            """测试用 VAD 配置"""
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_vad_module.VadOptions = FakeVadOptions
+        # VAD 检测到的真实语音区间是 0.3 - 1.6 秒
+        fake_vad_module.get_speech_timestamps = lambda audio, options: [{"start": 4800, "end": 25600}]
+
+        with (
+            patch.dict(sys.modules, {
+                "faster_whisper": fake_module,
+                "faster_whisper.audio": fake_audio_module,
+                "faster_whisper.vad": fake_vad_module,
+            }),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(len(entries), 1)
+        # 开始时间贴回语音边界 0.3 + 0.05
+        self.assertEqual(entries[0]["start"], "00:00:00,350")
+        # 结尾收回到语音结束 1.6 + 0.25
+        self.assertEqual(entries[0]["end"], "00:00:01,850")
 
 
 if __name__ == "__main__":

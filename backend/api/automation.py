@@ -1702,7 +1702,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         ))
                         if processed_entries:
                             entries = processed_entries
-                            subtitle_was_translated = request.subtitle_operation == "translate"
+                            # 润色指定了目标语言时同样会产出译文，必须按翻译记录对照字幕
+                            subtitle_was_translated = request.subtitle_operation == "translate" or bool(target_language.strip())
                             subtitle_text = entries_to_plain_text(entries)
                     except TaskControlRequested:
                         raise
@@ -1720,7 +1721,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         processed_entries = map_text_to_timed_entries(processed_text, entries)
                         if processed_entries:
                             entries = processed_entries
-                            subtitle_was_translated = request.subtitle_operation == "translate"
+                            # 润色指定了目标语言时同样会产出译文，必须按翻译记录对照字幕
+                            subtitle_was_translated = request.subtitle_operation == "translate" or bool(target_language.strip())
                             subtitle_text = processed_text
                 except TaskControlRequested:
                     raise
