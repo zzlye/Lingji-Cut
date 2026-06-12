@@ -4,9 +4,12 @@
 import os
 import re
 import subprocess
+import tempfile
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
+from .tooling import get_ffmpeg_command
 from ..utils import get_logger
 
 
@@ -147,34 +150,44 @@ class LocalSpeechRecognizer:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"本地识别视频不存在: {video_path}")
 
+        # 预处理音频：响度归一化让低声说话更容易被识别，时间轴保持不变。
+        audio_path, temp_audio_path = self._prepare_audio(video_path)
         try:
-            segments, info = self._transcribe_with_model(video_path, language, progress_callback)
-        except Exception as exc:
-            if not self._should_fallback_to_cpu():
-                raise
-            logger.warning(f"GPU 本地识别失败，自动回退 CPU: {exc}")
-            self.device = "cpu"
-            if self.auto_model_name:
-                self.model_name = default_asr_model_name()
-            self.compute_type = os.environ.get("YTV_ASR_CPU_COMPUTE_TYPE") or "int8"
-            segments, info = self._transcribe_with_model(video_path, language, progress_callback)
+            try:
+                segments, info = self._transcribe_with_model(audio_path, language, progress_callback)
+            except Exception as exc:
+                if not self._should_fallback_to_cpu():
+                    raise
+                logger.warning(f"GPU 本地识别失败，自动回退 CPU: {exc}")
+                self.device = "cpu"
+                if self.auto_model_name:
+                    self.model_name = default_asr_model_name()
+                self.compute_type = os.environ.get("YTV_ASR_CPU_COMPUTE_TYPE") or "int8"
+                segments, info = self._transcribe_with_model(audio_path, language, progress_callback)
 
-        detected_language = str(getattr(info, "language", "") or language or "auto")
-        duration = float(getattr(info, "duration", 0) or 0)
-        entries: list[dict] = []
-        for segment in segments:
-            segment_entries = self._segment_to_entries(segment)
-            for entry in segment_entries:
-                if not str(entry.get("text") or "").strip():
-                    continue
-                entry["index"] = len(entries) + 1
-                entries.append(entry)
-            if progress_callback and duration > 0:
-                end = max(
-                    (self._srt_time_to_seconds(str(entry.get("end", "00:00:00,000"))) for entry in segment_entries),
-                    default=float(getattr(segment, "end", 0) or 0),
-                )
-                progress_callback(min(95.0, 5.0 + end / duration * 90.0))
+            detected_language = str(getattr(info, "language", "") or language or "auto")
+            duration = float(getattr(info, "duration", 0) or 0)
+            entries: list[dict] = []
+            for segment in segments:
+                segment_entries = self._segment_to_entries(segment)
+                for entry in segment_entries:
+                    if not str(entry.get("text") or "").strip():
+                        continue
+                    entry["index"] = len(entries) + 1
+                    entries.append(entry)
+                if progress_callback and duration > 0:
+                    end = max(
+                        (self._srt_time_to_seconds(str(entry.get("end", "00:00:00,000"))) for entry in segment_entries),
+                        default=float(getattr(segment, "end", 0) or 0),
+                    )
+                    progress_callback(min(95.0, 5.0 + end / duration * 90.0))
+        finally:
+            # 识别结束后清理预处理生成的临时音频
+            if temp_audio_path:
+                try:
+                    os.remove(temp_audio_path)
+                except OSError:
+                    pass
 
         if progress_callback:
             progress_callback(100)
@@ -206,14 +219,70 @@ class LocalSpeechRecognizer:
             word_timestamps=True,
             beam_size=self._beam_size(),
             no_speech_threshold=self._no_speech_threshold(),
+            hallucination_silence_threshold=self._hallucination_silence_threshold(),
             condition_on_previous_text=False,
         )
+
+    def _prepare_audio(self, video_path: str) -> tuple[str, Optional[str]]:
+        """提取 16k 单声道音频并做响度归一化，返回(识别用路径, 待清理临时文件)"""
+        if not self._preprocess_enabled():
+            return video_path, None
+
+        temp_path = ""
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix="ytv_asr_", suffix=".wav")
+            os.close(fd)
+            result = subprocess.run(
+                [
+                    get_ffmpeg_command(),
+                    "-y",
+                    "-i", video_path,
+                    "-vn",
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "-af", self._audio_filter(),
+                    "-c:a", "pcm_s16le",
+                    temp_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=900,
+                check=False,
+            )
+            if result.returncode == 0 and os.path.getsize(temp_path) > 44:
+                logger.info("本地识别音频预处理完成，已做人声响度归一化")
+                return temp_path, temp_path
+            logger.warning(f"音频预处理失败(code={result.returncode})，使用原始视频识别")
+        except Exception as exc:
+            logger.warning(f"音频预处理异常，使用原始视频识别: {exc}")
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return video_path, None
+
+    def _preprocess_enabled(self) -> bool:
+        """读取音频预处理开关，默认开启以提升低声说话的识别率"""
+        configured = str(os.environ.get("YTV_ASR_PREPROCESS") or "true").strip().lower()
+        return configured not in {"0", "false", "no", "off"}
+
+    def _audio_filter(self) -> str:
+        """识别前的音频滤镜：滤掉低频隆隆声并做响度归一化，把低声说话抬到可识别响度"""
+        return os.environ.get("YTV_ASR_AUDIO_FILTER") or "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11"
+
+    def _hallucination_silence_threshold(self) -> float:
+        """静音超过该秒数时跳过其中的幻觉词，避免字幕挂在没有人声的位置"""
+        return self._env_float("YTV_ASR_HALLUCINATION_SILENCE", 2.0, 0.5, 10.0)
 
     def _segment_to_entries(self, segment: Any) -> list[dict]:
         """优先用词级时间戳切分字幕，没有词时间戳时退回整段时间"""
         words = [word for word in (getattr(segment, "words", None) or []) if str(getattr(word, "word", "") or "").strip()]
         if not words:
             return [self._segment_fallback_entry(segment)]
+        words = self._sanitize_words(words)
 
         entries: list[dict] = []
         current: list[Any] = []
@@ -248,6 +317,32 @@ class LocalSpeechRecognizer:
         if current:
             entries.append(self._words_to_entry(current))
         return entries or [self._segment_fallback_entry(segment)]
+
+    def _sanitize_words(self, words: list[Any]) -> list[Any]:
+        """钳制词级时间戳，纠正背景音乐导致的单词拉长和时间倒退"""
+        sanitized: list[Any] = []
+        prev_end: Optional[float] = None
+        for word in words:
+            text = str(getattr(word, "word", "") or "")
+            start = float(getattr(word, "start", 0) or 0)
+            end = float(getattr(word, "end", start) or start)
+            # 词开始时间早于上一个词结尾时，贴回上一个词的结尾，避免字幕提前出现
+            if prev_end is not None and start < prev_end:
+                start = prev_end
+            if end < start:
+                end = start
+            # 单词被对齐算法拉长时按字数封顶，避免字幕在声音结束后仍然滞留
+            max_duration = self._max_word_duration(text)
+            if end - start > max_duration:
+                end = start + max_duration
+            sanitized.append(SimpleNamespace(word=text, start=start, end=end))
+            prev_end = end
+        return sanitized
+
+    def _max_word_duration(self, text: str) -> float:
+        """按字符数估算单个词的最长合理发音时长"""
+        chars = len(text.strip())
+        return min(3.0, 0.6 + 0.15 * max(1, chars))
 
     def _segment_fallback_entry(self, segment: Any) -> dict:
         """把 Whisper 整段结果转换成字幕条目"""
@@ -456,7 +551,8 @@ class LocalSpeechRecognizer:
             "threshold": self._env_float("YTV_ASR_VAD_THRESHOLD", 0.3, 0.05, 0.9),
             "min_speech_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
             "min_silence_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
-            "speech_pad_ms": self._env_int("YTV_ASR_VAD_SPEECH_PAD_MS", 300, 0, 1000),
+            # 垫片过大字幕会比声音早出，200ms 在保留词首和音画同步之间取平衡
+            "speech_pad_ms": self._env_int("YTV_ASR_VAD_SPEECH_PAD_MS", 200, 0, 1000),
         }
 
     def _no_speech_threshold(self) -> float:

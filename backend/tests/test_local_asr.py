@@ -79,6 +79,9 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         cuda_memory_mib.cache_clear()
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
+        # 测试中关闭音频预处理，避免真实调用 ffmpeg
+        self.env_patcher = patch.dict(os.environ, {"YTV_ASR_PREPROCESS": "0"})
+        self.env_patcher.start()
         self.temp_dir = tempfile.mkdtemp(prefix="local_asr_")
         self.video_path = os.path.join(self.temp_dir, "input.mp4")
         with open(self.video_path, "wb") as file:
@@ -86,6 +89,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
 
     def tearDown(self):
         """清理测试文件和模型缓存"""
+        self.env_patcher.stop()
         _MODEL_CACHE.clear()
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
@@ -119,6 +123,10 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["no_speech_threshold"], 0.85)
         self.assertTrue(FakeWhisperModel.transcribe_calls[0]["word_timestamps"])
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["beam_size"], 3)
+        # 必须启用抗幻觉静音阈值，避免长静音里出现幻觉字幕
+        self.assertGreaterEqual(FakeWhisperModel.transcribe_calls[0]["hallucination_silence_threshold"], 0.5)
+        # 垫片不能太大，否则字幕会比声音早出
+        self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["vad_parameters"]["speech_pad_ms"], 250)
         self.assertEqual(progress_values[-1], 100)
 
     def test_transcribe_video_prefers_gpu_when_cuda_is_available(self):
@@ -337,6 +345,78 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         merged_density = next(entry for entry in entries if entry["text"].startswith("A density mace"))
         self.assertEqual(merged_shield["end"], "00:01:14,400")
         self.assertEqual(merged_density["start"], "00:01:54,860")
+
+
+    def test_word_timestamps_cap_overlong_single_word(self):
+        """背景音乐导致单词时间被拉长时，按字数封顶避免字幕滞留"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class StretchedWordWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    # "god" 实际发音不到 1 秒，却被对齐拉长到 3.2 秒
+                    FakeSegment(10.31, 13.51, "ignored", words=[
+                        FakeWord(10.31, 13.51, " god"),
+                    ]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = StretchedWordWhisperModel
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["start"], "00:00:10,310")
+        # 3 个字符的词最长 0.6 + 0.15*3 = 1.05 秒
+        self.assertEqual(entries[0]["end"], "00:00:11,360")
+
+    def test_word_timestamps_fix_backward_word_start(self):
+        """词开始时间倒退到上一个词之前时贴回边界，避免字幕提前出现"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class BackwardWordWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    FakeSegment(5.0, 8.0, "ignored", words=[
+                        FakeWord(5.0, 6.0, " hello"),
+                        # 开始时间异常回退到 4.2，应贴回 6.0
+                        FakeWord(4.2, 7.0, " world"),
+                    ]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = BackwardWordWhisperModel
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(entries[0]["start"], "00:00:05,000")
+        self.assertEqual(entries[-1]["end"], "00:00:07,000")
+
+    def test_prepare_audio_falls_back_to_original_when_ffmpeg_fails(self):
+        """音频预处理失败时回退用原始视频识别，不影响整体流程"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {"YTV_ASR_PREPROCESS": "1"}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+            patch("backend.core.local_asr.get_ffmpeg_command", return_value="ffmpeg-not-exists.exe"),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        self.assertTrue(entries)
+        # 预处理失败时识别输入必须回退到原始视频路径
+        self.assertEqual(FakeWhisperModel.transcribe_calls[0]["video_path"], self.video_path)
 
 
 if __name__ == "__main__":
