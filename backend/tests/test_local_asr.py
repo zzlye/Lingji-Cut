@@ -418,6 +418,57 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         # 预处理失败时识别输入必须回退到原始视频路径
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["video_path"], self.video_path)
 
+    def test_gap_rescue_recovers_quiet_speech_dropped_by_vad(self):
+        """长空洞关闭 VAD 补漏识别，找回轻声细语并过滤幻觉字幕"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class QuietSegment(FakeSegment):
+            """测试用补漏片段，携带置信度信息"""
+
+            def __init__(self, start, end, text, words=None, no_speech_prob=0.1, avg_logprob=-0.5):
+                super().__init__(start, end, text, words)
+                self.no_speech_prob = no_speech_prob
+                self.avg_logprob = avg_logprob
+                self.compression_ratio = 1.2
+
+        class GapRescueWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                if kwargs.get("vad_filter"):
+                    # 第一遍：VAD 把 1 秒之后的轻声全部滤掉了
+                    return [
+                        FakeSegment(0.0, 1.0, "ignored", words=[FakeWord(0.0, 1.0, "正常音量")]),
+                    ], FakeInfo()
+                # 第二遍补漏：返回一条轻声字幕和一条应被过滤的幻觉字幕
+                return [
+                    QuietSegment(0.5, 1.5, "ささやき", words=[FakeWord(0.5, 1.5, "ささやき")]),
+                    QuietSegment(2.0, 2.5, "ご視聴ありがとうございました", no_speech_prob=0.1),
+                    QuietSegment(2.6, 2.8, "音楽幻覚", no_speech_prob=0.9),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = GapRescueWhisperModel
+        fake_audio_module = types.ModuleType("faster_whisper.audio")
+        fake_audio_module.decode_audio = lambda path, sampling_rate=16000: [0.0] * (sampling_rate * 4)
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module, "faster_whisper.audio": fake_audio_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        texts = [entry["text"] for entry in entries]
+        # 轻声字幕被找回，时间平移回完整时间轴(空洞起点 1.05 + 相对 0.5)
+        self.assertIn("ささやき", texts)
+        rescued = next(entry for entry in entries if entry["text"] == "ささやき")
+        self.assertEqual(rescued["start"], "00:00:01,550")
+        # 幻觉句式和高静音概率的片段必须被过滤
+        self.assertNotIn("ご視聴ありがとうございました", texts)
+        self.assertNotIn("音楽幻覚", texts)
+        # 补漏调用必须关闭 VAD
+        rescue_call = GapRescueWhisperModel.transcribe_calls[-1]
+        self.assertFalse(rescue_call["vad_filter"])
+
 
 if __name__ == "__main__":
     unittest.main()

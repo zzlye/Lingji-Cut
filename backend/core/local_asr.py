@@ -15,6 +15,17 @@ from ..utils import get_logger
 
 logger = get_logger("local_asr")
 TERMINAL_PUNCTUATION = "，。、！？；,.!?;:："
+# Whisper 在无人声段常见的幻觉句式，补漏识别时直接丢弃
+HALLUCINATION_PHRASES = (
+    "ご視聴ありがとう",
+    "チャンネル登録",
+    "次の動画でお会いしましょう",
+    "字幕作成者",
+    "感谢观看",
+    "请订阅",
+    "Thanks for watching",
+    "Subscribe to",
+)
 LEADING_FRAGMENT_WORDS = {
     "a",
     "an",
@@ -181,6 +192,12 @@ class LocalSpeechRecognizer:
                         default=float(getattr(segment, "end", 0) or 0),
                     )
                     progress_callback(min(95.0, 5.0 + end / duration * 90.0))
+
+            # 二次补漏：长时间没字幕的空洞关闭 VAD 重识别，找回被 VAD 滤掉的轻声细语
+            rescued = self._rescue_gap_entries(audio_path, entries, duration, detected_language)
+            if rescued:
+                entries.extend(rescued)
+                entries.sort(key=lambda item: self._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
         finally:
             # 识别结束后清理预处理生成的临时音频
             if temp_audio_path:
@@ -276,6 +293,106 @@ class LocalSpeechRecognizer:
     def _hallucination_silence_threshold(self) -> float:
         """静音超过该秒数时跳过其中的幻觉词，避免字幕挂在没有人声的位置"""
         return self._env_float("YTV_ASR_HALLUCINATION_SILENCE", 2.0, 0.5, 10.0)
+
+    def _rescue_gap_entries(self, audio_path: str, entries: list[dict], duration: float, language: str) -> list[dict]:
+        """对长时间没有字幕的空洞关闭 VAD 重新识别，找回被 VAD 过滤掉的轻声细语"""
+        if not self._gap_rescue_enabled():
+            return []
+        gaps = self._find_uncovered_gaps(entries, duration)
+        if not gaps:
+            return []
+
+        try:
+            from faster_whisper.audio import decode_audio
+            audio = decode_audio(audio_path, sampling_rate=16000)
+        except Exception as exc:
+            logger.warning(f"补漏识别加载音频失败，跳过空洞补漏: {exc}")
+            return []
+
+        model = self._load_model()
+        clip_language = None if not language or language == "auto" else language
+        rescued: list[dict] = []
+        for gap_start, gap_end in gaps:
+            clip = audio[int(gap_start * 16000):int(gap_end * 16000)]
+            # 不足 0.4 秒的空洞没有补漏价值
+            if len(clip) < int(16000 * 0.4):
+                continue
+            try:
+                segments, _ = model.transcribe(
+                    clip,
+                    language=clip_language,
+                    vad_filter=False,
+                    word_timestamps=True,
+                    beam_size=self._beam_size(),
+                    no_speech_threshold=self._no_speech_threshold(),
+                    hallucination_silence_threshold=self._hallucination_silence_threshold(),
+                    condition_on_previous_text=False,
+                )
+                for segment in segments:
+                    if not self._rescue_segment_acceptable(segment):
+                        continue
+                    shifted = self._shift_segment(segment, gap_start, gap_end)
+                    for entry in self._segment_to_entries(shifted):
+                        if str(entry.get("text") or "").strip():
+                            rescued.append(entry)
+            except Exception as exc:
+                logger.warning(f"补漏识别空洞 {gap_start:.1f}-{gap_end:.1f}s 失败: {exc}")
+        if rescued:
+            logger.info(f"补漏识别从 {len(gaps)} 个空洞中找回 {len(rescued)} 条轻声字幕")
+        return rescued
+
+    def _gap_rescue_enabled(self) -> bool:
+        """读取空洞补漏开关，默认开启保证轻声细语也能出字幕"""
+        configured = str(os.environ.get("YTV_ASR_GAP_RESCUE") or "true").strip().lower()
+        return configured not in {"0", "false", "no", "off"}
+
+    def _find_uncovered_gaps(self, entries: list[dict], duration: float) -> list[tuple[float, float]]:
+        """找出相邻字幕之间超过阈值的无字幕时段，包含片头和片尾"""
+        min_gap = self._env_float("YTV_ASR_GAP_RESCUE_MIN_S", 2.5, 1.0, 30.0)
+        boundaries: list[tuple[float, float]] = []
+        prev_end = 0.0
+        for entry in entries:
+            start = self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
+            end = self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000"))
+            if start - prev_end >= min_gap:
+                boundaries.append((prev_end, start))
+            prev_end = max(prev_end, end)
+        if duration > 0 and duration - prev_end >= min_gap:
+            boundaries.append((prev_end, duration))
+        # 留出 50ms 边距，避免补漏字幕和原字幕首尾重叠
+        return [(max(0.0, start + 0.05), end - 0.05) for start, end in boundaries if end - start >= min_gap]
+
+    def _rescue_segment_acceptable(self, segment: Any) -> bool:
+        """补漏识别用更严格的门槛过滤，避免背景音乐被识别成幻觉字幕"""
+        text = " ".join(str(getattr(segment, "text", "") or "").split())
+        if not text:
+            return False
+        # 命中常见幻觉句式直接丢弃
+        for phrase in HALLUCINATION_PHRASES:
+            if phrase.lower() in text.lower():
+                return False
+        no_speech_prob = float(getattr(segment, "no_speech_prob", 0) or 0)
+        if no_speech_prob > self._env_float("YTV_ASR_RESCUE_NO_SPEECH", 0.5, 0.1, 1.0):
+            return False
+        avg_logprob = float(getattr(segment, "avg_logprob", 0) or 0)
+        if avg_logprob < self._env_float("YTV_ASR_RESCUE_MIN_LOGPROB", -1.25, -3.0, 0.0):
+            return False
+        compression_ratio = float(getattr(segment, "compression_ratio", 1) or 1)
+        if compression_ratio > self._env_float("YTV_ASR_RESCUE_MAX_COMPRESSION", 2.6, 1.0, 10.0):
+            return False
+        return True
+
+    def _shift_segment(self, segment: Any, gap_start: float, gap_end: float) -> Any:
+        """把空洞内识别的相对时间平移回完整视频时间轴，并限制在空洞范围内"""
+        max_end = gap_end + 0.3
+        start = min(max_end, gap_start + float(getattr(segment, "start", 0) or 0))
+        end = min(max_end, gap_start + float(getattr(segment, "end", 0) or 0))
+        words = []
+        for word in (getattr(segment, "words", None) or []):
+            word_start = min(max_end, gap_start + float(getattr(word, "start", 0) or 0))
+            word_end = min(max_end, gap_start + float(getattr(word, "end", 0) or 0))
+            words.append(SimpleNamespace(word=str(getattr(word, "word", "") or ""), start=word_start, end=word_end))
+        return SimpleNamespace(start=start, end=max(start, end), text=str(getattr(segment, "text", "") or ""), words=words)
 
     def _segment_to_entries(self, segment: Any) -> list[dict]:
         """优先用词级时间戳切分字幕，没有词时间戳时退回整段时间"""
@@ -548,7 +665,8 @@ class LocalSpeechRecognizer:
     def _vad_parameters(self) -> dict[str, int | float]:
         """生成更适合短视频低音量说话的 VAD 参数"""
         return {
-            "threshold": self._env_float("YTV_ASR_VAD_THRESHOLD", 0.3, 0.05, 0.9),
+            # 阈值偏低优先抓到轻声说话，纯音乐误入由补漏门槛和抗幻觉参数兜底
+            "threshold": self._env_float("YTV_ASR_VAD_THRESHOLD", 0.2, 0.05, 0.9),
             "min_speech_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
             "min_silence_duration_ms": self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
             # 垫片过大字幕会比声音早出，200ms 在保留词首和音画同步之间取平衡
