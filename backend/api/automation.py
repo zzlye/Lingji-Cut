@@ -367,9 +367,9 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
     for stage in _load_job_stages(job):
         status = str(stage.get("status"))
         error_message = stage.get("error_message")
-        if job.status == CANCELLED_STATUS and status in {"pending", "running", "paused"}:
+        if job.status == CANCELLED_STATUS and status in {"pending", "running", "paused", CANCELLED_STATUS}:
             status = CANCELLED_STATUS
-            error_message = error_message or "任务已取消"
+            error_message = job.error_message or error_message or "任务已取消"
         stages.append(AutomationStageResult(
             key=str(stage.get("key")),
             status=status,
@@ -2214,7 +2214,7 @@ def _cancel_job(db: Session, job: AutomationJobRecord, message: str = "用户取
     mark_job_child_tasks_controlled(db, job, CANCELLED_STATUS, message)
     stages = _load_job_stages(job)
     for stage in stages:
-        if stage.get("status") in {"running", "pending", "paused"}:
+        if stage.get("status") in {"running", "pending", "paused", CANCELLED_STATUS}:
             stage["status"] = CANCELLED_STATUS
             stage["error_message"] = message
     job.status = CANCELLED_STATUS

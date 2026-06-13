@@ -698,6 +698,25 @@ class AutomationJobTests(unittest.TestCase):
         self.assertTrue(cancelled_response.can_retry)
         self.assertIsNotNone(job.completed_at)
 
+    def test_cancelled_job_response_prefers_latest_cancel_message(self):
+        """已取消任务返回时用当前取消原因覆盖阶段里的旧中断提示"""
+        job = AutomationJobRecord(
+            id="auto-cancel-message",
+            source_url="https://youtube.com/watch?v=test",
+            status="cancelled",
+            current_step="已取消",
+            error_message="用户取消",
+            stages=json.dumps([
+                {"key": "parse", "status": "cancelled", "progress": 0, "task_id": None, "output_path": None, "error_message": "后端重启前任务已中断，请点击继续重新执行"},
+                {"key": "download", "status": "cancelled", "progress": 0, "task_id": None, "output_path": None, "error_message": "后端重启前任务已中断，请点击继续重新执行"},
+            ], ensure_ascii=False),
+        )
+
+        response = _job_to_response(job)
+
+        self.assertEqual(response.error_message, "用户取消")
+        self.assertTrue(all(stage.error_message == "用户取消" for stage in response.stages))
+
     def test_skip_effects_controls_only_current_effects_task(self):
         """跳过画面处理只控制当前阶段任务，不能污染后续字幕和导出"""
         stages = [
