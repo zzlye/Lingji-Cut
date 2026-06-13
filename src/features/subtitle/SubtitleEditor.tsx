@@ -258,6 +258,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="auto" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">一键完成字幕策略</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
+                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[{ value: 'local', label: '本地识别（快·免费）' }, { value: 'gemini_full', label: 'Gemini 转写（最准·较慢·走文本API）' }, { value: 'gemini_align', label: 'Gemini 内容+本地时间轴' }]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode }))} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
                 <SelectField label="文本 API 处理" value={automationOptions.subtitle_operation} options={SUBTITLE_OP_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_operation: v as typeof automationOptions.subtitle_operation }))} description="需先在「文本 API」配置渠道" />
                 <SelectField label="输出语言" value={automationOptions.subtitle_target_language || ''} options={TARGET_LANG_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_target_language: v }))} />
                 <SwitchField label="默认烧录硬字幕" description="导出时把字幕烧进画面" checked={automationOptions.burn_subtitles} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: v }))} />

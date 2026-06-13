@@ -8,6 +8,7 @@ from .subtitle_engine import SubtitleEngine
 from .voice_engine import VoiceEngine
 from .text_engine import TextEngine
 from .local_asr import LocalSpeechRecognizer
+from .audio_transcriber import GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
 
 __all__ = [
     "Downloader",
@@ -17,4 +18,6 @@ __all__ = [
     "VoiceEngine",
     "TextEngine",
     "LocalSpeechRecognizer",
+    "GeminiAudioTranscriber",
+    "align_gemini_content_to_whisper_timeline",
 ]

@@ -43,6 +43,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
       ? preferences.subtitle_language
       : undefined,
     text_profile_id: textProfileId,
+    subtitle_recognition_mode: preferences.subtitle_recognition_mode,
     subtitle_operation: preferences.subtitle_operation,
     subtitle_target_language: subtitleTargetLanguage,
     burn_subtitles: preferences.burn_subtitles,

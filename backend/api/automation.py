@@ -16,14 +16,14 @@ from glob import glob
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from threading import Lock, Semaphore
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine
+from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
@@ -115,6 +115,7 @@ class AutomationRunRequest(BaseModel):
     subtitle_preset_id: Optional[int] = None
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
+    subtitle_recognition_mode: str = "local"
     subtitle_operation: str = "none"
     subtitle_target_language: Optional[str] = None
     burn_subtitles: bool = True
@@ -995,6 +996,66 @@ SUBTITLE_API_OPERATION_LABELS = {
     "polish": "润色",
 }
 
+# 字幕识别方式：本地 Whisper / Gemini 全片转写 / Gemini 内容+本地时间轴
+SUBTITLE_RECOGNITION_MODES = {"local", "gemini_full", "gemini_align"}
+
+
+def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> GeminiAudioTranscriber:
+    """按文本 API 配置构造 Gemini 音频识别器，缺配置时报错拦截"""
+    profile = _pick_text_profile(db, request.text_profile_id)
+    if not profile:
+        raise RuntimeError("Gemini 识别需要先在「文本 API」里配置 Gemini 渠道")
+    api_key = decrypt_api_key(profile.api_key_encrypted)
+    settings = _load_profile_settings(profile)
+    # 识别模型独立于翻译模型：flash 类模型转写音频会编造内容，默认用已验证可靠的 gemini-2.5-pro
+    asr_model = os.environ.get("YTV_GEMINI_ASR_MODEL") or (profile.model or "gemini-2.5-pro")
+    return GeminiAudioTranscriber(
+        provider_type=profile.provider_type,
+        api_key=api_key,
+        base_url=profile.base_url,
+        model=asr_model,
+        settings=settings,
+    )
+
+
+def _recognize_subtitle_entries(
+    db: Session,
+    request: "AutomationRunRequest",
+    video_path: str,
+    progress_callback: Callable[[float], None],
+) -> tuple[list[dict], str]:
+    """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
+    mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    if mode == "gemini_full":
+        # 方案2：Gemini 分段转写整片，时间戳由内部 VAD 边界校准
+        return _build_gemini_transcriber(db, request).transcribe_video(
+            video_path=video_path,
+            progress_callback=progress_callback,
+        )
+    if mode == "gemini_align":
+        # 方案3：本地识别出精确时间轴骨架，Gemini 出准确内容，按时间重叠对齐
+        whisper_entries, language = LocalSpeechRecognizer().transcribe_video(
+            video_path=video_path,
+            progress_callback=lambda value: progress_callback(value * 0.5),
+        )
+        gemini_entries, _ = _build_gemini_transcriber(db, request).transcribe_video(
+            video_path=video_path,
+            progress_callback=lambda value: progress_callback(50.0 + value * 0.5),
+        )
+        asr = LocalSpeechRecognizer()
+        aligned = align_gemini_content_to_whisper_timeline(
+            whisper_entries,
+            gemini_entries,
+            asr._srt_time_to_seconds,
+            asr._seconds_to_srt_time,
+        )
+        return aligned, language
+    # 默认本地 Whisper 识别
+    return LocalSpeechRecognizer().transcribe_video(
+        video_path=video_path,
+        progress_callback=progress_callback,
+    )
+
 
 def _profile_has_saved_api_key(profile: VoiceProviderProfile | TextProviderProfile) -> bool:
     """判断配置是否真的保存过可用密钥，避免空密钥任务进入后台后才失败"""
@@ -1017,6 +1078,17 @@ def _validate_saved_api_profile(profile: VoiceProviderProfile | TextProviderProf
 
 def validate_automation_request_profiles(db: Session, request: AutomationRunRequest) -> None:
     """一键流程启动前校验 API 配置，缺配置时直接拦截而不是生成卡住任务"""
+    # Gemini 识别方式依赖文本 API 渠道，缺配置时提前拦截
+    recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    if recognition_mode in {"gemini_full", "gemini_align"}:
+        text_profile = _pick_text_profile(db, request.text_profile_id)
+        if not text_profile:
+            raise HTTPException(
+                status_code=400,
+                detail="当前字幕识别方式用 Gemini，需要先在 设置 > 文本 API 保存可用的 Gemini 渠道",
+            )
+        _validate_saved_api_profile(text_profile, "文本 API")
+
     operation_label = SUBTITLE_API_OPERATION_LABELS.get(request.subtitle_operation)
     if operation_label:
         text_profile = _pick_text_profile(db, request.text_profile_id)
@@ -1654,9 +1726,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if job:
                     _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
 
-            entries, language = LocalSpeechRecognizer().transcribe_video(
-                video_path=effects_path,
-                progress_callback=on_asr_progress,
+            entries, language = _recognize_subtitle_entries(
+                db,
+                request,
+                effects_path,
+                on_asr_progress,
             )
             subtitle_path = os.path.join(paths["output_dir"], f"{video.video_id}_{language}_local.srt")
             engine.save_srt(entries, subtitle_path)
@@ -1786,6 +1860,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 "subtitle_ass_path": subtitle_ass_path,
                 "rendered_video_path": video_for_export if request.burn_subtitles else None,
                 "subtitle_language": language,
+                "recognition_mode": (request.subtitle_recognition_mode or "local").strip().lower(),
             }, ensure_ascii=False)
             db.commit()
             stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))

@@ -27,6 +27,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_preset_id: null,
   subtitle_language: 'auto',
   text_profile_id: null,
+  subtitle_recognition_mode: 'local',
   subtitle_operation: 'polish',
   subtitle_target_language: 'zh-CN',
   burn_subtitles: true,
@@ -136,6 +137,9 @@ export function loadAutomationPreferences(): AutomationPreferences {
       enable_effects: parsed.enable_effects !== false,
       subtitle_preset_id: normalizeId(parsed.subtitle_preset_id),
       text_profile_id: normalizeId(parsed.text_profile_id),
+      subtitle_recognition_mode: ['local', 'gemini_full', 'gemini_align'].includes(parsed.subtitle_recognition_mode)
+        ? parsed.subtitle_recognition_mode
+        : 'local',
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),

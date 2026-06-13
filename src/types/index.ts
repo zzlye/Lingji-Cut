@@ -285,6 +285,9 @@ export interface AutomationBatchControlResponse {
 /** 自动化字幕文本处理方式 */
 export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
 
+/** 字幕识别方式：本地 Whisper / Gemini 全片转写 / Gemini 内容+本地时间轴 */
+export type SubtitleRecognitionMode = 'local' | 'gemini_full' | 'gemini_align'
+
 /** 配音说话人音色配置 */
 export interface VoiceSpeakerProfile {
   id: string
@@ -319,6 +322,7 @@ export interface AutomationPreferences {
   subtitle_preset_id: number | null
   subtitle_language: string
   text_profile_id: number | null
+  subtitle_recognition_mode: SubtitleRecognitionMode
   subtitle_operation: SubtitleTextOperation
   subtitle_target_language: string
   burn_subtitles: boolean
