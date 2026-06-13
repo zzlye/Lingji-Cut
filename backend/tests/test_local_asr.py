@@ -424,7 +424,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["video_path"], self.video_path)
 
     def test_gap_rescue_recovers_quiet_speech_dropped_by_vad(self):
-        """长空洞关闭 VAD 补漏识别，找回轻声细语并过滤幻觉字幕"""
+        """VAD 检测到有语音但字幕没覆盖的漏区关闭 VAD 补漏，找回轻声细语并过滤幻觉字幕"""
         fake_module = types.ModuleType("faster_whisper")
 
         class QuietSegment(FakeSegment):
@@ -440,33 +440,44 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             def transcribe(self, video_path, **kwargs):
                 self.transcribe_calls.append({"video_path": video_path, **kwargs})
                 if kwargs.get("vad_filter"):
-                    # 第一遍：VAD 把 1 秒之后的轻声全部滤掉了
+                    # 第一遍主识别只覆盖 0-1 秒，2 秒后的轻声被主识别漏掉
                     return [
                         FakeSegment(0.0, 1.0, "ignored", words=[FakeWord(0.0, 1.0, "正常音量")]),
                     ], FakeInfo()
-                # 第二遍补漏：返回一条轻声字幕和一条应被过滤的幻觉字幕
+                # 第二遍补漏(关 VAD)：clip 从漏区前留 0.3 秒上下文起算，返回相对时间
                 return [
-                    QuietSegment(0.5, 1.5, "ささやき", words=[FakeWord(0.5, 1.5, "ささやき")]),
-                    QuietSegment(2.0, 2.5, "ご視聴ありがとうございました", no_speech_prob=0.1),
-                    QuietSegment(2.6, 2.8, "音楽幻覚", no_speech_prob=0.9),
+                    QuietSegment(0.3, 1.3, "ささやき", words=[FakeWord(0.3, 1.3, "ささやき")]),
+                    QuietSegment(1.5, 2.0, "ご視聴ありがとうございました", no_speech_prob=0.1),
+                    QuietSegment(2.1, 2.3, "音楽幻覚", no_speech_prob=0.9),
                 ], FakeInfo()
 
         fake_module.WhisperModel = GapRescueWhisperModel
         fake_audio_module = types.ModuleType("faster_whisper.audio")
         fake_audio_module.decode_audio = lambda path, sampling_rate=16000: [0.0] * (sampling_rate * 4)
+        fake_vad_module = types.ModuleType("faster_whisper.vad")
+        fake_vad_module.VadOptions = lambda **kwargs: types.SimpleNamespace(**kwargs)
+        # VAD 检测到 0-1 秒和 2-3 秒两段语音，后一段没字幕覆盖应触发补漏
+        fake_vad_module.get_speech_timestamps = lambda audio, options: [
+            {"start": 0, "end": 16000},
+            {"start": 32000, "end": 48000},
+        ]
 
         with (
-            patch.dict(sys.modules, {"faster_whisper": fake_module, "faster_whisper.audio": fake_audio_module}),
+            patch.dict(sys.modules, {
+                "faster_whisper": fake_module,
+                "faster_whisper.audio": fake_audio_module,
+                "faster_whisper.vad": fake_vad_module,
+            }),
             patch("backend.core.local_asr.cuda_device_count", return_value=0),
         ):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, _ = recognizer.transcribe_video(self.video_path)
 
         texts = [entry["text"] for entry in entries]
-        # 轻声字幕被找回，时间平移回完整时间轴(空洞起点 1.05 + 相对 0.5)
+        # 轻声字幕被找回，相对 0.3 秒平移回漏区起点 2.0 秒
         self.assertIn("ささやき", texts)
         rescued = next(entry for entry in entries if entry["text"] == "ささやき")
-        self.assertEqual(rescued["start"], "00:00:01,550")
+        self.assertEqual(rescued["start"], "00:00:02,000")
         # 幻觉句式和高静音概率的片段必须被过滤
         self.assertNotIn("ご視聴ありがとうございました", texts)
         self.assertNotIn("音楽幻覚", texts)
@@ -482,6 +493,9 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         class LateWordWhisperModel(FakeWhisperModel):
             def transcribe(self, video_path, **kwargs):
                 self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                if not kwargs.get("vad_filter"):
+                    # 补漏阶段(关 VAD)不返回内容，本用例专注验证边界校准
+                    return [], FakeInfo()
                 return [
                     # 实际语音 0.3 秒就开始了，词级对齐却从 1.0 秒才开始
                     FakeSegment(1.0, 2.8, "ignored", words=[FakeWord(1.0, 2.8, "なんでですかね?")]),

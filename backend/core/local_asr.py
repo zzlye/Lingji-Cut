@@ -214,13 +214,14 @@ class LocalSpeechRecognizer:
 
             # 解码一次音频数组，供空洞补漏和 VAD 边界校准共用
             audio_array = self._decode_audio_array(audio_path)
-            # 二次补漏：长时间没字幕的空洞关闭 VAD 重识别，找回被 VAD 滤掉的轻声细语
-            rescued = self._rescue_gap_entries(audio_array, entries, duration, detected_language)
+            # 计算一次 VAD 语音区间，补漏和边界校准复用，避免重复跑 VAD
+            vad_regions = self._compute_vad_regions(audio_array)
+            # 二次补漏：凡是 VAD 检测到有语音但字幕没覆盖的地方都重识别，找回被主识别漏掉的短语音
+            rescued = self._rescue_gap_entries(audio_array, entries, vad_regions, detected_language)
             if rescued:
-                entries.extend(rescued)
-                entries.sort(key=lambda item: self._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
+                entries = self._merge_rescued_entries(entries, rescued)
             # 用 VAD 语音边界校准字幕起止，纠正单音节语气词字幕比声音慢的问题
-            self._calibrate_entries_with_vad(entries, audio_array)
+            self._calibrate_entries_with_vad(entries, vad_regions)
         finally:
             # 识别结束后清理预处理生成的临时音频
             if temp_audio_path:
@@ -326,21 +327,43 @@ class LocalSpeechRecognizer:
             logger.warning(f"音频解码失败，跳过空洞补漏和 VAD 校准: {exc}")
             return None
 
-    def _rescue_gap_entries(self, audio: Optional[Any], entries: list[dict], duration: float, language: str) -> list[dict]:
-        """对长时间没有字幕的空洞关闭 VAD 重新识别，找回被 VAD 过滤掉的轻声细语"""
-        if audio is None or not self._gap_rescue_enabled():
+    def _compute_vad_regions(self, audio: Optional[Any]) -> list[tuple[float, float]]:
+        """跑一次 VAD 得到语音区间（秒），补漏找漏区和边界校准都基于它，避免重复计算"""
+        if audio is None:
             return []
-        gaps = self._find_uncovered_gaps(entries, duration)
+        try:
+            from faster_whisper.vad import get_speech_timestamps, VadOptions
+            options = VadOptions(
+                threshold=self._env_float("YTV_ASR_VAD_THRESHOLD", 0.2, 0.05, 0.9),
+                min_speech_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
+                min_silence_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
+                speech_pad_ms=0,
+            )
+            return [(chunk["start"] / 16000.0, chunk["end"] / 16000.0) for chunk in get_speech_timestamps(audio, options)]
+        except Exception as exc:
+            logger.warning(f"VAD 语音区间计算失败，跳过补漏和边界校准: {exc}")
+            return []
+
+    def _rescue_gap_entries(self, audio: Optional[Any], entries: list[dict], vad_regions: list[tuple[float, float]], language: str) -> list[dict]:
+        """对 VAD 检测到有语音但字幕没覆盖的区段关闭 VAD 重新识别，找回被主识别漏掉的短语音"""
+        if audio is None or not vad_regions or not self._gap_rescue_enabled():
+            return []
+        gaps = self._find_uncovered_speech_gaps(entries, vad_regions)
         if not gaps:
             return []
 
         model = self._load_model()
         clip_language = None if not language or language == "auto" else language
+        total_samples = len(audio)
+        # 短漏区前后各留一点上下文，识别更稳；偏移时再扣回来
+        pad = self._env_float("YTV_ASR_RESCUE_PAD_S", 0.3, 0.0, 2.0)
         rescued: list[dict] = []
         for gap_start, gap_end in gaps:
-            clip = audio[int(gap_start * 16000):int(gap_end * 16000)]
-            # 不足 0.4 秒的空洞没有补漏价值
-            if len(clip) < int(16000 * 0.4):
+            clip_start = max(0.0, gap_start - pad)
+            clip_end = min(total_samples / 16000.0, gap_end + pad)
+            clip = audio[int(clip_start * 16000):int(clip_end * 16000)]
+            # 不足 0.3 秒的片段没有补漏价值
+            if len(clip) < int(16000 * 0.3):
                 continue
             try:
                 segments, _ = model.transcribe(
@@ -350,20 +373,24 @@ class LocalSpeechRecognizer:
                     word_timestamps=True,
                     beam_size=self._beam_size(),
                     no_speech_threshold=self._no_speech_threshold(),
-                    hallucination_silence_threshold=self._hallucination_silence_threshold(),
                     condition_on_previous_text=False,
                 )
                 for segment in segments:
                     if not self._rescue_segment_acceptable(segment):
                         continue
-                    shifted = self._shift_segment(segment, gap_start, gap_end)
+                    shifted = self._shift_segment(segment, clip_start, clip_end)
                     for entry in self._segment_to_entries(shifted):
-                        if str(entry.get("text") or "").strip():
+                        if not str(entry.get("text") or "").strip():
+                            continue
+                        # 只保留和漏区真正重叠的字幕，padding 区域里属于相邻句子的内容丢弃
+                        entry_start = self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
+                        entry_end = self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000"))
+                        if entry_end > gap_start and entry_start < gap_end:
                             rescued.append(entry)
             except Exception as exc:
-                logger.warning(f"补漏识别空洞 {gap_start:.1f}-{gap_end:.1f}s 失败: {exc}")
+                logger.warning(f"补漏识别区段 {gap_start:.1f}-{gap_end:.1f}s 失败: {exc}")
         if rescued:
-            logger.info(f"补漏识别从 {len(gaps)} 个空洞中找回 {len(rescued)} 条轻声字幕")
+            logger.info(f"补漏识别从 {len(gaps)} 个漏区中找回 {len(rescued)} 条字幕")
         return rescued
 
     def _gap_rescue_enabled(self) -> bool:
@@ -371,21 +398,54 @@ class LocalSpeechRecognizer:
         configured = str(os.environ.get("YTV_ASR_GAP_RESCUE") or "true").strip().lower()
         return configured not in {"0", "false", "no", "off"}
 
-    def _find_uncovered_gaps(self, entries: list[dict], duration: float) -> list[tuple[float, float]]:
-        """找出相邻字幕之间超过阈值的无字幕时段，包含片头和片尾"""
-        min_gap = self._env_float("YTV_ASR_GAP_RESCUE_MIN_S", 2.5, 1.0, 30.0)
-        boundaries: list[tuple[float, float]] = []
-        prev_end = 0.0
-        for entry in entries:
-            start = self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
-            end = self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000"))
-            if start - prev_end >= min_gap:
-                boundaries.append((prev_end, start))
-            prev_end = max(prev_end, end)
-        if duration > 0 and duration - prev_end >= min_gap:
-            boundaries.append((prev_end, duration))
-        # 留出 50ms 边距，避免补漏字幕和原字幕首尾重叠
-        return [(max(0.0, start + 0.05), end - 0.05) for start, end in boundaries if end - start >= min_gap]
+    def _find_uncovered_speech_gaps(self, entries: list[dict], vad_regions: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """在每个 VAD 语音区间内减去已有字幕覆盖，得到真正没字幕的漏区（含极短空洞）"""
+        min_dur = self._env_float("YTV_ASR_GAP_RESCUE_MIN_S", 0.4, 0.2, 30.0)
+        # 字幕覆盖区间留出边距，避免边界抖动把一句话切出碎片漏区
+        margin = 0.15
+        covered = sorted(
+            (
+                self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000")) - margin,
+                self._srt_time_to_seconds(str(entry.get("end") or "00:00:00,000")) + margin,
+            )
+            for entry in entries
+        )
+        gaps: list[tuple[float, float]] = []
+        for region_start, region_end in vad_regions:
+            cursor = region_start
+            for cover_start, cover_end in covered:
+                if cover_end <= cursor or cover_start >= region_end:
+                    continue
+                if cover_start - cursor >= min_dur:
+                    gaps.append((cursor, cover_start))
+                cursor = max(cursor, cover_end)
+                if cursor >= region_end:
+                    break
+            if region_end - cursor >= min_dur:
+                gaps.append((cursor, region_end))
+        return gaps
+
+    def _merge_rescued_entries(self, entries: list[dict], rescued: list[dict]) -> list[dict]:
+        """把补漏字幕并入主字幕并按时间排序，丢弃与已有字幕高度重叠且文本重复的补漏项"""
+        merged = list(entries)
+        for candidate in rescued:
+            cand_start = self._srt_time_to_seconds(str(candidate.get("start") or "00:00:00,000"))
+            cand_end = self._srt_time_to_seconds(str(candidate.get("end") or "00:00:00,000"))
+            cand_text = " ".join(str(candidate.get("text") or "").split())
+            duplicate = False
+            for existing in merged:
+                exist_start = self._srt_time_to_seconds(str(existing.get("start") or "00:00:00,000"))
+                exist_end = self._srt_time_to_seconds(str(existing.get("end") or "00:00:00,000"))
+                overlap = min(cand_end, exist_end) - max(cand_start, exist_start)
+                if overlap > 0.2 and cand_text == " ".join(str(existing.get("text") or "").split()):
+                    duplicate = True
+                    break
+            if not duplicate:
+                merged.append(candidate)
+        merged.sort(key=lambda item: self._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
+        for index, entry in enumerate(merged, 1):
+            entry["index"] = index
+        return merged
 
     def _rescue_segment_acceptable(self, segment: Any) -> bool:
         """补漏识别用更严格的门槛过滤，避免背景音乐被识别成幻觉字幕"""
@@ -419,25 +479,10 @@ class LocalSpeechRecognizer:
             words.append(SimpleNamespace(word=str(getattr(word, "word", "") or ""), start=word_start, end=word_end))
         return SimpleNamespace(start=start, end=max(start, end), text=str(getattr(segment, "text", "") or ""), words=words)
 
-    def _calibrate_entries_with_vad(self, entries: list[dict], audio: Optional[Any]) -> None:
+    def _calibrate_entries_with_vad(self, entries: list[dict], regions: list[tuple[float, float]]) -> None:
         """用 VAD 语音区间边界校准字幕起止：单音节语气词的词级对齐常偏慢，VAD 对声音起点更准"""
-        if audio is None or not entries or not self._vad_calibrate_enabled():
+        if not entries or not regions or not self._vad_calibrate_enabled():
             return
-        try:
-            from faster_whisper.vad import get_speech_timestamps, VadOptions
-            options = VadOptions(
-                threshold=self._env_float("YTV_ASR_VAD_THRESHOLD", 0.2, 0.05, 0.9),
-                min_speech_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SPEECH_MS", 80, 20, 1000),
-                min_silence_duration_ms=self._env_int("YTV_ASR_VAD_MIN_SILENCE_MS", 250, 80, 2000),
-                speech_pad_ms=0,
-            )
-            regions = [(chunk["start"] / 16000.0, chunk["end"] / 16000.0) for chunk in get_speech_timestamps(audio, options)]
-        except Exception as exc:
-            logger.warning(f"VAD 边界校准失败，保留原始时间轴: {exc}")
-            return
-        if not regions:
-            return
-
         # 把字幕时间换算成秒，并记录每个语音区间的第一条/最后一条字幕
         timeline = [
             [self._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000")),
