@@ -364,14 +364,19 @@ def _job_video_info(job: AutomationJobRecord, db: Optional[Session]) -> Optional
 def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> AutomationJobResponse:
     """把数据库自动化任务转换成 API 响应"""
     stages: list[AutomationStageResult] = []
+    inferred_parse_error = _inferred_parse_error_message(job)
     for stage in _load_job_stages(job):
+        stage_key = str(stage.get("key"))
         status = str(stage.get("status"))
         error_message = stage.get("error_message")
+        if inferred_parse_error and stage_key == "parse" and status == "pending":
+            status = "failed"
+            error_message = inferred_parse_error
         if job.status == CANCELLED_STATUS and status in {"pending", "running", "paused", CANCELLED_STATUS}:
             status = CANCELLED_STATUS
             error_message = job.error_message or error_message or "任务已取消"
         stages.append(AutomationStageResult(
-            key=str(stage.get("key")),
+            key=stage_key,
             status=status,
             progress=float(stage.get("progress") or 0),
             task_id=stage.get("task_id"),
@@ -404,6 +409,14 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         created_at=job.created_at,
         completed_at=job.completed_at,
     )
+
+
+def _inferred_parse_error_message(job: AutomationJobRecord) -> Optional[str]:
+    """兼容旧失败任务：没有视频入库且错误来自解析时，响应层显示解析阶段失败"""
+    error_message = str(job.error_message or "").strip()
+    if job.status == "failed" and not job.video_id and error_message.startswith("视频解析失败"):
+        return error_message
+    return None
 
 
 def _stage_by_key(job: Optional[AutomationJobRecord], key: str) -> Optional[dict[str, Any]]:
@@ -1571,9 +1584,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     warning_messages: list[str] = []
     preset_dict: dict[str, Any] = {}
 
-    local_source_path = _resolve_local_video_source_path(request.url, job) if is_local_source else None
-    video = _parse_or_update_local_video(db, local_source_path) if local_source_path else _parse_or_update_video(db, request.url, downloader)
-    paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+    if job:
+        _update_job_stage(db, job, "parse", "running", progress=5)
+    try:
+        local_source_path = _resolve_local_video_source_path(request.url, job) if is_local_source else None
+        video = _parse_or_update_local_video(db, local_source_path) if local_source_path else _parse_or_update_video(db, request.url, downloader)
+        paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+    except Exception as exc:
+        if job:
+            _update_job_stage(db, job, "parse", "failed", progress=5, error_message=str(exc))
+        raise
     cover_asset_path: Optional[str] = None
     cover_warning_message: Optional[str] = None
     try:

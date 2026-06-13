@@ -4,6 +4,7 @@
 import os
 import re
 import json
+import platform
 import subprocess
 import time
 import mimetypes
@@ -24,6 +25,7 @@ class Downloader:
     def __init__(self):
         """初始化下载器，检查 yt-dlp 是否可用"""
         self.yt_dlp_cmd = get_yt_dlp_command()
+        self._active_cookie_args: list[str] = []
         logger.info(f"yt-dlp 路径: {self.yt_dlp_cmd}")
 
     def parse_video(self, url: str) -> dict:
@@ -34,27 +36,17 @@ class Downloader:
         logger.info(f"解析视频: {url}")
 
         # 构建 yt-dlp 命令
-        cmd = [
+        base_cmd = [
             self.yt_dlp_cmd,
             "--dump-json",           # 输出 JSON 格式
             "--no-download",         # 不下载视频
             "--no-warnings",         # 不显示警告
-            url
         ]
 
         try:
-            # 执行 yt-dlp 命令
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60
-            )
+            result, error_msg = self._run_yt_dlp_json_with_cookie_retry(base_cmd, url, timeout=60)
 
             if result.returncode != 0:
-                error_msg = result.stderr.strip()
                 logger.error(f"解析失败: {error_msg}")
                 raise RuntimeError(f"视频解析失败: {error_msg}")
 
@@ -83,6 +75,144 @@ class Downloader:
             raise RuntimeError("视频解析超时（60秒）")
         except json.JSONDecodeError as e:
             raise RuntimeError(f"解析 yt-dlp 输出失败: {e}")
+
+    def _run_yt_dlp_json_with_cookie_retry(self, base_cmd: list[str], url: str, timeout: int) -> tuple[subprocess.CompletedProcess, str]:
+        """执行 yt-dlp JSON 命令，遇到 YouTube 机器人验证时自动尝试浏览器 cookies"""
+        result = self._run_yt_dlp_json_once(base_cmd, url, self._initial_cookie_args(), timeout)
+        error_msg = self._yt_dlp_error_text(result)
+        if result.returncode == 0 or not self._needs_cookie_retry(error_msg):
+            return result, error_msg
+
+        retry_errors: list[str] = []
+        for cookie_args in self._browser_cookie_retry_args():
+            result = self._run_yt_dlp_json_once(base_cmd, url, cookie_args, timeout)
+            error_msg = self._yt_dlp_error_text(result)
+            if result.returncode == 0:
+                self._active_cookie_args = cookie_args
+                logger.info(f"yt-dlp 已使用浏览器 cookies 重试成功: {cookie_args[-1] if cookie_args else ''}")
+                return result, error_msg
+            retry_errors.append(error_msg)
+
+        return result, self._cookie_retry_failure_message("视频解析", error_msg, retry_errors)
+
+    def _run_yt_dlp_json_once(self, base_cmd: list[str], url: str, cookie_args: list[str], timeout: int) -> subprocess.CompletedProcess:
+        """执行单次 yt-dlp JSON 命令"""
+        cmd = self._build_yt_dlp_command(base_cmd, url, cookie_args)
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout
+        )
+
+    def _yt_dlp_error_text(self, result: subprocess.CompletedProcess) -> str:
+        """合并 yt-dlp 的标准错误和标准输出，保留真实失败原因"""
+        stderr = str(result.stderr or "").strip()
+        stdout = str(result.stdout or "").strip()
+        return stderr or stdout
+
+    def _build_yt_dlp_command(self, base_cmd: list[str], url: str, cookie_args: Optional[list[str]] = None) -> list[str]:
+        """在 URL 前插入 cookies 参数，避免 yt-dlp 把 cookies 参数误当成地址"""
+        cmd = list(base_cmd)
+        if cookie_args:
+            cmd.extend(cookie_args)
+        cmd.append(url)
+        return cmd
+
+    def _initial_cookie_args(self) -> list[str]:
+        """读取当前可用 cookies 参数，优先复用已验证成功的浏览器 cookies"""
+        if self._active_cookie_args:
+            return list(self._active_cookie_args)
+
+        cookie_file = str(os.environ.get("YTV_YTDLP_COOKIES_FILE") or "").strip()
+        if cookie_file:
+            return ["--cookies", os.path.expanduser(cookie_file)]
+
+        browsers = self._configured_cookie_browsers()
+        if browsers:
+            return ["--cookies-from-browser", browsers[0]]
+        return []
+
+    def _configured_cookie_browsers(self) -> list[str]:
+        """读取用户指定的浏览器 cookies 来源，支持逗号分隔多个候选"""
+        raw_value = str(os.environ.get("YTV_YTDLP_COOKIES_BROWSER") or "").strip()
+        if not raw_value:
+            return []
+        browsers: list[str] = []
+        for item in raw_value.split(","):
+            browser = item.strip()
+            if browser and browser not in browsers:
+                browsers.append(browser)
+        return browsers
+
+    def _default_cookie_browsers(self) -> list[str]:
+        """按系统选择常见浏览器 cookies 来源"""
+        system_name = platform.system().lower()
+        if system_name == "windows":
+            return ["edge", "chrome", "firefox"]
+        if system_name == "darwin":
+            return ["chrome", "safari", "firefox", "edge"]
+        return ["chrome", "chromium", "firefox", "edge"]
+
+    def _browser_cookie_retry_args(self) -> list[list[str]]:
+        """生成浏览器 cookies 重试参数，跳过已经尝试过的初始参数"""
+        candidates = self._configured_cookie_browsers() or self._default_cookie_browsers()
+        initial = self._initial_cookie_args()
+        results: list[list[str]] = []
+        for browser in candidates:
+            cookie_args = ["--cookies-from-browser", browser]
+            if cookie_args == initial or cookie_args in results:
+                continue
+            results.append(cookie_args)
+        return results
+
+    def _needs_cookie_retry(self, error_text: str) -> bool:
+        """判断 yt-dlp 是否遇到 YouTube 登录或机器人验证拦截"""
+        text = str(error_text or "").lower()
+        markers = (
+            "sign in to confirm",
+            "confirm you’re not a bot",
+            "confirm you're not a bot",
+            "cookies-from-browser",
+            "pass cookies",
+        )
+        return any(marker in text for marker in markers)
+
+    def _cookie_retry_failure_message(self, action: str, last_error: str, retry_errors: list[str]) -> str:
+        """生成 cookies 重试失败提示，不输出任何 cookies 内容"""
+        browser_names = ", ".join(self._configured_cookie_browsers() or self._default_cookie_browsers())
+        details = str(last_error or "").strip()
+        if retry_errors:
+            details = str(retry_errors[-1] or details).strip()
+        hint = (
+            f"{action}遇到 YouTube 登录验证，已尝试读取本机浏览器 cookies（{browser_names}）但仍失败。"
+            "请先用对应浏览器登录 YouTube，或设置 YTV_YTDLP_COOKIES_FILE 指向导出的 cookies.txt。"
+        )
+        return f"{details}\n{hint}".strip()
+
+    def _run_with_cookie_retry(self, action: str, runner: Callable[[list[str]], str]) -> str:
+        """执行需要 yt-dlp 的任务，遇到验证拦截时自动换浏览器 cookies 重试"""
+        first_cookie_args = self._initial_cookie_args()
+        try:
+            return runner(first_cookie_args)
+        except RuntimeError as exc:
+            first_error = str(exc)
+            if not self._needs_cookie_retry(first_error):
+                raise
+
+        retry_errors: list[str] = []
+        for cookie_args in self._browser_cookie_retry_args():
+            try:
+                result = runner(cookie_args)
+                self._active_cookie_args = cookie_args
+                logger.info(f"yt-dlp 已使用浏览器 cookies 重试成功: {cookie_args[-1] if cookie_args else ''}")
+                return result
+            except RuntimeError as retry_exc:
+                retry_errors.append(str(retry_exc))
+
+        raise RuntimeError(self._cookie_retry_failure_message(action, first_error, retry_errors))
 
     def _extract_formats(self, formats: list) -> list:
         """提取可用清晰度列表"""
@@ -168,7 +298,7 @@ class Downloader:
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
 
         # 构建 yt-dlp 命令
-        cmd = [
+        base_cmd = [
             self.yt_dlp_cmd,
             "-o", output_template,
             "--merge-output-format", output_format,
@@ -177,22 +307,44 @@ class Downloader:
 
         # 指定格式
         if format_id:
-            cmd.extend(["-f", format_id])
+            base_cmd.extend(["-f", format_id])
         else:
             # 默认只下载 1080p 以内的源，避免后续画面处理先解码 2K/4K 再降采样。
-            cmd.extend(["-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best"])
+            base_cmd.extend(["-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best"])
 
         # 添加 ffmpeg 路径，确保指定格式和默认格式都能使用本地合并工具。
         ffmpeg_command = get_ffmpeg_command()
         if os.path.isabs(ffmpeg_command):
-            cmd.extend(["--ffmpeg-location", os.path.dirname(ffmpeg_command)])
-
-        cmd.append(url)
+            base_cmd.extend(["--ffmpeg-location", os.path.dirname(ffmpeg_command)])
 
         logger.info(f"开始下载: {url}")
 
         control_keys = normalize_control_keys(control_keys)
+        return self._run_with_cookie_retry(
+            "视频下载",
+            lambda cookie_args: self._download_video_once(
+                base_cmd=base_cmd,
+                url=url,
+                output_dir=output_dir,
+                progress_callback=progress_callback,
+                control_keys=control_keys,
+                cookie_args=cookie_args,
+            ),
+        )
+
+    def _download_video_once(
+        self,
+        base_cmd: list[str],
+        url: str,
+        output_dir: str,
+        progress_callback: Optional[Callable[[float, str], None]],
+        control_keys: list[str],
+        cookie_args: list[str],
+    ) -> str:
+        """执行单次视频下载，调用方负责决定是否重试"""
+        cmd = self._build_yt_dlp_command(base_cmd, url, cookie_args)
         process = None
+        output_lines: list[str] = []
         try:
             raise_if_control_requested(control_keys)
             # 执行下载命令
@@ -215,6 +367,7 @@ class Downloader:
                 line = line.strip()
                 if not line:
                     continue
+                output_lines.append(line)
 
                 # 解析下载进度
                 progress_match = re.search(r'\[download\]\s+([\d.]+)%', line)
@@ -234,7 +387,9 @@ class Downloader:
             process.wait()
             raise_if_control_requested(control_keys)
             if process.returncode != 0:
-                raise RuntimeError(f"下载失败，退出码: {process.returncode}")
+                tail_output = "\n".join(output_lines[-8:]).strip()
+                detail = f": {tail_output}" if tail_output else ""
+                raise RuntimeError(f"下载失败，退出码: {process.returncode}{detail}")
 
             if output_file and os.path.exists(output_file):
                 logger.info(f"下载完成: {output_file}")
@@ -279,7 +434,7 @@ class Downloader:
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
         start_time = time.time()
 
-        cmd = [
+        base_cmd = [
             self.yt_dlp_cmd,
             "--skip-download",      # 不下载视频
             "--write-sub",          # 写入字幕
@@ -293,13 +448,36 @@ class Downloader:
 
         # 自动字幕
         if sub_type == "auto":
-            cmd.append("--write-auto-sub")
-
-        cmd.append(url)
+            base_cmd.append("--write-auto-sub")
 
         logger.info(f"下载字幕: {url} (语言: {language})")
 
         control_keys = normalize_control_keys(control_keys)
+        return self._run_with_cookie_retry(
+            "字幕下载",
+            lambda cookie_args: self._download_subtitle_once(
+                base_cmd=base_cmd,
+                url=url,
+                output_dir=output_dir,
+                language=language,
+                start_time=start_time,
+                control_keys=control_keys,
+                cookie_args=cookie_args,
+            ),
+        )
+
+    def _download_subtitle_once(
+        self,
+        base_cmd: list[str],
+        url: str,
+        output_dir: str,
+        language: str,
+        start_time: float,
+        control_keys: list[str],
+        cookie_args: list[str],
+    ) -> str:
+        """执行单次字幕下载，调用方负责决定是否重试"""
+        cmd = self._build_yt_dlp_command(base_cmd, url, cookie_args)
         process = None
         try:
             raise_if_control_requested(control_keys)

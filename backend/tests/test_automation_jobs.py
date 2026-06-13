@@ -135,6 +135,14 @@ class FailingLocalSourceDownloader:
         raise AssertionError("本地视频流程不应调用封面下载")
 
 
+class FailingParseDownloader:
+    """测试用下载器，模拟 YouTube 解析被机器人验证拦截"""
+
+    def parse_video(self, *_args, **_kwargs):
+        """模拟 yt-dlp 解析失败"""
+        raise RuntimeError("视频解析失败: ERROR: [youtube] test: Sign in to confirm you're not a bot")
+
+
 class FakeAutomationProcessor:
     """测试用媒体处理器，避免真正运行 ffmpeg"""
 
@@ -339,6 +347,24 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.video_info["subtitle_count"], 20)
         self.assertEqual(len(response.video_info["subtitles"]), 12)
         self.assertEqual(response.video_info["subtitles"][0]["language"], "lang-0")
+
+    def test_job_response_infers_parse_failure_for_legacy_job(self):
+        """旧失败任务没有阶段错误时，响应层也要显示解析阶段失败"""
+        job = AutomationJobRecord(
+            id="auto-legacy-parse-failed",
+            source_url="https://youtube.com/watch?v=test",
+            title="一键自动流程",
+            status="failed",
+            progress=0,
+            error_message="视频解析失败: ERROR: [youtube] test: Sign in to confirm you're not a bot",
+            stages=json.dumps(_default_stages(), ensure_ascii=False),
+        )
+
+        response = _job_to_response(job)
+
+        self.assertEqual(response.stages[0].key, "parse")
+        self.assertEqual(response.stages[0].status, "failed")
+        self.assertIn("视频解析失败", response.stages[0].error_message or "")
 
     def test_automation_cover_download_uses_custom_output_dir(self):
         """一键流程自动保存封面时使用用户选择的封面目录"""
@@ -1328,6 +1354,40 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             self.assertEqual(fake_recognizer.video_paths, [copied_path])
             self.assertEqual(stage_by_key["subtitle"].status, "completed")
             self.assertEqual(stage_by_key["export"].status, "completed")
+
+    def test_run_automation_marks_parse_stage_failed_when_parse_raises(self):
+        """一键流程解析失败时必须写入 parse 阶段错误，避免界面继续显示 pending"""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        try:
+            request = AutomationRunRequest(
+                url="https://youtube.com/watch?v=test",
+                enable_effects=False,
+                processing_preset={},
+                enable_voice=False,
+                burn_subtitles=True,
+                output_format="mp4",
+            )
+            job = _create_automation_job(db, request)
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=FailingParseDownloader()),
+                patch("backend.api.automation.FFmpegProcessor", return_value=object()),
+            ):
+                with self.assertRaises(RuntimeError):
+                    _run_automation_sync(request, db, job)
+
+            db.refresh(job)
+            stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+            self.assertEqual(stages["parse"]["status"], "failed")
+            self.assertIn("视频解析失败", stages["parse"]["error_message"])
+            self.assertEqual(stages["download"]["status"], "pending")
+        finally:
+            db.close()
 
     def test_open_job_folder_prefers_video_workspace_root(self):
         """素材库打开文件夹应打开单视频根目录，而不是 exports 子目录"""

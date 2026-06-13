@@ -1,7 +1,9 @@
 # backend/tests/test_tooling.py
 # 外部工具检测测试 - 验证 D:\tools 优先和 PATH 回退逻辑
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -55,6 +57,18 @@ class FakeSubtitleProcess:
         return "", ""
 
 
+class FakeAuthFailureProcess:
+    """测试用下载进程，模拟 YouTube 要求登录验证"""
+
+    def __init__(self):
+        self.stdout = ["ERROR: [youtube] test: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies"]
+        self.returncode = 1
+
+    def wait(self):
+        """模拟进程失败退出"""
+        return self.returncode
+
+
 class ToolingTests(unittest.TestCase):
     """外部工具检测测试"""
 
@@ -89,6 +103,48 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(status.source, "missing")
         self.assertIn("未找到 demo", status.error_message or "")
 
+    def test_parse_video_retries_with_browser_cookies_when_youtube_requires_auth(self):
+        """解析遇到 YouTube 机器人验证时会自动尝试浏览器 cookies"""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            """第一次模拟被拦截，第二次带浏览器 cookies 后成功"""
+            calls.append(cmd)
+            if "--cookies-from-browser" not in cmd:
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="ERROR: [youtube] test: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies",
+                )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({
+                    "id": "test",
+                    "title": "测试视频",
+                    "uploader": "测试作者",
+                    "duration": 12,
+                    "thumbnail": "https://example.test/cover.jpg",
+                    "formats": [],
+                    "subtitles": {},
+                    "automatic_captions": {},
+                }),
+                stderr="",
+            )
+
+        with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": ""}), \
+                patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                patch("backend.core.downloader.subprocess.run", side_effect=fake_run):
+            downloader = Downloader()
+            result = downloader.parse_video("https://youtube.com/watch?v=test")
+
+        self.assertEqual(result["title"], "测试视频")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--cookies-from-browser", calls[0])
+        self.assertIn("--cookies-from-browser", calls[1])
+        self.assertLess(calls[1].index("--cookies-from-browser"), calls[1].index("https://youtube.com/watch?v=test"))
+
     def test_download_video_adds_ffmpeg_location_for_custom_format(self):
         """指定下载格式时仍然传入本地 ffmpeg 位置"""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -114,6 +170,64 @@ class ToolingTests(unittest.TestCase):
         self.assertEqual(result, output_path)
         self.assertIn("--ffmpeg-location", captured_cmd)
         self.assertIn("D:/tools/ffmpeg", captured_cmd)
+
+    def test_download_video_uses_configured_browser_cookies(self):
+        """下载视频时会使用用户配置的浏览器 cookies"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "merged.mp4")
+            open(output_path, "wb").close()
+            captured_cmd: list[str] = []
+
+            def fake_popen(cmd, **_):
+                """记录命令并返回模拟下载进程"""
+                captured_cmd.extend(cmd)
+                return FakeDownloadProcess(output_path)
+
+            with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": "chrome"}), \
+                    patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                result = downloader.download_video(
+                    url="https://youtube.com/watch?v=test",
+                    output_dir=temp_dir,
+                    format_id="137+140",
+                )
+
+        self.assertEqual(result, output_path)
+        self.assertIn("--cookies-from-browser", captured_cmd)
+        self.assertIn("chrome", captured_cmd)
+        self.assertLess(captured_cmd.index("--cookies-from-browser"), captured_cmd.index("https://youtube.com/watch?v=test"))
+
+    def test_download_video_retries_with_browser_cookies_when_youtube_requires_auth(self):
+        """下载遇到 YouTube 机器人验证时会自动重试浏览器 cookies"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "merged.mp4")
+            open(output_path, "wb").close()
+            calls: list[list[str]] = []
+
+            def fake_popen(cmd, **_):
+                """第一次模拟被拦截，第二次带浏览器 cookies 后成功"""
+                calls.append(cmd)
+                if "--cookies-from-browser" not in cmd:
+                    return FakeAuthFailureProcess()
+                return FakeDownloadProcess(output_path)
+
+            with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": ""}), \
+                    patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                result = downloader.download_video(
+                    url="https://youtube.com/watch?v=test",
+                    output_dir=temp_dir,
+                    format_id="137+140",
+                )
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--cookies-from-browser", calls[0])
+        self.assertIn("--cookies-from-browser", calls[1])
 
     def test_download_video_replaces_invalid_utf8_output(self):
         """下载器输出包含非 UTF-8 字节时不会中断任务"""
