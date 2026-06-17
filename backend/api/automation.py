@@ -1572,6 +1572,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     """同步执行完整一键自动流程，供直接调用和后台任务复用"""
     is_local_source = _is_local_video_source(request.url)
     assert_required_tools_available(require_yt_dlp=not is_local_source)
+    if job:
+        # 开始执行前清理本任务残留的历史取消/暂停信号（如后端重启遗留），避免新一轮执行被误判“用户取消”
+        clear_control_request(_job_control_key(job.id))
     downloader = Downloader()
     processor = FFmpegProcessor()
     stages: list[AutomationStageResult] = []
