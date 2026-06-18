@@ -2,7 +2,7 @@
 // 任务队列工作区 - 只展示一键流程任务，进度由全局 useAutomationStream(SSE) 维护
 import { useEffect, useState } from 'react'
 import {
-  Play, Pause, X, RotateCcw, SkipForward, RefreshCw, Inbox,
+  Play, Pause, X, RotateCcw, SkipForward, RefreshCw, Inbox, Trash2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -38,6 +38,7 @@ type PendingConfirm = { title: string; description: string; action: () => void }
 export function QueueWorkspace() {
   const jobs = useAutomationStore((s) => s.jobs)
   const syncBackendJobs = useAutomationStore((s) => s.syncBackendJobs)
+  const removeJob = useAutomationStore((s) => s.removeJob)
   const addLog = useLogStore((s) => s.addLog)
 
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -69,11 +70,12 @@ export function QueueWorkspace() {
   }, [jobs])
 
   /** 执行一个自动流程操作并刷新 */
-  const runJobAction = async (key: string, label: string, fn: () => Promise<{ message?: string }>) => {
+  const runJobAction = async (key: string, label: string, fn: () => Promise<{ message?: string }>, onSuccess?: () => void) => {
     setBusyId(key)
     try {
       const result = await fn()
       addLog('info', result.message || `${label}成功`)
+      onSuccess?.()
       await refreshJobs()
     } catch (error) {
       addLog('error', `${label}失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -105,6 +107,7 @@ export function QueueWorkspace() {
               onRetry={() => runJobAction(`retry:${job.id}`, '重新开始', () => automationApi.retry(job.id))}
               onResume={() => runJobAction(`resume:${job.id}`, '继续完成', () => automationApi.resume(job.id))}
               onSkip={() => setConfirm({ title: '跳过当前画面处理？', description: `「${job.title}」正在运行的 ffmpeg 会被停止，后续直接使用下载的原视频。`, action: () => runJobAction(`skip:${job.id}`, '跳过当前阶段', () => automationApi.skipCurrentStage(job.id)) })}
+              onDelete={() => setConfirm({ title: '删除该任务记录？', description: `只删除「${job.title}」的队列记录，不删除硬盘上的视频文件。`, action: () => runJobAction(`delete:${job.id}`, '删除任务', () => automationApi.deleteJob(job.id), () => removeJob(job.id)) })}
             />
           ))
         )}
@@ -129,7 +132,7 @@ export function QueueWorkspace() {
 
 /** 单个自动流程任务卡 */
 function JobCard({
-  job, busyId, onPause, onCancel, onRetry, onResume, onSkip,
+  job, busyId, onPause, onCancel, onRetry, onResume, onSkip, onDelete,
 }: {
   job: AutomationJob
   busyId: string | null
@@ -138,9 +141,11 @@ function JobCard({
   onRetry: () => void
   onResume: () => void
   onSkip: () => void
+  onDelete: () => void
 }) {
   const meta = STATUS_META[job.status] ?? STATUS_META.pending
   const isEffectsRunning = job.steps.find((s) => s.key === 'effects')?.status === 'running'
+  const canDelete = job.status !== 'pending' && job.status !== 'running'
   const busy = Boolean(busyId && busyId.endsWith(job.id))
   return (
     <Card>
@@ -183,6 +188,9 @@ function JobCard({
           )}
           {job.can_cancel && (
             <Button variant="outline" size="sm" className="gap-1.5 text-destructive" disabled={busy} onClick={onCancel}><X className="size-3.5" /> 取消</Button>
+          )}
+          {canDelete && (
+            <Button variant="outline" size="sm" className="gap-1.5 text-destructive" disabled={busy} onClick={onDelete}><Trash2 className="size-3.5" /> 删除</Button>
           )}
         </div>
       </CardContent>

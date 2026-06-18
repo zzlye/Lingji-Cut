@@ -110,9 +110,11 @@ export function HistoryPanel() {
                   </div>
                   <span className="shrink-0 text-xs text-muted-foreground">{formatClockTime(job.completed_at || job.created_at)}</span>
                   <Badge variant={meta.variant} className="shrink-0">{meta.label}</Badge>
-                  <Button size="sm" variant="outline" className="shrink-0" onClick={() => openSubtitleWorkbench(job.id)}>
-                    字幕调整
-                  </Button>
+                  {job.status === 'completed' && (
+                    <Button size="sm" variant="outline" className="shrink-0" onClick={() => openSubtitleWorkbench(job.id)}>
+                      字幕调整
+                    </Button>
+                  )}
                   <Button size="sm" variant="outline" className="shrink-0 text-destructive" onClick={() => handleDelete(job.id, job.title)}>
                     <Trash2 className="mr-1.5 size-4" />
                     删除
