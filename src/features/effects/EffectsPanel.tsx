@@ -3,6 +3,7 @@
 // 交互重做：预设前置 + 常用项露出 + 专业参数收进高级折叠（简化优先）
 
 import { useEffect, useMemo, useState } from 'react'
+import { Trash2 } from 'lucide-react'
 import { effectsApi } from '@/lib/api'
 import { useTaskStore } from '@/stores/taskStore'
 import type { ProcessingConfig, ProcessingPreset, RandomRange } from '@/types'
@@ -197,11 +198,13 @@ interface EffectsSettingsPanelProps {
  */
 export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
   const [presets, setPresets] = useState<ProcessingPreset[]>([])
+  const [selectedPresetId, setSelectedPresetId] = useState<number | null>(null)
   const [config, setConfig] = useState<ProcessingConfig>(() => loadAutomationConfig())
   const [presetName, setPresetName] = useState('自定义预设')
   const [videoPath, setVideoPath] = useState('')
   const [filterGraph, setFilterGraph] = useState('')
   const [isBusy, setIsBusy] = useState(false)
+  const [isDeletingPreset, setIsDeletingPreset] = useState(false)
   const { tasks, addTask, addLog } = useTaskStore()
 
   const latestVideoPath = useMemo(() => {
@@ -210,14 +213,21 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
   }, [tasks])
 
   /** 加载后端保存的处理预设 */
-  const loadPresets = async () => {
+  const loadPresets = async (preferredPresetId?: number) => {
     try {
       const data = await effectsApi.listPresets()
       setPresets(data)
+      const preferredPreset = preferredPresetId ? data.find((item) => item.id === preferredPresetId) : null
+      if (preferredPreset) {
+        setSelectedPresetId(preferredPreset.id)
+        return
+      }
+      setSelectedPresetId((current) => current && data.some((item) => item.id === current) ? current : null)
       const defaultPreset = data.find((item) => item.is_default) || data[0]
       if (defaultPreset && !hasStoredAutomationConfig()) {
         setConfig(defaultPreset.config)
         setPresetName(defaultPreset.name)
+        setSelectedPresetId(defaultPreset.id)
       }
     } catch (error) {
       addLog('error', `加载画面处理预设失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -267,7 +277,9 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
     try {
       const saved = await effectsApi.createPreset({ name: presetName, intensity: 'custom', config })
       addLog('info', `画面处理预设已保存: ${saved.name}`)
-      loadPresets()
+      setSelectedPresetId(saved.id)
+      setPresetName(saved.name)
+      loadPresets(saved.id)
     } catch (error) {
       addLog('error', `保存画面处理预设失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
@@ -277,9 +289,48 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
   const handleSelectPreset = (presetId: string) => {
     const preset = presets.find((item) => item.id === Number(presetId))
     if (!preset) return
+    setSelectedPresetId(preset.id)
     setConfig(preset.config)
     setPresetName(preset.name)
     addLog('info', `已切换画面处理预设: ${preset.name}`)
+  }
+
+  /** 删除当前选中的画面处理预设 */
+  const handleDeletePreset = async () => {
+    if (!selectedPresetId) { addLog('warn', '请先选择要删除的画面处理预设'); return }
+    const preset = presets.find((item) => item.id === selectedPresetId)
+    if (!preset) { addLog('warn', '当前预设不存在，请刷新后重试'); return }
+    if (!window.confirm(`确定删除画面处理预设「${preset.name}」吗？`)) return
+
+    setIsDeletingPreset(true)
+    try {
+      await effectsApi.deletePreset(selectedPresetId)
+      const nextPresets = presets.filter((item) => item.id !== selectedPresetId)
+      setPresets(nextPresets)
+      addLog('info', `画面处理预设已删除: ${preset.name}`)
+
+      const fallbackPreset = nextPresets.find((item) => item.is_default) || nextPresets[0]
+      if (fallbackPreset) {
+        setSelectedPresetId(fallbackPreset.id)
+        setConfig(fallbackPreset.config)
+        setPresetName(fallbackPreset.name)
+      } else {
+        setSelectedPresetId(null)
+        setConfig(createDefaultProcessingConfig())
+        setPresetName('自定义预设')
+      }
+    } catch (error) {
+      addLog('error', `删除画面处理预设失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsDeletingPreset(false)
+    }
+  }
+
+  /** 重置为默认画面处理参数，并退出已选预设状态 */
+  const handleResetPreset = () => {
+    setSelectedPresetId(null)
+    setConfig(createDefaultProcessingConfig())
+    setPresetName('自定义预设')
   }
 
   /** 生成短片段预览 */
@@ -331,11 +382,24 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
         <CardHeader><CardTitle className="text-sm">预设</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {presets.length > 0 && (
-            <SelectField label="加载已保存预设" value="" placeholder="选择一个预设载入" options={presets.map((p) => [String(p.id), p.name] as FieldOption)} onChange={handleSelectPreset} />
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="min-w-44 flex-1">
+                <SelectField label="加载已保存预设" value={selectedPresetId ? String(selectedPresetId) : ''} placeholder="选择一个预设载入" options={presets.map((p) => [String(p.id), p.name] as FieldOption)} onChange={handleSelectPreset} />
+              </div>
+              <Button
+                variant="outline"
+                className="gap-1.5 text-destructive"
+                disabled={!selectedPresetId || isDeletingPreset}
+                onClick={handleDeletePreset}
+              >
+                <Trash2 className="size-3.5" />
+                {isDeletingPreset ? '删除中…' : '删除'}
+              </Button>
+            </div>
           )}
           <div className="flex flex-wrap items-end gap-2">
             <TextField label="预设名称" value={presetName} onChange={setPresetName} className="min-w-44 flex-1" />
-            <Button variant="outline" onClick={() => setConfig(createDefaultProcessingConfig())}>重置</Button>
+            <Button variant="outline" onClick={handleResetPreset}>重置</Button>
             <Button onClick={handleSavePreset}>保存预设</Button>
           </div>
         </CardContent>
