@@ -100,18 +100,37 @@ def ensure_video_workspace(video_id: str | int | None, title: str | None, projec
     workspace_dir = os.path.join(videos_root, workspace_name)
     os.makedirs(workspace_dir, exist_ok=True)
 
-    paths = {
-        "project_root": project_root_path,
-        "default_project_root": base_paths.get("default_project_root") or APP_ROOT,
-        "videos_dir": videos_root,
-        "workspace_dir": workspace_dir,
-        "workspace_name": workspace_name,
-    }
+    paths = _build_video_workspace_paths(
+        project_root_path,
+        videos_root,
+        workspace_name,
+        base_paths.get("default_project_root") or APP_ROOT,
+    )
     for key, dirname in WORKSPACE_STAGE_DIRS.items():
         path = os.path.join(workspace_dir, dirname)
         os.makedirs(path, exist_ok=True)
         paths[key] = path
     return paths
+
+
+def find_video_workspace(video_id: str | int | None, title: str | None, project_root: str | None = None) -> dict[str, str] | None:
+    """只查找已存在的视频工作目录，不创建目录，供素材库等只读场景使用"""
+    project_root_path = normalize_project_root(project_root) if project_root else load_project_root()
+    base_paths = _build_project_paths(project_root_path)
+    videos_root = base_paths.get("videos_dir") or os.path.join(project_root_path, "videos")
+    if not os.path.isdir(videos_root):
+        return None
+
+    safe_id = _safe_path_fragment(str(video_id or "").strip(), fallback="video")
+    workspace_name = _find_existing_workspace_name(videos_root, safe_id)
+    if not workspace_name:
+        return None
+    return _build_video_workspace_paths(
+        project_root_path,
+        videos_root,
+        workspace_name,
+        base_paths.get("default_project_root") or APP_ROOT,
+    )
 
 
 def detect_video_workspace(media_path: str) -> dict[str, str] | None:
@@ -167,6 +186,21 @@ def _build_project_paths(project_root: str) -> dict[str, str]:
     return paths
 
 
+def _build_video_workspace_paths(project_root_path: str, videos_root: str, workspace_name: str, default_project_root: str) -> dict[str, str]:
+    """只计算单视频工作目录的各阶段路径，不负责创建文件夹"""
+    workspace_dir = os.path.join(videos_root, workspace_name)
+    paths = {
+        "project_root": project_root_path,
+        "default_project_root": default_project_root,
+        "videos_dir": videos_root,
+        "workspace_dir": workspace_dir,
+        "workspace_name": workspace_name,
+    }
+    for key, dirname in WORKSPACE_STAGE_DIRS.items():
+        paths[key] = os.path.join(workspace_dir, dirname)
+    return paths
+
+
 def _compat_workspace_from_base_paths(base_paths: dict[str, str]) -> dict[str, str] | None:
     """兼容单元测试或旧逻辑传入的简化目录结构，避免强行再套一层 videos 目录"""
     if "project_root" in base_paths:
@@ -190,12 +224,30 @@ def _compat_workspace_from_base_paths(base_paths: dict[str, str]) -> dict[str, s
 def _resolve_workspace_name(videos_root: str, video_id: str | int | None, title: str | None) -> str:
     """根据视频 ID 和标题生成稳定目录名；同一个视频改标题时尽量复用旧目录"""
     safe_id = _safe_path_fragment(str(video_id or "").strip(), fallback="video")
-    prefix = f"{safe_id}__"
-    for dirname in os.listdir(videos_root):
-        if dirname.startswith(prefix):
-            return dirname
     safe_title = _safe_path_fragment(title or "", fallback="untitled")[:64]
-    return f"{safe_id}__{safe_title}"
+    existing_name = _find_existing_workspace_name(videos_root, safe_id)
+    if existing_name:
+        return existing_name
+    return f"{safe_title}__{safe_id}"
+
+
+def _find_existing_workspace_name(videos_root: str, safe_id: str) -> str | None:
+    """按视频 ID 查找已存在目录，优先识别新格式，兼容旧版 ID 在前的目录"""
+    try:
+        dirnames = sorted(os.listdir(videos_root))
+    except OSError:
+        return None
+
+    new_suffix = f"__{safe_id}"
+    for dirname in dirnames:
+        if dirname.endswith(new_suffix):
+            return dirname
+
+    legacy_prefix = f"{safe_id}__"
+    for dirname in dirnames:
+        if dirname.startswith(legacy_prefix):
+            return dirname
+    return None
 
 
 def _safe_path_fragment(value: str, fallback: str = "item") -> str:

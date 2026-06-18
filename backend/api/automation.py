@@ -24,7 +24,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
-from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace
+from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
@@ -935,7 +935,8 @@ def _job_workspace_paths(job: Optional[AutomationJobRecord], db: Optional[Sessio
     if db and job.video_id:
         video = db.query(VideoSource).filter(VideoSource.id == job.video_id).first()
         if video:
-            return ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+            # 素材库和字幕页会频繁读取任务，旧任务缺工作目录时只能查找，不能在只读请求里创建空目录。
+            return find_video_workspace(video.video_id or video.id, video.title or video.video_id)
     return None
 
 
