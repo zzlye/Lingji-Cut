@@ -1,6 +1,6 @@
 // src/features/effects/EffectsPanel.tsx
 // 画面处理面板 - 配置视频增强、差异化处理和一键自动流程复用参数
-// 交互重做：快捷预设卡片 + 常用项露出 + 专业参数收进高级折叠（简化优先）
+// 交互重做：预设前置 + 常用项露出 + 专业参数收进高级折叠（简化优先）
 
 import { useEffect, useMemo, useState } from 'react'
 import { effectsApi } from '@/lib/api'
@@ -84,60 +84,6 @@ export const createDefaultProcessingConfig = (): ProcessingConfig => ({
     quality: 'size',
   },
 })
-
-/** 轻度处理模板 */
-function createLightProcessingConfig(): ProcessingConfig {
-  const config = createDefaultProcessingConfig()
-  config.adjustments.enabled = true
-  config.adjustments.brightness = range(0, 0.04)
-  config.adjustments.contrast = range(1, 1.08)
-  config.adjustments.saturation = range(1, 1.06)
-  config.adjustments.sharpness = range(0.3, 0.7)
-  config.adjustments.denoise = range(0, 1)
-  config.transform.flip_horizontal = false
-  config.transform.random_rotate.enabled = false
-  config.bitrate.fixed_kbps = range(3500, 3500, 3500, false)
-  return config
-}
-
-/** 强处理模板 */
-function createStrongProcessingConfig(): ProcessingConfig {
-  const config = createDefaultProcessingConfig()
-  config.adjustments.enabled = true
-  config.adjustments.brightness = range(0.02, 0.12)
-  config.adjustments.contrast = range(1.08, 1.25)
-  config.adjustments.saturation = range(1.08, 1.22)
-  config.adjustments.sharpness = range(1.1, 1.8)
-  config.adjustments.denoise = range(1.5, 3)
-  config.canvas.resolution = '1080p'
-  config.canvas.mode = 'crop'
-  config.transform.random_rotate = range(-1.5, 1.5)
-  config.bitrate.fixed_kbps = range(3500, 3500, 3500, false)
-  return config
-}
-
-/** 清晰优先模板 */
-function createQualityProcessingConfig(): ProcessingConfig {
-  const config = createDefaultProcessingConfig()
-  config.adjustments.enabled = true
-  config.canvas.resolution = '1080p'
-  config.canvas.mode = 'keep'
-  config.adjustments.sharpness = range(0.8, 1.2)
-  config.adjustments.denoise = range(0.8, 1.5)
-  config.transform.flip_horizontal = false
-  config.transform.random_rotate.enabled = false
-  config.bitrate.quality_mode = 'quality'
-  config.bitrate.fixed_kbps = range(4200, 4200, 4200, false)
-  return config
-}
-
-/** 快速处理模板 */
-const QUICK_TEMPLATES = [
-  { id: 'light', name: '轻度', description: '低干扰，保留原片观感', factory: createLightProcessingConfig },
-  { id: 'standard', name: '极速', description: '速度优先，仍输出 1080p', factory: createDefaultProcessingConfig },
-  { id: 'strong', name: '强处理', description: '画面差异更明显', factory: createStrongProcessingConfig },
-  { id: 'quality', name: '清晰优先', description: '1080p 和较高码率', factory: createQualityProcessingConfig },
-]
 
 /** 判断是否已经保存过自动化参数 */
 export function hasStoredAutomationConfig() {
@@ -304,13 +250,6 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
     })
   }
 
-  /** 应用快速模板 */
-  const applyQuickTemplate = (template: (typeof QUICK_TEMPLATES)[number]) => {
-    setConfig(template.factory())
-    setPresetName(`${template.name}处理`)
-    addLog('info', `已应用画面处理模板: ${template.name}`)
-  }
-
   /** 生成 ffmpeg 滤镜预览 */
   const handleBuildFilter = async () => {
     try {
@@ -387,25 +326,26 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
         <p className="text-sm text-muted-foreground">这里只处理差异化、画布和处理码率。最终导出的格式、分辨率和成品码率请到单独的“最终导出”设置里调整。</p>
       </div>
 
-      {/* 快捷预设卡片 */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {QUICK_TEMPLATES.map((template) => (
-          <button
-            key={template.id}
-            onClick={() => applyQuickTemplate(template)}
-            className="rounded-lg border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-primary/5"
-          >
-            <p className="text-sm font-medium">{template.name}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{template.description}</p>
-          </button>
-        ))}
-      </div>
+      {/* 预设保存 */}
+      <Card>
+        <CardHeader><CardTitle className="text-sm">预设</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          {presets.length > 0 && (
+            <SelectField label="加载已保存预设" value="" placeholder="选择一个预设载入" options={presets.map((p) => [String(p.id), p.name] as FieldOption)} onChange={handleSelectPreset} />
+          )}
+          <div className="flex flex-wrap items-end gap-2">
+            <TextField label="预设名称" value={presetName} onChange={setPresetName} className="min-w-44 flex-1" />
+            <Button variant="outline" onClick={() => setConfig(createDefaultProcessingConfig())}>重置</Button>
+            <Button onClick={handleSavePreset}>保存预设</Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* 常用 */}
       <Card>
         <CardHeader><CardTitle className="text-sm">常用</CardTitle></CardHeader>
         <CardContent className="grid gap-4 sm:grid-cols-2">
-          <SelectField label="处理画布分辨率" value={config.canvas.resolution} options={RESOLUTION_OPTIONS} onChange={(v) => updateValue(['canvas', 'resolution'], v)} />
+          <SelectField label="处理画布分辨率" value={config.canvas.resolution} options={RESOLUTION_OPTIONS} onChange={(v) => updateValue(['canvas', 'resolution'], v)} description="设置画面处理阶段的画布大小" />
           <SelectField label="硬件加速" value={config.acceleration?.mode ?? 'auto'} options={ACCEL_MODE_OPTIONS} onChange={(v) => updateValue(['acceleration', 'mode'], v)} description="自动选择可用 GPU，失败会回退 CPU" />
           {config.canvas.resolution === 'custom' && (
             <>
@@ -490,20 +430,6 @@ export function EffectsSettingsPanel(_props: EffectsSettingsPanelProps = {}) {
         </AccordionItem>
       </Accordion>
 
-      {/* 预设保存 */}
-      <Card>
-        <CardHeader><CardTitle className="text-sm">预设</CardTitle></CardHeader>
-        <CardContent className="space-y-3">
-          {presets.length > 0 && (
-            <SelectField label="加载已保存预设" value="" placeholder="选择一个预设载入" options={presets.map((p) => [String(p.id), p.name] as FieldOption)} onChange={handleSelectPreset} />
-          )}
-          <div className="flex flex-wrap items-end gap-2">
-            <TextField label="预设名称" value={presetName} onChange={setPresetName} className="min-w-44 flex-1" />
-            <Button variant="outline" onClick={() => setConfig(createDefaultProcessingConfig())}>重置</Button>
-            <Button onClick={handleSavePreset}>保存预设</Button>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   )
 }
