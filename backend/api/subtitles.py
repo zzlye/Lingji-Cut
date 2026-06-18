@@ -16,7 +16,7 @@ import urllib.request
 import zipfile
 from urllib.parse import unquote, urlparse
 
-from ..core import Downloader, FFmpegProcessor, SubtitleEngine, TextEngine
+from ..core import Downloader, FFmpegProcessor, LocalSpeechRecognizer, SubtitleEngine, TextEngine
 from ..core.paths import detect_video_workspace, ensure_project_dirs, ensure_video_workspace
 from ..core.process_control import TaskControlRequested
 from ..models import DownloadTask, SubtitlePreset, TextProviderProfile, VideoSource, get_db
@@ -155,6 +155,14 @@ class SubtitleCorrectionParseTextRequest(BaseModel):
     format: str = "srt"
 
 
+class SubtitleSegmentRecognizeRequest(BaseModel):
+    """重新识别指定视频时间段请求"""
+    video_path: str
+    start: str
+    end: str
+    language: Optional[str] = None
+
+
 class SubtitleCorrectionSaveRequest(BaseModel):
     """保存校对后字幕请求"""
     entries: list[SubtitleEntryPayload] = Field(default_factory=list)
@@ -180,6 +188,14 @@ class SubtitleCorrectionResponse(BaseModel):
     plain_text: str = ""
     output_path: Optional[str] = None
     format: Optional[str] = None
+
+
+class SubtitleSegmentRecognizeResponse(SubtitleCorrectionResponse):
+    """重新识别指定时间段响应"""
+    video_path: str
+    start: str
+    end: str
+    language: str = "auto"
 
 
 class FontInstallRequest(BaseModel):
@@ -413,6 +429,101 @@ def entries_to_plain_text(entries: list[dict], max_chars: int = 6000) -> str:
             break
 
     return "\n".join(lines)[:max_chars]
+
+
+def _srt_time_to_seconds(value: str) -> float:
+    """把 SRT 时间码转换成秒，用于截取视频片段"""
+    text = str(value or "").strip().replace(",", ".")
+    parts = text.split(":")
+    if len(parts) != 3:
+        raise HTTPException(status_code=400, detail=f"时间格式不正确: {value}")
+    try:
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"时间格式不正确: {value}") from exc
+    return max(0.0, hours * 3600 + minutes * 60 + seconds)
+
+
+def _seconds_to_srt_time(seconds: float) -> str:
+    """把秒转换成 SRT 时间码"""
+    total_ms = max(0, int(round(seconds * 1000)))
+    hours = total_ms // 3600000
+    minutes = (total_ms % 3600000) // 60000
+    secs = (total_ms % 60000) // 1000
+    millis = total_ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _export_video_segment(video_path: str, start_seconds: float, end_seconds: float) -> str:
+    """用 ffmpeg 截取局部视频，交给本地识别器重新识别"""
+    duration = max(0.0, end_seconds - start_seconds)
+    if duration < 0.2:
+        raise HTTPException(status_code=400, detail="重新识别的时间段太短")
+    fd, output_path = tempfile.mkstemp(prefix="ytv_reasr_", suffix=".wav")
+    os.close(fd)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss", f"{start_seconds:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", video_path,
+        "-vn",
+        "-ac", "1",
+        "-ar", "16000",
+        "-af", "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-c:a", "pcm_s16le",
+        output_path,
+    ]
+    try:
+        from ..core.tooling import get_ffmpeg_command
+        command[0] = get_ffmpeg_command()
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            check=False,
+        )
+    except Exception as exc:
+        _safe_remove_file(output_path)
+        raise HTTPException(status_code=500, detail=f"截取视频片段失败: {exc}") from exc
+    if result.returncode != 0 or not os.path.exists(output_path) or os.path.getsize(output_path) <= 64:
+        detail = (result.stderr or result.stdout or "").strip()[:400]
+        _safe_remove_file(output_path)
+        raise HTTPException(status_code=500, detail=f"截取视频片段失败: {detail or 'ffmpeg 未生成片段'}")
+    return output_path
+
+
+def _shift_entries_to_absolute_time(entries: list[dict], offset_seconds: float, max_end_seconds: float) -> list[dict]:
+    """把片段内相对时间轴平移回原视频绝对时间轴"""
+    shifted: list[dict] = []
+    for entry in entries:
+        start = offset_seconds + _srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
+        end = offset_seconds + _srt_time_to_seconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+        end = min(max_end_seconds, max(start + 0.2, end))
+        text = str(entry.get("text") or "").strip()
+        if not text:
+            continue
+        shifted.append({
+            "index": len(shifted) + 1,
+            "start": _seconds_to_srt_time(start),
+            "end": _seconds_to_srt_time(end),
+            "text": text,
+        })
+    return shifted
+
+
+def _safe_remove_file(path: str) -> None:
+    """删除临时文件，失败时静默忽略"""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def _load_text_settings(profile: TextProviderProfile) -> dict:
@@ -709,6 +820,42 @@ async def process_subtitle_entries(request: SubtitleEntriesProcessRequest, db: S
         entries=_entry_payloads(processed_entries),
         plain_text=entries_to_plain_text(processed_entries),
         operation=request.operation,
+    )
+
+
+@router.post("/recognize-segment", response_model=SubtitleSegmentRecognizeResponse)
+async def recognize_subtitle_segment(request: SubtitleSegmentRecognizeRequest):
+    """重新识别指定视频时间段，返回原视频绝对时间轴字幕"""
+    video_path = os.path.abspath(os.path.expanduser(request.video_path.strip()))
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail=f"视频文件不存在: {request.video_path}")
+
+    start_seconds = _srt_time_to_seconds(request.start)
+    end_seconds = _srt_time_to_seconds(request.end)
+    if end_seconds <= start_seconds:
+        raise HTTPException(status_code=400, detail="重新识别结束时间必须晚于开始时间")
+
+    segment_path = _export_video_segment(video_path, start_seconds, end_seconds)
+    try:
+        language = (request.language or "").strip()
+        language_arg = None if not language or language == "auto" else language
+        entries, detected_language = LocalSpeechRecognizer().transcribe_video(segment_path, language=language_arg)
+        shifted_entries = _shift_entries_to_absolute_time(entries, start_seconds, end_seconds)
+        if not shifted_entries:
+            raise RuntimeError("本地识别没有返回可用字幕")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"重新识别失败: {exc}") from exc
+    finally:
+        _safe_remove_file(segment_path)
+
+    return SubtitleSegmentRecognizeResponse(
+        message=f"已重新识别 {len(shifted_entries)} 条字幕",
+        entries=_entry_payloads(shifted_entries),
+        plain_text=entries_to_plain_text(shifted_entries),
+        video_path=video_path,
+        start=_seconds_to_srt_time(start_seconds),
+        end=_seconds_to_srt_time(end_seconds),
+        language=detected_language,
     )
 
 

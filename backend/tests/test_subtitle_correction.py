@@ -24,8 +24,10 @@ from backend.api.subtitles import (  # noqa: E402
     SubtitleCorrectionSaveRequest,
     SubtitleEntriesProcessRequest,
     SubtitleEntryPayload,
+    SubtitleSegmentRecognizeRequest,
     SubtitlePresetRename,
     process_subtitle_entries,
+    recognize_subtitle_segment,
     save_corrected_ass,
     save_corrected_subtitle,
 )
@@ -453,6 +455,31 @@ Language: ja
         self.assertEqual(process_mock.call_args.kwargs["custom_instruction"], "保留游戏术语")
         self.assertEqual(process_mock.call_args.kwargs["settings"]["system_prompt"], "独立提示词预设")
         self.assertEqual(process_mock.call_args.kwargs["settings"]["subtitle_batch_size"], 12)
+
+    def test_recognize_segment_shifts_entries_to_original_timeline(self):
+        """局部重新识别返回的字幕应平移回原视频时间轴"""
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as file:
+            file.write(b"video")
+            video_path = file.name
+        self.addCleanup(lambda: os.path.exists(video_path) and os.remove(video_path))
+        request = SubtitleSegmentRecognizeRequest(
+            video_path=video_path,
+            start="00:00:10,000",
+            end="00:00:15,000",
+        )
+
+        with patch("backend.api.subtitles._export_video_segment", return_value=video_path), \
+                patch("backend.api.subtitles._safe_remove_file"), \
+                patch("backend.api.subtitles.LocalSpeechRecognizer") as recognizer_cls:
+            recognizer_cls.return_value.transcribe_video.return_value = ([
+                {"index": 1, "start": "00:00:00,500", "end": "00:00:02,000", "text": "重新识别字幕"},
+            ], "zh")
+            response = asyncio.run(recognize_subtitle_segment(request))
+
+        self.assertEqual(response.entries[0].start, "00:00:10,500")
+        self.assertEqual(response.entries[0].end, "00:00:12,000")
+        self.assertEqual(response.entries[0].text, "重新识别字幕")
+        self.assertEqual(response.language, "zh")
 
 
 if __name__ == "__main__":

@@ -74,6 +74,12 @@ type PreviewSegment = {
   entryIndex: number
   sessionId: number
 }
+type PendingRecognizedSegment = {
+  targetIndexes: number[]
+  entries: SubtitleEntry[]
+  message: string
+  language: string
+}
 
 interface StudioSubtitleWorkbenchProps {
   suggestedSubtitlePath?: string | null
@@ -123,6 +129,8 @@ export function StudioSubtitleWorkbench({
   const [listScrollTop, setListScrollTop] = useState(0)
   const [previewSegment, setPreviewSegment] = useState<PreviewSegment | null>(null)
   const [previewError, setPreviewError] = useState('')
+  const [isRecognizingSegment, setIsRecognizingSegment] = useState(false)
+  const [pendingRecognizedSegment, setPendingRecognizedSegment] = useState<PendingRecognizedSegment | null>(null)
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
@@ -731,6 +739,75 @@ export function StudioSubtitleWorkbench({
     } else {
       await saveSrt()
     }
+  }
+
+  const handleRecognizeSegment = async () => {
+    if (!selectedJobSourceVideo) {
+      setNotice({ type: 'warning', message: '当前任务没有可用源视频，不能重新识别。' })
+      return
+    }
+    if (!validCheckedEntryIndexes.length) {
+      setNotice({ type: 'warning', message: '请先勾选要重新识别的字幕时间轴。' })
+      return
+    }
+    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
+      setNotice({ type: 'warning', message: '重新识别需要勾选连续字幕，请先调整勾选范围。' })
+      return
+    }
+
+    const targetIndexes = validCheckedEntryIndexes
+    const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
+    const firstEntry = targetEntries[0]
+    const lastEntry = targetEntries[targetEntries.length - 1]
+    if (!firstEntry || !lastEntry) {
+      setNotice({ type: 'warning', message: '当前勾选的字幕无法重新识别。' })
+      return
+    }
+
+    setIsRecognizingSegment(true)
+    setNotice({ type: 'info', message: '正在重新识别勾选的时间段...' })
+    try {
+      const result = await subtitleApi.recognizeSegment({
+        video_path: selectedJobSourceVideo,
+        start: firstEntry.start,
+        end: lastEntry.end,
+        language: detectSubtitleLanguage(splitSubtitleByLanguage(firstEntry.text).original),
+      })
+      const recognizedEntries = normalizeEntries(result.entries)
+      const previewEntry = buildMergedSubtitleEntry(targetEntries, result.plain_text || entriesToPlainTextForPreview(recognizedEntries))
+      setPendingRecognizedSegment({
+        targetIndexes,
+        entries: recognizedEntries,
+        message: result.message,
+        language: result.language,
+      })
+      previewSubtitleEntry(previewEntry, targetIndexes[0])
+      setNotice({ type: 'success', message: '重新识别已完成，先预览确认后再应用。' })
+    } catch (error) {
+      const message = `重新识别失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsRecognizingSegment(false)
+    }
+  }
+
+  const applyRecognizedSegment = () => {
+    if (!pendingRecognizedSegment) return
+    const nextEntries = replaceEntriesAtIndexes(entries, pendingRecognizedSegment.targetIndexes, pendingRecognizedSegment.entries)
+    const nextSelectedIndex = Math.min(pendingRecognizedSegment.targetIndexes[0], Math.max(0, nextEntries.length - 1))
+    setEntries(nextEntries)
+    setSelectedIndex(nextSelectedIndex)
+    setCheckedEntryIndexes(nextEntries.length ? [nextSelectedIndex] : [])
+    setNotice({ type: 'success', message: pendingRecognizedSegment.message })
+    addLog('info', `重新识别已应用: ${pendingRecognizedSegment.message}`)
+    setPendingRecognizedSegment(null)
+    closeSegmentPlayer()
+  }
+
+  const cancelRecognizedSegment = () => {
+    setPendingRecognizedSegment(null)
+    closeSegmentPlayer()
   }
 
   const openAiInstructionDialog = (operation: ManualAiOperation) => {
@@ -1388,6 +1465,10 @@ export function StudioSubtitleWorkbench({
                     <FileText className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.split ? 'AI 拆分中…' : 'AI 拆分'}
                   </Button>
+                  <Button variant="outline" onClick={handleRecognizeSegment} disabled={isRecognizingSegment || isAiProcessing || !validCheckedEntryIndexes.length || !selectedJobSourceVideo}>
+                    <Bot className="mr-2 size-4" />
+                    {isRecognizingSegment ? '识别中…' : '重新识别'}
+                  </Button>
                 </div>
                 {!textProfiles.length && (
                   <Button variant="secondary" className="w-full" onClick={onOpenTextSettings}>
@@ -1400,12 +1481,16 @@ export function StudioSubtitleWorkbench({
           </aside>
         </div>
 
-        <Dialog open={Boolean(playingEntry)} onOpenChange={(open) => !open && closeSegmentPlayer()}>
+        <Dialog open={Boolean(playingEntry)} onOpenChange={(open) => !open && (pendingRecognizedSegment ? cancelRecognizedSegment() : closeSegmentPlayer())}>
           <DialogContent className="sm:max-w-4xl">
             <DialogHeader>
-              <DialogTitle>{selectedJob?.title || '播放字幕片段'}</DialogTitle>
+              <DialogTitle>{pendingRecognizedSegment ? '预览重新识别结果' : selectedJob?.title || '播放字幕片段'}</DialogTitle>
               <DialogDescription className="break-all">
-                {playingEntry ? `第 ${playingEntryIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}` : selectedJobPreviewVideo}
+                {pendingRecognizedSegment
+                  ? `将替换已勾选的 ${pendingRecognizedSegment.targetIndexes.length} 条字幕，先看这段视频再确认。`
+                  : playingEntry
+                    ? `第 ${playingEntryIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}`
+                    : selectedJobPreviewVideo}
               </DialogDescription>
             </DialogHeader>
             {playingEntry && previewVideoUrl && (
@@ -1426,6 +1511,33 @@ export function StudioSubtitleWorkbench({
               >
                 <track kind="captions" />
               </video>
+            )}
+            {pendingRecognizedSegment && (
+              <div className="rounded-lg border bg-background/80 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium">新识别字幕</p>
+                    <p className="text-xs text-muted-foreground">
+                      将替换已勾选的 {pendingRecognizedSegment.targetIndexes.length} 条字幕 · language={pendingRecognizedSegment.language}
+                    </p>
+                  </div>
+                  <Badge variant="secondary">{pendingRecognizedSegment.entries.length} 条</Badge>
+                </div>
+                <div className="max-h-40 space-y-1 overflow-auto text-xs">
+                  {pendingRecognizedSegment.entries.map((entry, index) => (
+                    <div key={`${entry.start}-${entry.end}-${index}`} className="grid grid-cols-[92px_minmax(0,1fr)] gap-2 rounded-md bg-muted/40 px-2 py-1">
+                      <span className="font-mono text-muted-foreground">{entry.start}</span>
+                      <span className="min-w-0 truncate">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {pendingRecognizedSegment && (
+              <DialogFooter>
+                <Button variant="outline" onClick={cancelRecognizedSegment}>取消</Button>
+                <Button onClick={applyRecognizedSegment}>确认应用</Button>
+              </DialogFooter>
             )}
           </DialogContent>
         </Dialog>
@@ -1637,6 +1749,21 @@ function subtitleEntryTranslatedText(entry: SubtitleEntry) {
 
 function subtitleEntryPlainText(entry: SubtitleEntry) {
   return splitSubtitleLines(entry.text).all.join('\n')
+}
+
+function entriesToPlainTextForPreview(entries: SubtitleEntry[]) {
+  return entries
+    .map((entry) => subtitleEntryPlainText(entry).trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+function detectSubtitleLanguage(text: string) {
+  if (hasJapaneseKana(text)) return 'ja'
+  if (hasKoreanText(text)) return 'ko'
+  if (/[\u3400-\u9fff]/.test(text)) return 'zh'
+  if (/[A-Za-z]/.test(text)) return 'en'
+  return undefined
 }
 
 // 合并字幕时保留第一条开始时间和最后一条结束时间，中间文本按双语结构拼接。
