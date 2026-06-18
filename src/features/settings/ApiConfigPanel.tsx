@@ -2,6 +2,7 @@
 // 文本 API 配置面板 - 管理模型渠道、模型获取、生成参数和自动化参数（shadcn 重做）
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { profileApi } from '@/lib/api'
 import { saveAutomationPreferences } from '@/lib/automationPreferences'
 import {
@@ -20,6 +21,8 @@ import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, TextareaField, type FieldOption } from '@/components/fields'
 
@@ -94,12 +97,12 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [showApiKey, setShowApiKey] = useState(false)
   const [promptPresets, setPromptPresets] = useState<TextPromptPreset[]>(() => loadTextPromptPresets())
   const [activePromptPresetId, setActivePromptPresetState] = useState(() => loadActiveTextPromptPresetId())
-  const [selectedPromptPresetId, setSelectedPromptPresetId] = useState<string>(() => loadActiveTextPromptPresetId())
   const [promptForm, setPromptForm] = useState(() => {
     const presets = loadTextPromptPresets()
     const activeId = loadActiveTextPromptPresetId()
     return createPromptForm(presets.find((preset) => preset.id === activeId) || presets[0])
   })
+  const [isPromptEditorOpen, setIsPromptEditorOpen] = useState(false)
   const { addLog } = useTaskStore()
   const profileRequestRef = useRef(0)
 
@@ -107,7 +110,6 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const provider = TEXT_PROVIDERS.find((item) => item.id === profileForm.provider_type) || TEXT_PROVIDERS[0]
   const activeModel = profileForm.custom_model.trim() || profileForm.model
   const activePromptPreset = useMemo(() => promptPresets.find((preset) => preset.id === activePromptPresetId) || promptPresets[0] || null, [promptPresets, activePromptPresetId])
-  const selectedPromptPreset = useMemo(() => promptPresets.find((preset) => preset.id === selectedPromptPresetId) || null, [promptPresets, selectedPromptPresetId])
 
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getTextSecret(profileId)
@@ -217,23 +219,14 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     const normalizedActiveId = nextPresets.some((preset) => preset.id === activeId) ? activeId : nextPresets[0]?.id || ''
     if (normalizedActiveId && normalizedActiveId !== activeId) setActiveTextPromptPresetId(normalizedActiveId)
     setActivePromptPresetState(normalizedActiveId)
-    if (selectedPromptPresetId !== 'new' && !nextPresets.some((preset) => preset.id === selectedPromptPresetId)) {
-      const fallback = nextPresets.find((preset) => preset.id === normalizedActiveId) || nextPresets[0]
-      setSelectedPromptPresetId(fallback?.id || 'new')
-      setPromptForm(createPromptForm(fallback))
+    if (promptForm.id !== 'new' && !nextPresets.some((preset) => preset.id === promptForm.id)) {
+      setPromptForm(createPromptForm(nextPresets.find((preset) => preset.id === normalizedActiveId) || nextPresets[0]))
     }
   }
 
-  const selectPromptPreset = (presetId: string) => {
-    if (presetId === 'new') {
-      setSelectedPromptPresetId('new')
-      setPromptForm(createPromptForm())
-      return
-    }
-    const preset = promptPresets.find((item) => item.id === presetId)
-    if (!preset) return
-    setSelectedPromptPresetId(preset.id)
+  const openPromptEditor = (preset?: TextPromptPreset) => {
     setPromptForm(createPromptForm(preset))
+    setIsPromptEditorOpen(true)
   }
 
   const handleSavePromptPreset = () => {
@@ -242,30 +235,34 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     const preset = createTextPromptPreset(promptForm.name, prompt, promptForm.description)
     const payload = promptForm.id === 'new' ? preset : { ...preset, id: promptForm.id }
     const next = upsertTextPromptPreset(payload)
-    setSelectedPromptPresetId(payload.id)
     setPromptForm(createPromptForm(payload))
     refreshPromptPresets(next)
+    setIsPromptEditorOpen(false)
     toast.success('提示词预设已保存')
   }
 
-  const handleActivatePromptPreset = (presetId = promptForm.id) => {
+  const handleActivatePromptPreset = (presetId: string) => {
     const preset = promptPresets.find((item) => item.id === presetId)
-    if (!preset) { toast.warning('请先保存这个提示词预设'); return }
+    if (!preset) { toast.warning('提示词预设不存在'); return }
     setActiveTextPromptPresetId(preset.id)
     setActivePromptPresetState(preset.id)
-    setSelectedPromptPresetId(preset.id)
     setPromptForm(createPromptForm(preset))
     toast.success(`已启用提示词：${preset.name}`)
   }
 
-  const handleDeletePromptPreset = () => {
-    if (promptForm.id === 'new') return
-    const next = deleteTextPromptPreset(promptForm.id)
+  const handleDeletePromptPreset = (presetId: string) => {
+    const preset = promptPresets.find((item) => item.id === presetId)
+    if (!preset) return
+    if (promptPresets.length <= 1) {
+      toast.warning('至少保留一个提示词预设')
+      return
+    }
+    const next = deleteTextPromptPreset(presetId)
     refreshPromptPresets(next)
     const fallback = next.find((preset) => preset.id === loadActiveTextPromptPresetId()) || next[0]
-    setSelectedPromptPresetId(fallback?.id || 'new')
     setPromptForm(createPromptForm(fallback))
-    toast.success('提示词预设已删除')
+    if (promptForm.id === presetId) setIsPromptEditorOpen(false)
+    toast.success(`已删除提示词：${preset.name}`)
   }
 
   const updateSetting = <K extends keyof TextApiSettings>(key: K, value: TextApiSettings[K]) => setSettings((current) => ({ ...current, [key]: value }))
@@ -326,61 +323,94 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
 
       {/* 独立提示词预设 */}
       <Card>
-        <CardHeader><CardTitle className="text-sm">提示词预设</CardTitle></CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-3">
+          <CardTitle className="text-sm">提示词预设</CardTitle>
+          <Button variant="outline" size="sm" onClick={() => openPromptEditor()}>
+            <Plus className="mr-1.5 size-4" />
+            添加提示词
+          </Button>
+        </CardHeader>
         <CardContent className="space-y-4">
-          <div className="rounded-lg border bg-muted/25 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">当前启用：{activePromptPreset?.name || '未启用'}</p>
-                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activePromptPreset?.prompt || DEFAULT_TEXT_SYSTEM_PROMPT}</p>
-              </div>
-              {activePromptPreset && <Button variant="outline" size="sm" onClick={() => selectPromptPreset(activePromptPreset.id)}>编辑当前</Button>}
-            </div>
+          <div className="rounded-lg border bg-muted/25 px-4 py-3 text-sm text-muted-foreground">
+            共 {promptPresets.length} 个提示词 · 已启用：{activePromptPreset ? 1 : 0}
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
-            <div className="space-y-2">
-              <SelectField
-                label="选择提示词"
-                value={selectedPromptPresetId}
-                options={[['new', '+ 新建提示词'], ...promptPresets.map((preset) => [preset.id, preset.id === activePromptPresetId ? `${preset.name} · 已启用` : preset.name] as FieldOption)]}
-                onChange={selectPromptPreset}
-              />
-              <div className="space-y-1.5">
-                {promptPresets.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => selectPromptPreset(preset.id)}
-                    className={cn(
-                      'w-full rounded-lg border p-2.5 text-left transition-colors hover:border-primary/50',
-                      selectedPromptPresetId === preset.id ? 'border-primary bg-primary/10' : 'bg-card',
-                    )}
-                  >
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{preset.name}</span>
-                      {preset.id === activePromptPresetId && <span className="shrink-0 rounded bg-success/10 px-1.5 py-0.5 text-[11px] text-success">启用</span>}
-                    </span>
-                    {preset.description && <span className="mt-1 line-clamp-2 text-xs text-muted-foreground">{preset.description}</span>}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <TextField label="预设名称" value={promptForm.name} onChange={(v) => setPromptForm({ ...promptForm, name: v })} />
-                <TextField label="说明" value={promptForm.description} placeholder="例如：翻译时严格保留术语" onChange={(v) => setPromptForm({ ...promptForm, description: v })} />
-              </div>
-              <TextareaField label="提示词内容" value={promptForm.prompt} rows={8} onChange={(v) => setPromptForm({ ...promptForm, prompt: v })} />
-              <div className="flex flex-wrap items-center gap-2">
-                <Button onClick={handleSavePromptPreset}>保存提示词</Button>
-                <Button variant="outline" onClick={() => handleActivatePromptPreset()} disabled={!selectedPromptPreset || promptForm.id === 'new'}>启用当前</Button>
-                {promptForm.id !== 'new' && <Button variant="outline" className="text-destructive" onClick={handleDeletePromptPreset}>删除提示词</Button>}
-                <span className="text-xs text-muted-foreground">提示词会影响字幕翻译、润色和一键完成，不再跟某个 API Key 绑定。</span>
-              </div>
-            </div>
+          <div className="space-y-3">
+            {promptPresets.map((preset) => {
+              const isActivePrompt = preset.id === activePromptPresetId
+              return (
+                <div
+                  key={preset.id}
+                  className={cn(
+                    'flex items-center gap-4 rounded-xl border bg-card px-4 py-3 transition-colors',
+                    isActivePrompt && 'border-primary/50 bg-primary/5',
+                  )}
+                >
+                  <Switch
+                    checked={isActivePrompt}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        handleActivatePromptPreset(preset.id)
+                      } else {
+                        toast.warning('至少需要启用一个提示词预设')
+                      }
+                    }}
+                    aria-label={`启用 ${preset.name}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-medium">{preset.name}</p>
+                      {isActivePrompt && <span className="rounded bg-success/10 px-1.5 py-0.5 text-[11px] text-success">启用中</span>}
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{preset.description || '未填写说明'}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => openPromptEditor(preset)}
+                      aria-label={`编辑 ${preset.name}`}
+                      title="编辑提示词"
+                    >
+                      <Pencil className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => handleDeletePromptPreset(preset.id)}
+                      disabled={promptPresets.length <= 1}
+                      aria-label={`删除 ${preset.name}`}
+                      title={promptPresets.length <= 1 ? '至少保留一个提示词' : '删除提示词'}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+              )
+            })}
           </div>
+          <Dialog open={isPromptEditorOpen} onOpenChange={setIsPromptEditorOpen}>
+            <DialogContent className="sm:max-w-4xl">
+              <DialogHeader>
+                <DialogTitle>{promptForm.id === 'new' ? '添加提示词' : '编辑提示词'}</DialogTitle>
+                <DialogDescription>提示词会用于字幕翻译、润色和一键完成。</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <TextField label="名称" value={promptForm.name} onChange={(v) => setPromptForm({ ...promptForm, name: v })} />
+                  <TextField label="描述" value={promptForm.description} placeholder="例如：翻译时严格保留术语" onChange={(v) => setPromptForm({ ...promptForm, description: v })} />
+                </div>
+                <TextareaField label="内容" value={promptForm.prompt} rows={14} onChange={(v) => setPromptForm({ ...promptForm, prompt: v })} />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsPromptEditorOpen(false)}>取消</Button>
+                <Button onClick={handleSavePromptPreset}>保存</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </CardContent>
       </Card>
 
