@@ -104,8 +104,8 @@ export function QueueWorkspace() {
               busyId={busyId}
               onPause={() => runJobAction(`pause:${job.id}`, '暂停', () => automationApi.pause(job.id))}
               onCancel={() => setConfirm({ title: '取消该任务？', description: `「${job.title}」正在运行的下载或处理进程会被停止。`, action: () => runJobAction(`cancel:${job.id}`, '取消', () => automationApi.cancel(job.id)) })}
-              onRetry={() => runJobAction(`retry:${job.id}`, '重试', () => automationApi.retry(job.id))}
-              onResume={() => runJobAction(`resume:${job.id}`, '继续', () => automationApi.resume(job.id))}
+              onRetry={() => runJobAction(`retry:${job.id}`, '重新开始', () => automationApi.retry(job.id))}
+              onResume={() => runJobAction(`resume:${job.id}`, '继续完成', () => automationApi.resume(job.id))}
               onSkip={() => setConfirm({ title: '跳过当前画面处理？', description: `「${job.title}」正在运行的 ffmpeg 会被停止，后续直接使用下载的原视频。`, action: () => runJobAction(`skip:${job.id}`, '跳过当前阶段', () => automationApi.skipCurrentStage(job.id)) })}
               onOpenSubtitle={() => openSubtitleWorkbench(job.id)}
             />
@@ -182,11 +182,11 @@ function JobCard({
           )}
           {job.can_resume && (
             <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onResume}>
-              <Play className="size-3.5" /> {job.status === 'paused' ? '继续' : '断点续跑'}
+              <Play className="size-3.5" /> 继续完成
             </Button>
           )}
           {job.can_retry && (
-            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onRetry}><RotateCcw className="size-3.5" /> 全部重跑</Button>
+            <Button variant="outline" size="sm" className="gap-1.5" disabled={busy} onClick={onRetry}><RotateCcw className="size-3.5" /> 重新开始</Button>
           )}
           {job.can_cancel && (
             <Button variant="outline" size="sm" className="gap-1.5 text-destructive" disabled={busy} onClick={onCancel}><X className="size-3.5" /> 取消</Button>
