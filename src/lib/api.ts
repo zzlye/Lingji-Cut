@@ -436,6 +436,13 @@ export const automationApi = {
       body: JSON.stringify(params),
     }),
 
+  /** 解析本地视频并生成工作台预览缩略图 */
+  previewLocalVideo: (source: string) =>
+    request<import('@/types').VideoParseResult>('/automation/local-video/preview', {
+      method: 'POST',
+      body: JSON.stringify({ source }),
+    }),
+
   /** 启动后台一键流程，立即返回任务 ID */
   start: (params: AutomationStartParams) =>
     request<import('@/types').AutomationStartResponse>('/automation/start', {

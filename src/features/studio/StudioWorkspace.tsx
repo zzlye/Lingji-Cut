@@ -1,6 +1,6 @@
 // src/features/studio/StudioWorkspace.tsx
 // 工作台 - 一条主线串起 URL→解析→一键完成→实时进度，开屏即见，取代原先空白的素材库首页
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
   CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FileVideo, X,
@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
 import { toLocalVideoSource } from '@/lib/automationPayload'
-import { videoApi } from '@/lib/api'
+import { automationApi, videoApi } from '@/lib/api'
 import { useParseVideo } from '@/hooks/useParseVideo'
 import { useAutoRun } from '@/hooks/useAutoRun'
 import { useVideoStore } from '@/stores/videoStore'
@@ -54,6 +54,8 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
   const [url, setUrl] = useState('')
   const [localVideoPath, setLocalVideoPath] = useState('')
   const [isSelectingLocalVideo, setIsSelectingLocalVideo] = useState(false)
+  const [isGeneratingLocalThumbnail, setIsGeneratingLocalThumbnail] = useState(false)
+  const localPreviewRequestId = useRef(0)
   const { parse, isParsing } = useParseVideo()
   const { start, isStarting } = useAutoRun()
   const setCurrentVideo = useVideoStore((s) => s.setCurrentVideo)
@@ -63,7 +65,11 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
 
   // 优先展示进行中的任务，否则展示最近一个
   const activeJob = jobs.find((job) => job.status === 'running' || job.status === 'pending') ?? jobs[0]
-  const displayVideo = currentVideo ?? activeJob?.video_info ?? null
+  const displayVideo = currentVideo ?? (
+    activeJob?.video_info
+      ? { ...activeJob.video_info, cover_asset_path: activeJob.cover_asset_path || activeJob.video_info.cover_asset_path || null }
+      : null
+  )
 
   const sourceForRun = localVideoPath ? toLocalVideoSource(localVideoPath) : url
   const hasSource = Boolean(sourceForRun.trim())
@@ -91,6 +97,8 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       const title = filePath.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || '本地视频'
       setLocalVideoPath(filePath)
       setUrl('')
+      const requestId = localPreviewRequestId.current + 1
+      localPreviewRequestId.current = requestId
       setCurrentVideo({
         id: 0,
         video_id: 'local-preview',
@@ -103,6 +111,24 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
         subtitles: [],
       })
       toast.success('已选择本地视频，可直接一键完成')
+      setIsGeneratingLocalThumbnail(true)
+      void automationApi.previewLocalVideo(filePath)
+        .then((result) => {
+          if (localPreviewRequestId.current !== requestId) return
+          setCurrentVideo(result)
+          if (!result.cover_asset_path && !result.thumbnail_url) {
+            toast.warning('本地视频已选择，但缩略图生成失败')
+          }
+        })
+        .catch((error) => {
+          if (localPreviewRequestId.current !== requestId) return
+          toast.warning(`本地视频缩略图生成失败：${error instanceof Error ? error.message : '未知错误'}`)
+        })
+        .finally(() => {
+          if (localPreviewRequestId.current === requestId) {
+            setIsGeneratingLocalThumbnail(false)
+          }
+        })
     } catch (error) {
       toast.error(`选择本地视频失败：${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
@@ -111,7 +137,9 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
   }
 
   const handleClearLocalVideo = () => {
+    localPreviewRequestId.current += 1
     setLocalVideoPath('')
+    setIsGeneratingLocalThumbnail(false)
     setCurrentVideo(null)
   }
 
@@ -169,7 +197,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       {/* 双栏：左信息+进度，右配置摘要 */}
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
-          {displayVideo ? <VideoInfoCard video={displayVideo} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
+          {displayVideo ? <VideoInfoCard video={displayVideo} isThumbnailLoading={Boolean(localVideoPath && isGeneratingLocalThumbnail)} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
           {activeJob && <JobProgressCard job={activeJob} />}
         </div>
         <ConfigSummary preferences={preferences} onOpenSettings={onOpenSettings} />
@@ -281,12 +309,14 @@ function PipelineStepper({ job }: { job?: AutomationJob }) {
 }
 
 /** 视频信息卡 */
-function VideoInfoCard({ video }: { video: VideoParseResult }) {
+function VideoInfoCard({ video, isThumbnailLoading = false }: { video: VideoParseResult; isThumbnailLoading?: boolean }) {
   const [isDownloadingCover, setIsDownloadingCover] = useState(false)
   const [lastCoverPath, setLastCoverPath] = useState('')
+  const previewUrl = video.thumbnail_url || (video.cover_asset_path ? automationApi.mediaUrl(video.cover_asset_path) : '')
+  const canDownloadCover = Boolean(video.thumbnail_url)
 
   const handleDownloadCover = async () => {
-    if (isDownloadingCover || !video.thumbnail_url) return
+    if (isDownloadingCover || !canDownloadCover) return
     const picker = window.electron?.dialog?.selectDirectory
     if (!picker) {
       toast.warning('当前环境不支持系统目录选择，无法打开目录选择窗口')
@@ -311,9 +341,13 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
     <Card>
       <CardContent className="flex gap-4 pt-6">
         <div className="aspect-video w-44 shrink-0 overflow-hidden rounded-lg bg-muted">
-          {video.thumbnail_url
-            ? <img src={video.thumbnail_url} alt="" className="size-full object-cover" />
-            : <div className="grid size-full place-items-center text-muted-foreground"><Film className="size-6" /></div>}
+          {previewUrl
+            ? <img src={previewUrl} alt="" className="size-full object-cover" />
+            : (
+                <div className="grid size-full place-items-center text-muted-foreground">
+                  {isThumbnailLoading ? <Loader2 className="size-6 animate-spin" /> : <Film className="size-6" />}
+                </div>
+              )}
         </div>
         <div className="min-w-0 flex-1 space-y-2">
           <p className="line-clamp-2 text-sm font-medium">{video.title ?? '未知标题'}</p>
@@ -328,7 +362,7 @@ function VideoInfoCard({ video }: { video: VideoParseResult }) {
               variant="outline"
               size="sm"
               onClick={handleDownloadCover}
-              disabled={isDownloadingCover || !video.thumbnail_url}
+              disabled={isDownloadingCover || !canDownloadCover}
             >
               <Download className="mr-1.5 size-3.5" />
               {isDownloadingCover ? '保存封面中…' : '下载封面'}

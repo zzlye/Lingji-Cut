@@ -176,6 +176,27 @@ class AutomationJobResponse(BaseModel):
         from_attributes = True
 
 
+class LocalVideoPreviewRequest(BaseModel):
+    """工作台本地视频预览请求"""
+    source: str
+
+
+class LocalVideoPreviewResponse(BaseModel):
+    """工作台本地视频预览响应"""
+    id: int
+    video_id: str
+    platform: str
+    title: Optional[str] = None
+    author: Optional[str] = None
+    duration: Optional[int] = None
+    thumbnail_url: Optional[str] = None
+    cover_asset_path: Optional[str] = None
+    formats: list[dict[str, Any]] = Field(default_factory=list)
+    subtitles: list[dict[str, Any]] = Field(default_factory=list)
+    format_count: int = 0
+    subtitle_count: int = 0
+
+
 class AutomationStartResponse(BaseModel):
     """启动自动化任务响应"""
     message: str
@@ -639,46 +660,59 @@ def _ensure_job_video_thumbnail(job: AutomationJobRecord, db: Optional[Session])
         return None
 
     output_dir = _job_thumbnail_output_dir(job, video_path)
-    os.makedirs(output_dir, exist_ok=True)
-    thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
-    if os.path.isfile(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+    thumbnail_path = _generate_video_thumbnail(video_path, output_dir)
+    if thumbnail_path:
         _store_job_cover_path(job, db, thumbnail_path)
         return thumbnail_path
+    return None
 
-    cmd = [
-        get_ffmpeg_command(),
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        "-ss", "1",
-        "-i", video_path,
-        "-frames:v", "1",
-        "-vf", "scale=640:-2",
-        "-q:v", "3",
-        thumbnail_path,
-    ]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0 or not os.path.isfile(thumbnail_path) or os.path.getsize(thumbnail_path) <= 0:
+
+def _ensure_local_video_preview_thumbnail(video_path: str, paths: dict[str, str]) -> Optional[str]:
+    """为工作台选择的本地视频生成预览缩略图"""
+    output_dir = paths.get("workspace_dir") or paths.get("downloads_dir") or os.path.dirname(video_path)
+    return _generate_video_thumbnail(video_path, output_dir)
+
+
+def _generate_video_thumbnail(video_path: str, output_dir: str, file_name: str = "thumbnail.jpg") -> Optional[str]:
+    """从本地视频截取一张预览图；失败时返回空值，不阻断主流程"""
+    os.makedirs(output_dir, exist_ok=True)
+    thumbnail_path = os.path.join(output_dir, file_name)
+    if os.path.isfile(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+        return thumbnail_path
+
+    for seek_seconds in ("1", "0"):
+        cmd = [
+            get_ffmpeg_command(),
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-ss", seek_seconds,
+            "-i", video_path,
+            "-frames:v", "1",
+            "-vf", "scale=640:-2",
+            "-q:v", "3",
+            thumbnail_path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+        except Exception:
+            continue
+        if result.returncode == 0 and os.path.isfile(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+            return thumbnail_path
         try:
             if os.path.exists(thumbnail_path):
                 os.remove(thumbnail_path)
         except OSError:
             pass
-        return None
-
-    _store_job_cover_path(job, db, thumbnail_path)
-    return thumbnail_path
+    return None
 
 
 def _job_export_video_path(job: AutomationJobRecord) -> Optional[str]:
@@ -3049,6 +3083,37 @@ def _normalize_batch_urls(urls: list[str]) -> list[str]:
         seen_urls.add(url)
         normalized_urls.append(url)
     return normalized_urls
+
+
+@router.post("/local-video/preview", response_model=LocalVideoPreviewResponse)
+def preview_local_video(request: LocalVideoPreviewRequest, db: Session = Depends(get_db)):
+    """解析工作台选择的本地视频，并尽量生成缩略图"""
+    try:
+        source_path = _safe_local_video_source_path(request.source)
+        video = _parse_or_update_local_video(db, source_path)
+        paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+        cover_asset_path = _ensure_local_video_preview_thumbnail(source_path, paths)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"本地视频预览生成失败: {exc}") from exc
+
+    formats = _json_list_from_model(video.formats)
+    subtitles = _json_list_from_model(video.subtitles)
+    return LocalVideoPreviewResponse(
+        id=video.id,
+        video_id=video.video_id,
+        platform=video.platform,
+        title=video.title,
+        author=video.author,
+        duration=video.duration,
+        thumbnail_url=video.thumbnail_url,
+        cover_asset_path=cover_asset_path,
+        formats=formats,
+        subtitles=subtitles,
+        format_count=len(formats),
+        subtitle_count=len(subtitles),
+    )
 
 
 @router.post("/run", response_model=AutomationRunResponse)

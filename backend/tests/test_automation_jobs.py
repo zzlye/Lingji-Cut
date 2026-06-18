@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.api.automation import _download_cover_asset, _run_automation_sync, list_automation_jobs  # noqa: E402
+from backend.api.automation import _download_cover_asset, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
 
@@ -424,6 +424,46 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(params["cover_asset_path"], response.cover_asset_path)
         self.assertEqual(db.commit_count, 1)
         self.assertTrue(run_mock.called)
+
+    def test_local_video_preview_generates_thumbnail_for_workspace(self):
+        """工作台选择本地视频时会生成可展示的缩略图路径"""
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+
+        with tempfile.TemporaryDirectory(prefix="automation_local_preview_") as temp_dir:
+            source_path = os.path.join(temp_dir, "Local Preview.mp4")
+            with open(source_path, "wb") as file:
+                file.write(b"video")
+            workspace_dir = os.path.join(temp_dir, "workspace")
+            paths = {
+                "workspace_dir": workspace_dir,
+                "workspace_name": "local-preview",
+                "downloads_dir": os.path.join(workspace_dir, "downloads"),
+                "output_dir": os.path.join(workspace_dir, "output"),
+                "exports_dir": os.path.join(workspace_dir, "exports"),
+            }
+            for directory in (paths["workspace_dir"], paths["downloads_dir"], paths["output_dir"], paths["exports_dir"]):
+                os.makedirs(directory, exist_ok=True)
+
+            def fake_run(cmd, **_kwargs):
+                """模拟 ffmpeg 截帧并写出缩略图"""
+                with open(cmd[-1], "wb") as file:
+                    file.write(b"jpg")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            db = Session()
+            try:
+                with patch("backend.api.automation.ensure_video_workspace", return_value=paths), \
+                        patch("backend.api.automation.get_ffmpeg_command", return_value="ffmpeg"), \
+                        patch("backend.api.automation.subprocess.run", side_effect=fake_run):
+                    response = preview_local_video(LocalVideoPreviewRequest(source=source_path), db)
+                    self.assertEqual(response.platform, "local")
+                    self.assertEqual(response.title, "Local Preview")
+                    self.assertTrue(response.cover_asset_path.endswith("thumbnail.jpg"))
+                    self.assertTrue(os.path.isfile(response.cover_asset_path))
+            finally:
+                db.close()
 
     def test_list_jobs_prunes_completed_item_when_export_file_is_missing(self):
         """本地成品文件夹被手动删除后，刷新任务列表会自动清理素材记录"""

@@ -25,6 +25,7 @@ export interface VideoParseResult {
   author: string | null
   duration: number | null
   thumbnail_url: string | null
+  cover_asset_path?: string | null
   formats: VideoFormat[]
   subtitles: SubtitleTrack[]
   format_count?: number
