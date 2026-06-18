@@ -8,6 +8,7 @@ import { getActiveTextSystemPrompt, loadActiveTextPromptPreset } from '@/lib/tex
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
 import { usePrefsStore } from '@/stores/prefsStore'
+import { useSubtitleDraftStore } from '@/stores/subtitleDraftStore'
 import type { ApiProfile, AutomationJob, SubtitleEntry, SubtitleTextOperation } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -100,6 +101,8 @@ export function StudioSubtitleWorkbench({
   const updatePreferences = usePrefsStore((state) => state.update)
   const { addLog } = useTaskStore()
   const syncBackendJob = useAutomationStore((state) => state.syncBackendJob)
+  const getSubtitleDraft = useSubtitleDraftStore((state) => state.getDraft)
+  const saveSubtitleDraft = useSubtitleDraftStore((state) => state.saveDraft)
 
   const [subtitlePath, setSubtitlePath] = useState(suggestedSubtitlePath || '')
   const [pasteText, setPasteText] = useState(SAMPLE_SUBTITLE_TEXT)
@@ -131,8 +134,10 @@ export function StudioSubtitleWorkbench({
   const [previewError, setPreviewError] = useState('')
   const [isRecognizingSegment, setIsRecognizingSegment] = useState(false)
   const [pendingRecognizedSegment, setPendingRecognizedSegment] = useState<PendingRecognizedSegment | null>(null)
+  const [restoredDraftKey, setRestoredDraftKey] = useState('')
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
+  const subtitleListScrollRef = useRef<HTMLDivElement | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const previewAutoplayTokenRef = useRef(0)
   const previewPlayedTokenRef = useRef(0)
@@ -140,6 +145,8 @@ export function StudioSubtitleWorkbench({
   const previewStopAtRef = useRef<number | null>(null)
   const previewFrameRef = useRef<number | null>(null)
   const previewSessionIdRef = useRef(0)
+  const latestDraftRef = useRef<typeof draft>(null)
+  const latestSuggestedSubtitleFileRef = useRef('')
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
   const selectedEntry = entries[selectedIndex] || null
@@ -160,6 +167,7 @@ export function StudioSubtitleWorkbench({
     },
     [suggestedSubtitlePath],
   )
+  const draftKey = useMemo(() => buildSubtitleDraftKey(selectedJob), [selectedJob?.id])
   const selectedJobResolvedSubtitle = selectedJob?.id ? (resolvedJobSubtitlePaths[selectedJob.id] || '').trim() : ''
   const selectedJobSourceVideo = useMemo(() => resolveJobSourceVideo(selectedJob), [selectedJob])
   const selectedJobPreviewVideo = useMemo(() => resolveJobPreviewVideo(selectedJob, selectedJobSourceVideo), [selectedJob, selectedJobSourceVideo])
@@ -174,6 +182,7 @@ export function StudioSubtitleWorkbench({
     () => resolveExplicitSubtitlePath(selectedJob, selectedJobResolvedSubtitle),
     [selectedJob, selectedJobResolvedSubtitle],
   )
+  const draft = useMemo(() => getSubtitleDraft(draftKey), [draftKey, getSubtitleDraft])
   const jobOptions = useMemo<FieldOption[]>(
     () => [
       ['', '不绑定任务，仅手动处理'],
@@ -223,6 +232,84 @@ export function StudioSubtitleWorkbench({
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
   const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
+
+  latestDraftRef.current = draft
+  latestSuggestedSubtitleFileRef.current = suggestedSubtitleFile
+
+  const saveCurrentDraft = useCallback((scrollTop = listScrollTop) => {
+    if (!draftKey || restoredDraftKey !== draftKey) return
+    const hasDraftContent = entries.length > 0
+      || Boolean(entryKeyword)
+      || checkedEntryIndexes.length > 0
+      || selectedIndex > 0
+      || scrollTop > 0
+    if (!hasDraftContent) return
+    saveSubtitleDraft(draftKey, {
+      subtitlePath,
+      outputPath,
+      fileName,
+      entries,
+      selectedIndex,
+      checkedEntryIndexes,
+      entryKeyword,
+      listScrollTop: scrollTop,
+      updatedAt: Date.now(),
+    })
+  }, [
+    draftKey,
+    restoredDraftKey,
+    subtitlePath,
+    outputPath,
+    fileName,
+    entries,
+    selectedIndex,
+    checkedEntryIndexes,
+    entryKeyword,
+    listScrollTop,
+    saveSubtitleDraft,
+  ])
+
+  useEffect(() => {
+    const currentDraft = latestDraftRef.current
+    setRestoredDraftKey('')
+    if (!currentDraft) {
+      setSubtitlePath(latestSuggestedSubtitleFileRef.current || '')
+      setOutputPath('')
+      setFileName('manual_subtitle.srt')
+      setEntries([])
+      setSelectedIndex(0)
+      setCheckedEntryIndexes([])
+      setEntryKeyword('')
+      setListScrollTop(0)
+      setRestoredDraftKey(draftKey)
+      return
+    }
+    setSubtitlePath(currentDraft.subtitlePath)
+    setOutputPath(currentDraft.outputPath)
+    setFileName(currentDraft.fileName)
+    setEntries(currentDraft.entries)
+    setSelectedIndex(Math.min(currentDraft.selectedIndex, Math.max(0, currentDraft.entries.length - 1)))
+    setCheckedEntryIndexes(currentDraft.checkedEntryIndexes.filter((index) => index >= 0 && index < currentDraft.entries.length))
+    setEntryKeyword(currentDraft.entryKeyword)
+    setListScrollTop(currentDraft.listScrollTop)
+    setRestoredDraftKey(draftKey)
+  // 只在任务草稿 key 变化时恢复，避免同一任务后端刷新路径后覆盖用户正在编辑的内容。
+  }, [draftKey])
+
+  useEffect(() => {
+    saveCurrentDraft()
+  }, [saveCurrentDraft])
+
+  useEffect(() => {
+    return () => saveCurrentDraft(subtitleListScrollRef.current?.scrollTop ?? listScrollTop)
+  }, [saveCurrentDraft, listScrollTop])
+
+  useEffect(() => {
+    if (restoredDraftKey !== draftKey) return
+    const container = subtitleListScrollRef.current
+    if (!container || container.scrollTop === listScrollTop) return
+    container.scrollTop = listScrollTop
+  }, [draftKey, restoredDraftKey, listScrollTop, entries.length])
 
   function createPreviewSegment(entry: SubtitleEntry, entryIndex: number): PreviewSegment {
     const sessionId = previewSessionIdRef.current + 1
@@ -379,6 +466,10 @@ export function StudioSubtitleWorkbench({
     if (!selectedJob?.id || !selectedJobSubtitleCandidates.length || autoLoadKeyRef.current === autoLoadKey) {
       return
     }
+    if (draft) {
+      autoLoadKeyRef.current = autoLoadKey
+      return
+    }
     autoLoadKeyRef.current = autoLoadKey
     void loadSubtitleCandidates(selectedJobSubtitleCandidates, {
       jobId: selectedJob.id,
@@ -387,7 +478,7 @@ export function StudioSubtitleWorkbench({
       translatedSubtitlePath: selectedJobTranslatedSubtitleFile,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedJob?.id, selectedJobSubtitleCandidates.join('|')])
+  }, [draft, selectedJob?.id, selectedJobSubtitleCandidates.join('|')])
 
   useEffect(() => {
     const loadTextProfiles = async () => {
@@ -686,6 +777,7 @@ export function StudioSubtitleWorkbench({
 
   const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
     const nextScrollTop = event.currentTarget.scrollTop
+    subtitleListScrollRef.current = event.currentTarget
     if (listScrollFrameRef.current !== null) {
       cancelAnimationFrame(listScrollFrameRef.current)
     }
@@ -1311,7 +1403,7 @@ export function StudioSubtitleWorkbench({
                 先选择任务并读取字幕，或展开其它导入方式手动读取。
               </div>
             ) : (
-              <div className="min-h-0 flex-1 overflow-auto p-3" onScroll={handleListScroll}>
+              <div ref={subtitleListScrollRef} className="min-h-0 flex-1 overflow-auto p-3" onScroll={handleListScroll}>
                 {filteredEntryIndexes.length ? (
                   <>
                     <div style={{ height: listTopSpacer }} />
@@ -2168,6 +2260,10 @@ function isEditableSubtitlePath(path: string | null | undefined) {
 
 function isMediaPath(path: string | null | undefined) {
   return Boolean(path && /\.(mp4|mov|mkv|webm|avi|m4v|mp3|wav|m4a|aac|flac)$/i.test(path))
+}
+
+function buildSubtitleDraftKey(job: AutomationJob | null) {
+  return job?.id ? `job:${job.id}` : 'manual'
 }
 
 function SectionTitle({ title, description }: { title: string; description: string }) {
