@@ -7,6 +7,14 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 import os
+import ctypes
+import platform
+import shutil
+import subprocess
+import tempfile
+import urllib.request
+import zipfile
+from urllib.parse import unquote, urlparse
 
 from ..core import Downloader, FFmpegProcessor, SubtitleEngine, TextEngine
 from ..core.paths import detect_video_workspace, ensure_project_dirs, ensure_video_workspace
@@ -167,6 +175,80 @@ class SubtitleCorrectionResponse(BaseModel):
     plain_text: str = ""
     output_path: Optional[str] = None
     format: Optional[str] = None
+
+
+class FontInstallRequest(BaseModel):
+    """字体安装请求"""
+    font_name: str
+
+
+class FontInstallResponse(BaseModel):
+    """字体安装响应"""
+    message: str
+    font_name: str
+    font_dir: str
+    installed_files: list[str] = Field(default_factory=list)
+
+
+# 免费字体下载源；只放可公开下载的字体文件，不处理商业字体授权。
+FREE_FONT_SOURCES: dict[str, dict] = {
+    "source han sans sc": {
+        "display_name": "Source Han Sans SC",
+        "urls": ["https://raw.githubusercontent.com/adobe-fonts/source-han-sans/release/OTF/SimplifiedChinese/SourceHanSansSC-Regular.otf"],
+    },
+    "source han serif sc": {
+        "display_name": "Source Han Serif SC",
+        "urls": ["https://raw.githubusercontent.com/adobe-fonts/source-han-serif/release/OTF/SimplifiedChinese/SourceHanSerifSC-Regular.otf"],
+    },
+    "noto sans sc": {
+        "display_name": "Noto Sans SC",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"],
+    },
+    "noto serif sc": {
+        "display_name": "Noto Serif SC",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/notoserifsc/NotoSerifSC%5Bwght%5D.ttf"],
+    },
+    "noto sans cjk sc": {
+        "display_name": "Noto Sans CJK SC",
+        "urls": ["https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"],
+    },
+    "lxgw wenkai": {
+        "display_name": "LXGW WenKai",
+        "urls": ["https://raw.githubusercontent.com/lxgw/LxgwWenKai/main/fonts/TTF/LXGWWenKai-Regular.ttf"],
+    },
+    "zcool qingke huangyou": {
+        "display_name": "ZCOOL QingKe HuangYou",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/zcoolqingkehuangyou/ZCOOLQingKeHuangYou-Regular.ttf"],
+    },
+    "zcool kuaile": {
+        "display_name": "ZCOOL KuaiLe",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/zcoolkuaile/ZCOOLKuaiLe-Regular.ttf"],
+    },
+    "zcool xiaowei": {
+        "display_name": "ZCOOL XiaoWei",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/zcoolxiaowei/ZCOOLXiaoWei-Regular.ttf"],
+    },
+    "ma shan zheng": {
+        "display_name": "Ma Shan Zheng",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/mashanzheng/MaShanZheng-Regular.ttf"],
+    },
+    "long cang": {
+        "display_name": "Long Cang",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/longcang/LongCang-Regular.ttf"],
+    },
+    "zhi mang xing": {
+        "display_name": "Zhi Mang Xing",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/zhimangxing/ZhiMangXing-Regular.ttf"],
+    },
+    "m plus rounded 1c": {
+        "display_name": "M PLUS Rounded 1c",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/mplusrounded1c/MPLUSRounded1c-Regular.ttf"],
+    },
+    "zen maru gothic": {
+        "display_name": "Zen Maru Gothic",
+        "urls": ["https://github.com/google/fonts/raw/main/ofl/zenmarugothic/ZenMaruGothic-Regular.ttf"],
+    },
+}
 
 
 def _preset_to_dict(preset: SubtitlePreset | None) -> dict:
@@ -373,6 +455,113 @@ def ensure_default_subtitle_presets(db: Session) -> None:
     db.commit()
 
 
+def _normalize_font_key(font_name: str) -> str:
+    """归一化字体名称，用来匹配后端内置的免费字体下载源"""
+    return str(font_name or "").strip().lower()
+
+
+def _resolve_free_font_source(font_name: str) -> dict:
+    """根据字体名读取免费字体来源，不允许下载未登记或商业字体"""
+    key = _normalize_font_key(font_name)
+    if not key:
+        raise HTTPException(status_code=400, detail="字体名称不能为空")
+    source = FREE_FONT_SOURCES.get(key)
+    if not source:
+        raise HTTPException(status_code=400, detail="当前字体没有内置下载源，请从字体官网安装后再使用")
+    return source
+
+
+def _download_font_sources(source: dict, temp_dir: str) -> list[str]:
+    """下载字体源文件，支持直接字体文件和 zip 压缩包"""
+    downloaded: list[str] = []
+    for url in source.get("urls") or []:
+        parsed = urlparse(str(url))
+        raw_name = unquote(os.path.basename(parsed.path)).strip() or "font_download"
+        target_path = os.path.join(temp_dir, raw_name)
+        request = urllib.request.Request(str(url), headers={"User-Agent": "LingjianWorkshop/0.1"})
+        with urllib.request.urlopen(request, timeout=120) as response:
+            with open(target_path, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+        downloaded.append(target_path)
+    return downloaded
+
+
+def _collect_font_files(paths: list[str], temp_dir: str) -> list[str]:
+    """从下载产物中提取真正可安装的字体文件"""
+    font_files: list[str] = []
+    allowed_extensions = {".ttf", ".otf", ".ttc", ".otc"}
+    extract_dir = os.path.join(temp_dir, "extracted")
+    for path in paths:
+        extension = os.path.splitext(path)[1].lower()
+        if extension == ".zip":
+            with zipfile.ZipFile(path) as archive:
+                archive.extractall(extract_dir)
+            for root, _dirs, files in os.walk(extract_dir):
+                for file_name in files:
+                    if os.path.splitext(file_name)[1].lower() in allowed_extensions:
+                        font_files.append(os.path.join(root, file_name))
+        elif extension in allowed_extensions:
+            font_files.append(path)
+
+    if not font_files:
+        raise RuntimeError("下载完成，但没有找到可安装的 ttf/otf 字体文件")
+    return font_files
+
+
+def _font_install_target_dir() -> str:
+    """按系统返回当前用户可写的字体安装目录"""
+    system = platform.system().lower()
+    if system == "windows":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Microsoft", "Windows", "Fonts")
+    if system == "darwin":
+        return os.path.expanduser("~/Library/Fonts")
+    return os.path.expanduser("~/.local/share/fonts")
+
+
+def _registry_font_kind(path: str) -> str:
+    """Windows 字体注册表显示类型"""
+    return "TrueType" if os.path.splitext(path)[1].lower() in {".ttf", ".ttc"} else "OpenType"
+
+
+def _notify_windows_font_changed() -> None:
+    """通知 Windows 刷新字体缓存，失败不影响已经复制和注册的字体"""
+    try:
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001D, 0, "Environment", 0x0002, 1000, None)
+    except Exception:
+        pass
+
+
+def _install_font_files(font_files: list[str], display_name: str) -> tuple[str, list[str]]:
+    """把字体安装到当前用户目录，避免要求管理员权限"""
+    target_dir = _font_install_target_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    installed_files: list[str] = []
+
+    for index, source_path in enumerate(font_files, 1):
+        file_name = os.path.basename(source_path)
+        target_path = os.path.join(target_dir, file_name)
+        shutil.copy2(source_path, target_path)
+        installed_files.append(target_path)
+
+        if platform.system().lower() == "windows":
+            value_name = f"{display_name}{'' if len(font_files) == 1 else f' {index}'} ({_registry_font_kind(target_path)})"
+            result = subprocess.run(
+                ["reg", "add", r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts", "/v", value_name, "/t", "REG_SZ", "/d", target_path, "/f"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout or "注册 Windows 字体失败").strip())
+
+    if platform.system().lower() == "windows":
+        _notify_windows_font_changed()
+    elif platform.system().lower() == "linux":
+        subprocess.run(["fc-cache", "-f", target_dir], capture_output=True, check=False)
+
+    return target_dir, installed_files
+
+
 @router.get("/presets", response_model=list[SubtitlePresetResponse])
 async def get_presets(db: Session = Depends(get_db)):
     """获取所有字幕预设；表为空时惰性创建内置默认预设，避免新用户面对空列表"""
@@ -413,6 +602,29 @@ async def delete_preset(preset_id: int, db: Session = Depends(get_db)):
     db.delete(preset)
     db.commit()
     return {"message": "预设已删除"}
+
+
+@router.post("/fonts/install", response_model=FontInstallResponse)
+async def install_free_font(request: FontInstallRequest):
+    """下载并安装内置免费字体到当前用户字体目录"""
+    source = _resolve_free_font_source(request.font_name)
+    display_name = str(source.get("display_name") or request.font_name).strip()
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            downloaded = _download_font_sources(source, temp_dir)
+            font_files = _collect_font_files(downloaded, temp_dir)
+            font_dir, installed_files = _install_font_files(font_files, display_name)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安装字体失败: {exc}") from exc
+
+    return FontInstallResponse(
+        message=f"已安装 {display_name}。如果预览没有立刻变化，请重启软件后再导出。",
+        font_name=display_name,
+        font_dir=font_dir,
+        installed_files=installed_files,
+    )
 
 
 @router.post("/process-text", response_model=SubtitleTextProcessResponse)

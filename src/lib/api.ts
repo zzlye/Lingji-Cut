@@ -198,6 +198,13 @@ export const subtitleApi = {
   deletePreset: (id: number) =>
     request<{ message: string }>(`/subtitles/presets/${id}`, { method: 'DELETE' }),
 
+  /** 下载并安装内置免费字体 */
+  installFont: (fontName: string) =>
+    request<{ message: string; font_name: string; font_dir: string; installed_files: string[] }>('/subtitles/fonts/install', {
+      method: 'POST',
+      body: JSON.stringify({ font_name: fontName }),
+    }),
+
   /** 下载/生成字幕文件并可烧录硬字幕 */
   render: (params: {
     video_id: number

@@ -3,7 +3,7 @@
 // 交互重做：语言/字号/位置/主色 + 实时预览露出，字体/描边/阴影/一键策略收进高级折叠
 
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronDown, Search, Type } from 'lucide-react'
+import { Check, ChevronDown, Download, Loader2, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { SubtitlePreset } from '@/types'
@@ -36,6 +36,7 @@ type FontPreset = {
   license: FontLicenseKind
   note: string
   aliases?: string[]
+  installable?: boolean
 }
 
 /** 可选语言配置 */
@@ -57,25 +58,25 @@ const FONT_GROUPS: Array<{ title: string; description: string; fonts: FontPreset
     title: '免费可商用',
     description: '适合默认优先使用，仍需按字体官网协议安装和使用。',
     fonts: [
-      { name: '思源黑体', family: 'Source Han Sans SC', license: 'free', note: 'Adobe / Google 开源 CJK 黑体' },
-      { name: '思源宋体', family: 'Source Han Serif SC', license: 'free', note: '开源 CJK 宋体' },
-      { name: 'Noto Sans SC', family: 'Noto Sans SC', license: 'free', note: 'Google Fonts 简中黑体' },
-      { name: 'Noto Serif SC', family: 'Noto Serif SC', license: 'free', note: 'Google Fonts 简中宋体' },
-      { name: 'Noto Sans CJK SC', family: 'Noto Sans CJK SC', license: 'free', note: 'Noto CJK 本地安装名' },
+      { name: '思源黑体', family: 'Source Han Sans SC', license: 'free', note: 'Adobe / Google 开源 CJK 黑体', installable: true },
+      { name: '思源宋体', family: 'Source Han Serif SC', license: 'free', note: '开源 CJK 宋体', installable: true },
+      { name: 'Noto Sans SC', family: 'Noto Sans SC', license: 'free', note: 'Google Fonts 简中黑体', installable: true },
+      { name: 'Noto Serif SC', family: 'Noto Serif SC', license: 'free', note: 'Google Fonts 简中宋体', installable: true },
+      { name: 'Noto Sans CJK SC', family: 'Noto Sans CJK SC', license: 'free', note: 'Noto CJK 本地安装名', installable: true },
       { name: '阿里巴巴普惠体', family: 'Alibaba PuHuiTi', license: 'free', note: '电商和短视频常用黑体' },
       { name: '阿里巴巴普惠体 2.0', family: 'Alibaba PuHuiTi 2.0', license: 'free', note: '新版普惠体安装名' },
       { name: 'MiSans', family: 'MiSans', license: 'free', note: '小米字体，作品使用需遵守官方协议' },
       { name: 'HarmonyOS Sans', family: 'HarmonyOS Sans SC', license: 'free', note: '华为字体，作品使用需遵守官方协议' },
-      { name: '霞鹜文楷', family: 'LXGW WenKai', license: 'free', note: '开源手写楷体风格' },
+      { name: '霞鹜文楷', family: 'LXGW WenKai', license: 'free', note: '开源手写楷体风格', installable: true },
       { name: '得意黑', family: 'Smiley Sans', license: 'free', note: '标题感强，适合短视频封面字幕' },
-      { name: '站酷庆科黄油体', family: 'ZCOOL QingKe HuangYou', license: 'free', note: '偏标题和轻松风格' },
-      { name: '站酷快乐体', family: 'ZCOOL KuaiLe', license: 'free', note: '活泼标题字' },
-      { name: '站酷小薇体', family: 'ZCOOL XiaoWei', license: 'free', note: '宋体标题风格' },
-      { name: '马善政毛笔', family: 'Ma Shan Zheng', license: 'free', note: '毛笔风格，适合少量强调' },
-      { name: '龙藏体', family: 'Long Cang', license: 'free', note: '书法风格，适合片头短句' },
-      { name: '志莽行书', family: 'Zhi Mang Xing', license: 'free', note: '行书风格，适合装饰性字幕' },
-      { name: 'M PLUS Rounded 1c', family: 'M PLUS Rounded 1c', license: 'free', note: '圆角日文字体' },
-      { name: 'Zen Maru Gothic', family: 'Zen Maru Gothic', license: 'free', note: '日文圆体' },
+      { name: '站酷庆科黄油体', family: 'ZCOOL QingKe HuangYou', license: 'free', note: '偏标题和轻松风格', installable: true },
+      { name: '站酷快乐体', family: 'ZCOOL KuaiLe', license: 'free', note: '活泼标题字', installable: true },
+      { name: '站酷小薇体', family: 'ZCOOL XiaoWei', license: 'free', note: '宋体标题风格', installable: true },
+      { name: '马善政毛笔', family: 'Ma Shan Zheng', license: 'free', note: '毛笔风格，适合少量强调', installable: true },
+      { name: '龙藏体', family: 'Long Cang', license: 'free', note: '书法风格，适合片头短句', installable: true },
+      { name: '志莽行书', family: 'Zhi Mang Xing', license: 'free', note: '行书风格，适合装饰性字幕', installable: true },
+      { name: 'M PLUS Rounded 1c', family: 'M PLUS Rounded 1c', license: 'free', note: '圆角日文字体', installable: true },
+      { name: 'Zen Maru Gothic', family: 'Zen Maru Gothic', license: 'free', note: '日文圆体', installable: true },
     ],
   },
   {
@@ -93,7 +94,7 @@ const FONT_GROUPS: Array<{ title: string; description: string; fonts: FontPreset
       { name: '华康黑体', family: '华康黑体', license: 'commercial', note: '华康系商业字体，安装名可能是 DFHei 或 DFPHei', aliases: ['DFHei', 'DFPHei'] },
       { name: '蒙纳黑体', family: '蒙纳黑体', license: 'commercial', note: '蒙纳系商业字体，按安装后的字体全名为准', aliases: ['MHei'] },
       { name: '文鼎黑体', family: '文鼎黑体', license: 'commercial', note: '文鼎系商业字体，按安装后的字体全名为准', aliases: ['AR Hei'] },
-      { name: '字魂字体', family: '字魂字体', license: 'commercial', note: '字魂字体需按套餐授权，建议输入已安装字体的完整名称', aliases: ['ZiHun'] },
+      { name: '字魂字体', family: '字魂字体', license: 'commercial', note: '字魂字体需按套餐授权，请先在系统中安装后再选择', aliases: ['ZiHun'] },
     ],
   },
   {
@@ -180,7 +181,7 @@ function detectLocalFont(family: string) {
 }
 
 /** 检测字体列表中哪些在本机可用，辅助解释“选了但不生效”的情况 */
-function useFontAvailability(families: string[]) {
+function useFontAvailability(families: string[], refreshKey = 0) {
   const familyKey = useMemo(() => Array.from(new Set(families.map(fontKey).filter(Boolean))).join('|'), [families])
   const [availability, setAvailability] = useState<Record<string, boolean>>({})
 
@@ -190,7 +191,7 @@ function useFontAvailability(families: string[]) {
     const next: Record<string, boolean> = {}
     uniqueFamilies.forEach((family) => { next[fontKey(family)] = detectLocalFont(family) })
     setAvailability(next)
-  }, [familyKey, families])
+  }, [familyKey, families, refreshKey])
 
   return availability
 }
@@ -250,6 +251,8 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [customLanguage, setCustomLanguage] = useState('')
   const [automationOptions, setAutomationOptions] = useState(() => loadAutomationPreferences())
   const [isSaving, setIsSaving] = useState(false)
+  const [installingFontName, setInstallingFontName] = useState('')
+  const [fontAvailabilityRefreshKey, setFontAvailabilityRefreshKey] = useState(0)
   const { addLog } = useTaskStore()
 
   const usesCustomLanguage = useMemo(() => !LANGUAGE_OPTIONS.some(([value]) => value === form.language), [form.language])
@@ -260,7 +263,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     const currentFamily = form.font_name.trim()
     return currentFamily ? [...families, currentFamily] : families
   }, [form.font_name])
-  const fontAvailability = useFontAvailability(fontFamiliesToCheck)
+  const fontAvailability = useFontAvailability(fontFamiliesToCheck, fontAvailabilityRefreshKey)
   const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
 
   const loadPresets = async () => {
@@ -330,6 +333,24 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  const handleInstallFont = async (font: FontPreset) => {
+    if (!font.installable) {
+      addLog('warn', '这个字体没有内置下载源，请从字体官网安装后再选择。')
+      return
+    }
+    setInstallingFontName(font.family)
+    try {
+      const result = await subtitleApi.installFont(font.family)
+      updateForm('font_name', font.family)
+      setFontAvailabilityRefreshKey((value) => value + 1)
+      addLog('info', result.message)
+    } catch (error) {
+      addLog('error', `安装字体失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setInstallingFontName('')
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
       <div>
@@ -377,16 +398,32 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                   value={form.font_name}
                   selectedFont={selectedFont}
                   availability={fontAvailability}
+                  installingFontName={installingFontName}
                   onChange={(fontName) => updateForm('font_name', fontName)}
+                  onInstallFont={handleInstallFont}
                 />
-                <TextField label="手动输入字体名称" value={form.font_name} onChange={(v) => updateForm('font_name', v)} description="如果列表里的名称不匹配，请填写系统字体册或字体文件里显示的完整名称" />
                 {currentFontAvailable === false && (
-                  <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs leading-5 text-warning">
-                    当前电脑未检测到这个字体。软件仍会保存该名称；预览和导出时若系统或 ffmpeg 找不到字体，会自动回退到其他字体。
-                  </p>
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/10 p-2 text-xs leading-5 text-warning">
+                    <span className="min-w-0 flex-1">
+                      当前电脑未检测到这个字体。{selectedFont?.installable ? '可以直接下载安装到当前用户字体目录。' : '请先从字体官网或系统字体册安装后再选择。'}
+                    </span>
+                    {selectedFont?.installable && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 border-warning/40 text-warning hover:bg-warning/15"
+                        onClick={() => handleInstallFont(selectedFont)}
+                        disabled={installingFontName === selectedFont.family}
+                      >
+                        {installingFontName === selectedFont.family ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <Download className="mr-1.5 size-3.5" />}
+                        {installingFontName === selectedFont.family ? '安装中' : '安装字体'}
+                      </Button>
+                    )}
+                  </div>
                 )}
                 <p className="text-xs leading-5 text-muted-foreground">
-                  字体库只写入字体名称，不会安装或内置字体文件。商业字体可以选择使用，但发布公开视频、商单或账号运营内容前需要自行确认授权。
+                  免费字体可一键安装到当前用户字体目录；商业字体可以选择使用，但发布公开视频、商单或账号运营内容前需要自行确认授权。
                 </p>
               </AccordionContent>
             </AccordionItem>
@@ -471,11 +508,13 @@ function matchesFontQuery(font: FontPreset, query: string) {
 }
 
 /** 字体弹出选择器 */
-function FontPicker({ value, selectedFont, availability, onChange }: {
+function FontPicker({ value, selectedFont, availability, installingFontName, onChange, onInstallFont }: {
   value: string
   selectedFont?: FontPreset
   availability: Record<string, boolean>
+  installingFontName: string
   onChange: (fontName: string) => void
+  onInstallFont: (font: FontPreset) => void
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -534,26 +573,28 @@ function FontPicker({ value, selectedFont, availability, onChange }: {
 
           <div className="max-h-[360px] overflow-y-auto p-2">
             {filteredFonts.length > 0 ? (
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid gap-2">
                 {filteredFonts.map((font) => (
                   <FontPickerOption
                     key={`${font.license}-${font.family}`}
                     font={font}
                     selected={isSelectedFont(value, font)}
                     available={getFontAvailability(availability, font.family)}
+                    installing={installingFontName === font.family}
                     onSelect={() => handleSelect(font)}
+                    onInstall={() => onInstallFont(font)}
                   />
                 ))}
               </div>
             ) : (
               <div className="rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">
-                没有匹配的字体，可以在下方手动输入字体名称。
+                没有匹配的字体，请换关键词或筛选条件。
               </div>
             )}
           </div>
 
           <div className="border-t px-3 py-2 text-xs leading-5 text-muted-foreground">
-            商业字体不会被禁用；这里保存的是字体名称，真正生效取决于本机是否安装以及导出环境是否能找到该字体。
+            免费字体可直接安装；商业字体不会被禁用，但需要你自行确认授权并先安装到系统。
           </div>
         </PopoverContent>
       </Popover>
@@ -562,34 +603,52 @@ function FontPicker({ value, selectedFont, availability, onChange }: {
 }
 
 /** 字体选择弹层条目 */
-function FontPickerOption({ font, selected, available, onSelect }: {
+function FontPickerOption({ font, selected, available, installing, onSelect, onInstall }: {
   font: FontPreset
   selected: boolean
   available?: boolean
+  installing: boolean
   onSelect: () => void
+  onInstall: () => void
 }) {
+  const canInstall = font.installable && available === false
   return (
-    <button
-      type="button"
-      onClick={onSelect}
+    <div
       style={{ fontFamily: buildCssFontFamily(font.family) }}
       className={cn(
-        'min-h-24 rounded-lg border bg-card p-3 text-left text-xs transition-colors hover:border-primary/50 hover:bg-primary/5',
-        selected ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground',
+        'rounded-lg border bg-card p-3 text-xs transition-colors',
+        selected ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground',
       )}
     >
-      <span className="flex items-start justify-between gap-2">
-        <span className="min-w-0">
+      <div className="flex items-start justify-between gap-3">
+        <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left hover:text-foreground">
           <span className="block truncate text-sm font-medium">{font.name}</span>
           <span className="mt-0.5 block truncate font-mono text-[11px] opacity-75">
             {font.family}{font.aliases?.length ? ` / ${font.aliases[0]}` : ''}
           </span>
-        </span>
-        {selected ? <Check className="size-4 shrink-0" /> : <FontLicenseBadge license={font.license} />}
-      </span>
-      <span className="mt-2 line-clamp-2 block leading-snug opacity-80">{font.note}</span>
-      <span className="mt-2 block"><FontAvailabilityBadge available={available} /></span>
-    </button>
+          <span className="mt-2 line-clamp-2 block leading-snug opacity-80">{font.note}</span>
+        </button>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          {selected ? <Check className="size-4 shrink-0" /> : <FontLicenseBadge license={font.license} />}
+          <FontAvailabilityBadge available={available} />
+        </div>
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <Button type="button" size="sm" variant={selected ? 'secondary' : 'outline'} className="h-8 px-3" onClick={onSelect}>
+          {selected ? '已选择' : '选择'}
+        </Button>
+        {canInstall ? (
+          <Button type="button" size="sm" variant="outline" className="h-8 px-3" onClick={onInstall} disabled={installing}>
+            {installing ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <Download className="mr-1.5 size-3.5" />}
+            {installing ? '安装中' : '安装字体'}
+          </Button>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">
+            {available === true ? '已可用' : available === false && !font.installable ? '需自行安装' : font.installable ? '可自动安装' : '按系统授权'}
+          </span>
+        )}
+      </div>
+    </div>
   )
 }
 
