@@ -204,19 +204,23 @@ export function TextPromptPresetPanel() {
       </Card>
 
       <Dialog open={isPromptEditorOpen} onOpenChange={setIsPromptEditorOpen}>
-        <DialogContent className="sm:max-w-4xl">
-          <DialogHeader>
+        <DialogContent className="!flex h-[min(760px,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden !p-0 sm:max-w-4xl">
+          <DialogHeader className="shrink-0 border-b px-6 py-4 pr-12">
             <DialogTitle>{promptForm.id === 'new' ? '添加提示词' : '编辑提示词'}</DialogTitle>
             <DialogDescription>提示词会用于字幕翻译、润色和一键完成。</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <TextField label="名称" value={promptForm.name} onChange={(v) => setPromptForm({ ...promptForm, name: v })} />
-              <TextField label="描述" value={promptForm.description} placeholder="例如：翻译时严格保留术语" onChange={(v) => setPromptForm({ ...promptForm, description: v })} />
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <TextField label="名称" value={promptForm.name} onChange={(v) => setPromptForm({ ...promptForm, name: v })} />
+                <TextField label="描述" value={promptForm.description} placeholder="例如：翻译时严格保留术语" onChange={(v) => setPromptForm({ ...promptForm, description: v })} />
+              </div>
+              <div className="[&_textarea]:h-[min(420px,45dvh)] [&_textarea]:min-h-64 [&_textarea]:resize-none [&_textarea]:overflow-auto">
+                <TextareaField label="内容" value={promptForm.prompt} rows={14} onChange={(v) => setPromptForm({ ...promptForm, prompt: v })} />
+              </div>
             </div>
-            <TextareaField label="内容" value={promptForm.prompt} rows={14} onChange={(v) => setPromptForm({ ...promptForm, prompt: v })} />
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t px-6 py-4">
             <Button variant="outline" onClick={() => setIsPromptEditorOpen(false)}>取消</Button>
             <Button onClick={handleSavePromptPreset}>保存</Button>
           </DialogFooter>
