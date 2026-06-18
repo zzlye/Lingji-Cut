@@ -10,6 +10,8 @@ import { useTaskStore } from '@/stores/taskStore'
 import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, type FieldOption } from '@/components/fields'
 
@@ -73,6 +75,8 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
   const { addLog } = useTaskStore()
   const profileRequestRef = useRef(0)
 
@@ -145,11 +149,24 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     if (profile) await selectProfile(profile)
   }
 
+  const openRenameDialog = () => {
+    setRenameDraft(profileForm.name)
+    setIsRenameDialogOpen(true)
+  }
+
   const handleRenameProfile = async () => {
-    const nextName = window.prompt('请输入新的配置名称', profileForm.name)?.trim()
-    if (!nextName || nextName === profileForm.name) return
+    const nextName = renameDraft.trim()
+    if (!nextName) {
+      toast.warning('请输入新的配置名称')
+      return
+    }
+    if (nextName === profileForm.name) {
+      setIsRenameDialogOpen(false)
+      return
+    }
     if (!selectedProfileId) {
       setProfileForm((current) => ({ ...current, name: nextName }))
+      setIsRenameDialogOpen(false)
       toast.success('新配置名称已修改，保存配置后生效')
       return
     }
@@ -159,6 +176,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
       const renamed = await profileApi.renameText(selectedProfileId, nextName)
       setProfileForm((current) => ({ ...current, name: renamed.name }))
       setProfiles((current) => current.map((profile) => (profile.id === renamed.id ? { ...profile, name: renamed.name } : profile)))
+      setIsRenameDialogOpen(false)
       toast.success('配置名称已修改')
       addLog('info', `文本 API 配置已改名为 "${renamed.name}"`)
     } catch (error) {
@@ -263,6 +281,33 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
         <p className="text-sm text-muted-foreground">用于字幕生成、翻译、润色。配好渠道与模型后点「测试连接」确认是否可用。</p>
       </div>
 
+      <Dialog open={isRenameDialogOpen} onOpenChange={(open) => !isProfileActionBusy && setIsRenameDialogOpen(open)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>修改配置名称</DialogTitle>
+            <DialogDescription>{selectedProfileId ? '修改当前文本 API 配置的名称。' : '修改新配置名称，保存配置后会创建为这个名称。'}</DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handleRenameProfile()
+            }}
+          >
+            <Input
+              autoFocus
+              value={renameDraft}
+              placeholder="请输入配置名称"
+              onChange={(event) => setRenameDraft(event.target.value)}
+            />
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setIsRenameDialogOpen(false)} disabled={isProfileActionBusy}>取消</Button>
+              <Button type="submit" disabled={isProfileActionBusy}>{isProfileActionBusy ? '修改中…' : '确认修改'}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {/* 渠道与模型 */}
       <Card>
         <CardHeader><CardTitle className="text-sm">渠道与模型</CardTitle></CardHeader>
@@ -276,7 +321,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
                 onChange={handleSelectProfileValue}
                 description={selectedProfile ? `当前配置名：${profileForm.name}` : `新配置名：${profileForm.name}`}
               />
-              <Button type="button" variant="outline" onClick={handleRenameProfile} disabled={isProfileActionBusy}>
+              <Button type="button" variant="outline" onClick={openRenameDialog} disabled={isProfileActionBusy}>
                 {selectedProfileId ? <Pencil className="mr-1.5 size-4" /> : <Plus className="mr-1.5 size-4" />}
                 修改名称
               </Button>

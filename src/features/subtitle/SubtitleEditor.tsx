@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
@@ -254,6 +255,8 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [isRenaming, setIsRenaming] = useState(false)
   const [installingFontName, setInstallingFontName] = useState('')
   const [fontAvailabilityRefreshKey, setFontAvailabilityRefreshKey] = useState(0)
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false)
+  const [renameDraft, setRenameDraft] = useState('')
   const { addLog } = useTaskStore()
 
   const usesCustomLanguage = useMemo(() => !LANGUAGE_OPTIONS.some(([value]) => value === form.language), [form.language])
@@ -334,11 +337,24 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  const openRenameDialog = () => {
+    setRenameDraft(form.name)
+    setIsRenameDialogOpen(true)
+  }
+
   const handleRenamePreset = async () => {
-    const nextName = window.prompt('请输入新的预设名称', form.name)?.trim()
-    if (!nextName || nextName === form.name) return
+    const nextName = renameDraft.trim()
+    if (!nextName) {
+      addLog('warn', '请输入新的预设名称')
+      return
+    }
+    if (nextName === form.name) {
+      setIsRenameDialogOpen(false)
+      return
+    }
     if (selectedId === 'new') {
       updateForm('name', nextName)
+      setIsRenameDialogOpen(false)
       addLog('info', '新预设名称已修改，保存预设后生效')
       return
     }
@@ -348,6 +364,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
       const renamed = await subtitleApi.renamePreset(selectedId, nextName)
       setForm((current) => ({ ...current, name: renamed.name }))
       setPresets((current) => current.map((preset) => (preset.id === renamed.id ? { ...preset, name: renamed.name } : preset)))
+      setIsRenameDialogOpen(false)
       addLog('info', `字幕预设已改名为 "${renamed.name}"`)
     } catch (error) {
       addLog('error', `修改字幕预设名称失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -381,10 +398,37 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
         <p className="text-sm text-muted-foreground">选择已保存预设后，可微调语言、字号、位置和颜色；右侧实时预览。</p>
       </div>
 
+      <Dialog open={isRenameDialogOpen} onOpenChange={(open) => !isRenaming && setIsRenameDialogOpen(open)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>修改预设名称</DialogTitle>
+            <DialogDescription>{selectedId === 'new' ? '修改新字幕预设名称，保存预设后会创建为这个名称。' : '修改当前字幕样式预设的名称。'}</DialogDescription>
+          </DialogHeader>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handleRenamePreset()
+            }}
+          >
+            <Input
+              autoFocus
+              value={renameDraft}
+              placeholder="请输入预设名称"
+              onChange={(event) => setRenameDraft(event.target.value)}
+            />
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setIsRenameDialogOpen(false)} disabled={isRenaming}>取消</Button>
+              <Button type="submit" disabled={isRenaming}>{isRenaming ? '修改中…' : '确认修改'}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {/* 预设工具条 */}
       <div className="flex flex-wrap items-end gap-2">
         <div className="min-w-44 flex-1"><SelectField label="已保存预设" value={String(selectedId)} options={[['new', '＋ 新建预设'], ...presets.map((p) => [String(p.id), p.name] as FieldOption)]} onChange={handleSelectPreset} /></div>
-        <Button type="button" variant="outline" onClick={handleRenamePreset} disabled={isRenaming}>
+        <Button type="button" variant="outline" onClick={openRenameDialog} disabled={isRenaming}>
           {selectedId === 'new' ? <Plus className="mr-1.5 size-4" /> : <Pencil className="mr-1.5 size-4" />}
           {isRenaming ? '修改中…' : '修改名称'}
         </Button>
