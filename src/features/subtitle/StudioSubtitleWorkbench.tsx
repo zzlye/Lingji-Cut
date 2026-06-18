@@ -112,7 +112,7 @@ export function StudioSubtitleWorkbench({
   const [showPasteImport, setShowPasteImport] = useState(false)
   const [showAdvancedOutput, setShowAdvancedOutput] = useState(false)
   const [listScrollTop, setListScrollTop] = useState(0)
-  const [previewSegmentLabel, setPreviewSegmentLabel] = useState('')
+  const [playingEntry, setPlayingEntry] = useState<SubtitleEntry | null>(null)
   const [previewError, setPreviewError] = useState('')
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
@@ -199,10 +199,6 @@ export function StudioSubtitleWorkbench({
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
   const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
-  const previewOverlayLines = useMemo(
-    () => buildPreviewOverlayLines(selectedTranslationText, selectedOriginalText),
-    [selectedOriginalText, selectedTranslationText],
-  )
 
   useEffect(() => {
     return () => {
@@ -215,8 +211,39 @@ export function StudioSubtitleWorkbench({
   useEffect(() => {
     previewStopAtRef.current = null
     setPreviewError('')
-    setPreviewSegmentLabel('')
+    setPlayingEntry(null)
   }, [previewVideoUrl])
+
+  useEffect(() => {
+    if (!playingEntry || !previewVideoUrl) return
+    const video = previewVideoRef.current
+    if (!video) return
+
+    const startSeconds = timeToMs(playingEntry.start) / 1000
+    const endSeconds = Math.max(startSeconds + 0.15, timeToMs(playingEntry.end) / 1000)
+    previewStopAtRef.current = endSeconds
+
+    const seekAndPlay = () => {
+      try {
+        video.currentTime = Math.max(0, startSeconds)
+        const playPromise = video.play()
+        if (playPromise) {
+          playPromise.catch(() => setPreviewError('播放器未能自动播放，请点播放器播放。'))
+        }
+      } catch (error) {
+        setPreviewError(`播放失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      }
+    }
+
+    if (video.readyState >= 1) {
+      seekAndPlay()
+      return
+    }
+
+    video.addEventListener('loadedmetadata', seekAndPlay, { once: true })
+    video.load()
+    return () => video.removeEventListener('loadedmetadata', seekAndPlay)
+  }, [playingEntry, previewVideoUrl])
 
   useEffect(() => {
     if (!subtitlePath && suggestedSubtitleFile) {
@@ -478,40 +505,16 @@ export function StudioSubtitleWorkbench({
 
   const selectEntryForPreview = (index: number) => {
     setSelectedIndex(index)
-    previewSubtitleEntry(entries[index])
   }
 
   const previewSubtitleEntry = (entry?: SubtitleEntry | null) => {
     if (!entry) return
-    const video = previewVideoRef.current
-    if (!video || !previewVideoUrl) {
-      setPreviewError('当前任务没有可预览的视频。')
+    if (!previewVideoUrl) {
+      setPreviewError('当前任务没有可播放的视频。')
       return
     }
-    const startSeconds = timeToMs(entry.start) / 1000
-    const endSeconds = Math.max(startSeconds + 0.15, timeToMs(entry.end) / 1000)
-    previewStopAtRef.current = endSeconds
-    setPreviewSegmentLabel(`#${entry.index || selectedIndex + 1} · ${entry.start} - ${entry.end}`)
     setPreviewError('')
-
-    const seekAndPlay = () => {
-      try {
-        video.currentTime = Math.max(0, startSeconds)
-        const playPromise = video.play()
-        if (playPromise) {
-          playPromise.catch(() => setPreviewError('播放器未能自动播放，请点播放器播放。'))
-        }
-      } catch (error) {
-        setPreviewError(`预览失败: ${error instanceof Error ? error.message : '未知错误'}`)
-      }
-    }
-
-    if (video.readyState >= 1) {
-      seekAndPlay()
-    } else {
-      video.addEventListener('loadedmetadata', seekAndPlay, { once: true })
-      video.load()
-    }
+    setPlayingEntry(entry)
   }
 
   const handlePreviewTimeUpdate = () => {
@@ -522,6 +525,12 @@ export function StudioSubtitleWorkbench({
       video.pause()
       previewStopAtRef.current = null
     }
+  }
+
+  const closeSegmentPlayer = () => {
+    previewVideoRef.current?.pause()
+    previewStopAtRef.current = null
+    setPlayingEntry(null)
   }
 
   const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -999,56 +1008,20 @@ export function StudioSubtitleWorkbench({
             )}
           </section>
 
-          <section className="grid min-h-0 grid-rows-[auto_minmax(0,0.9fr)_minmax(0,1.1fr)] gap-3">
-            <div className="overflow-hidden rounded-xl border bg-background/60 p-3">
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h3 className="text-sm font-medium">片段预览</h3>
-                  <p className="mt-1 text-xs text-muted-foreground">{previewSegmentLabel || (selectedEntry ? `第 ${selectedIndex + 1} 条 · ${selectedEntry.start} - ${selectedEntry.end}` : '未选择字幕')}</p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => previewSubtitleEntry(selectedEntry)}
-                  disabled={!selectedEntry || !previewVideoUrl}
-                >
-                  <Play className="mr-1 size-4" />
-                  播放当前段
-                </Button>
-              </div>
-              {previewVideoUrl ? (
-                <div className="relative overflow-hidden rounded-lg bg-black">
-                  <video
-                    ref={previewVideoRef}
-                    src={previewVideoUrl}
-                    controls
-                    preload="metadata"
-                    className="aspect-video w-full bg-black"
-                    onTimeUpdate={handlePreviewTimeUpdate}
-                    onEnded={() => { previewStopAtRef.current = null }}
-                  >
-                    <track kind="captions" />
-                  </video>
-                  {previewOverlayLines.length > 0 && (
-                    <div className="pointer-events-none absolute inset-x-3 bottom-4 flex flex-col items-center gap-1 text-center">
-                      {previewOverlayLines.map((line, index) => (
-                        <span
-                          key={`${index}-${line}`}
-                          className={index === 0
-                            ? 'max-w-[92%] rounded bg-black/75 px-3 py-1 text-base font-semibold leading-6 text-yellow-300 shadow'
-                            : 'max-w-[92%] rounded bg-black/70 px-2.5 py-0.5 text-sm leading-5 text-white shadow'}
-                        >
-                          {line}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="grid aspect-video place-items-center rounded-lg border border-dashed bg-muted/30 px-4 text-center text-xs text-muted-foreground">
-                  当前任务没有可预览的视频
-                </div>
-              )}
+          <section className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_minmax(0,1fr)] gap-3">
+            <div className="rounded-xl border bg-background/60 p-3">
+              <Button
+                variant="outline"
+                className="h-10 w-full"
+                onClick={() => previewSubtitleEntry(selectedEntry)}
+                disabled={!selectedEntry || !previewVideoUrl}
+              >
+                <Play className="mr-1.5 size-4" />
+                播放当前段
+              </Button>
+              <p className="mt-2 text-center text-xs text-muted-foreground">
+                {selectedEntry ? `第 ${selectedIndex + 1} 条 · ${selectedEntry.start} - ${selectedEntry.end}` : '选择左侧字幕后播放对应时间段'}
+              </p>
               {previewError && <p className="mt-2 text-xs text-warning">{previewError}</p>}
             </div>
 
@@ -1143,6 +1116,32 @@ export function StudioSubtitleWorkbench({
             </div>
           </aside>
         </div>
+
+        <Dialog open={Boolean(playingEntry)} onOpenChange={(open) => !open && closeSegmentPlayer()}>
+          <DialogContent className="sm:max-w-4xl">
+            <DialogHeader>
+              <DialogTitle>{selectedJob?.title || '播放字幕片段'}</DialogTitle>
+              <DialogDescription className="break-all">
+                {playingEntry ? `第 ${playingEntry.index || selectedIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}` : selectedJobPreviewVideo}
+              </DialogDescription>
+            </DialogHeader>
+            {playingEntry && previewVideoUrl && (
+              <video
+                key={`${previewVideoUrl}-${playingEntry.index}-${playingEntry.start}-${playingEntry.end}`}
+                ref={previewVideoRef}
+                src={previewVideoUrl}
+                className="max-h-[70vh] w-full rounded-lg bg-black"
+                controls
+                autoPlay
+                preload="metadata"
+                onTimeUpdate={handlePreviewTimeUpdate}
+                onEnded={() => { previewStopAtRef.current = null }}
+              >
+                <track kind="captions" />
+              </video>
+            )}
+          </DialogContent>
+        </Dialog>
 
         <Dialog open={Boolean(aiDialogOperation)} onOpenChange={(open) => !open && setAiDialogOperation(null)}>
           <DialogContent>
@@ -1506,15 +1505,6 @@ function resolveJobPreviewVideo(job: AutomationJob | null, sourceVideoPath: stri
   const subtitleOnlyPath = (job?.subtitle_only_video_path || '').trim()
   if (isMediaPath(subtitleOnlyPath)) return subtitleOnlyPath
   return ''
-}
-
-function buildPreviewOverlayLines(translation: string, original: string) {
-  const primary = translation.trim() || original.trim()
-  const secondary = translation.trim() ? original.trim() : ''
-  return [primary, secondary]
-    .filter(Boolean)
-    .flatMap((value) => value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))
-    .slice(0, 2)
 }
 
 function buildJobSubtitleCandidates(job: AutomationJob | null, sourceVideoPath: string, resolvedPath = '') {
