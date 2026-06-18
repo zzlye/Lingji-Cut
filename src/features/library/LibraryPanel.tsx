@@ -1,7 +1,7 @@
 // src/features/library/LibraryPanel.tsx
 // 素材库 - 展示一键流程导出的成品视频
-import { useEffect, useState } from 'react'
-import { Captions, Film, FolderOpen, FolderX, Play } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
+import { Captions, Film, FolderOpen, FolderX, ImageIcon, Play, RefreshCw } from 'lucide-react'
 import { automationApi } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -13,11 +13,13 @@ import {
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
 import { useUiStore } from '@/stores/uiStore'
+import { formatDuration } from '@/lib/format'
 import type { AutomationJob } from '@/types'
 
 type ProductItem = {
   job: AutomationJob
   output: string
+  thumbnailSrc: string | null
 }
 
 export function LibraryPanel() {
@@ -30,19 +32,32 @@ export function LibraryPanel() {
   const [deleteTarget, setDeleteTarget] = useState<ProductItem | null>(null)
   const [openingId, setOpeningId] = useState<string | null>(null)
   const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const refreshLibrary = useCallback(async (showLoading = false) => {
+    if (showLoading) setRefreshing(true)
+    try {
+      const backendJobs = await automationApi.listJobs()
+      syncBackendJobs(backendJobs)
+    } catch (error) {
+      addLog('warn', `刷新素材库失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      if (showLoading) setRefreshing(false)
+    }
+  }, [addLog, syncBackendJobs])
 
   useEffect(() => {
-    automationApi.listJobs()
-      .then(syncBackendJobs)
-      .catch((error) => addLog('warn', `刷新素材库失败: ${error instanceof Error ? error.message : '未知错误'}`))
-  }, [addLog, syncBackendJobs])
+    refreshLibrary()
+    const timer = window.setInterval(() => refreshLibrary(), 8000)
+    return () => window.clearInterval(timer)
+  }, [refreshLibrary])
 
   // 取已完成流程的导出阶段产物作为成品
   const products: ProductItem[] = jobs
     .filter((job) => job.status === 'completed')
     .flatMap((job) => {
       const output = job.steps.find((step) => step.key === 'export')?.output_path
-      return output ? [{ job, output }] : []
+      return output ? [{ job, output, thumbnailSrc: resolveThumbnailSrc(job) }] : []
     })
 
   const handleOpenFolder = async (item: ProductItem) => {
@@ -85,12 +100,16 @@ export function LibraryPanel() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-5 p-6">
+    <div className="mx-auto max-w-6xl space-y-5 p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold">素材库</h2>
           <p className="text-sm text-muted-foreground">一键流程导出的成品视频会出现在这里。</p>
         </div>
+        <Button variant="outline" size="sm" className="h-9" onClick={() => refreshLibrary(true)} disabled={refreshing}>
+          <RefreshCw className={`mr-1.5 size-4 ${refreshing ? 'animate-spin' : ''}`} />
+          刷新
+        </Button>
       </div>
 
       {products.length === 0 ? (
@@ -100,44 +119,64 @@ export function LibraryPanel() {
           <p className="text-xs text-muted-foreground/70">完成一次一键处理后会自动出现在素材库</p>
         </div>
       ) : (
-        <Card className="overflow-hidden">
-          {products.map(({ job, output }) => (
-            <CardContent key={job.id} className="border-b p-4 last:border-b-0">
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-                <div className="flex min-w-0 items-start gap-3">
-                  <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-md bg-primary/15 text-primary">
-                    <Film className="size-4" />
-                  </span>
-                  <div className="min-w-0 space-y-1">
-                    <p className="truncate text-sm font-medium">{job.title}</p>
-                    <p className="break-all text-xs text-muted-foreground select-text">{output}</p>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {products.map((item) => {
+            const { job, output, thumbnailSrc } = item
+            const duration = formatDuration(job.video_info?.duration)
+            return (
+              <Card key={job.id} className="overflow-hidden">
+                <div className="relative aspect-video bg-muted">
+                  {thumbnailSrc ? (
+                    <img
+                      src={thumbnailSrc}
+                      alt=""
+                      className="size-full object-cover"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="grid size-full place-items-center text-muted-foreground">
+                      <ImageIcon className="size-9" />
+                    </div>
+                  )}
+                  <div className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/75 to-transparent p-3">
+                    <span className="line-clamp-2 text-sm font-medium text-white">{job.title}</span>
+                    <span className="shrink-0 rounded bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-white">
+                      {duration}
+                    </span>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
-                  <Button size="sm" className="h-9 justify-center" onClick={() => setPlaying({ job, output })}>
-                    <Play className="mr-1.5 size-4" />
-                    播放
-                  </Button>
-                  <Button size="sm" variant="secondary" className="h-9 justify-center" onClick={() => openSubtitleWorkbench(job.id)}>
-                    <Captions className="mr-1.5 size-4" />
-                    字幕调整
-                  </Button>
-                  <Button size="sm" variant="outline" className="h-9 justify-center" onClick={() => handleOpenFolder({ job, output })} disabled={openingId === job.id}>
-                    <FolderOpen className="mr-1.5 size-4" />
-                    {openingId === job.id ? '打开中…' : '打开文件夹'}
-                  </Button>
-                  <Button size="sm" variant="destructive" className="h-9 justify-center" onClick={() => setDeleteTarget({ job, output })} disabled={deletingFolderId === job.id}>
-                    <FolderX className="mr-1.5 size-4" />
-                    {deletingFolderId === job.id ? '删除中…' : '删除文件夹'}
-                  </Button>
-                </div>
-              </div>
-              <p className="mt-2 text-[11px] text-muted-foreground">
-                删除文件夹会删除硬盘上的该视频文件夹，并同步移出素材库。
-              </p>
-            </CardContent>
-          ))}
-        </Card>
+                <CardContent className="space-y-3 p-3">
+                  <div className="min-h-10 space-y-1">
+                    <p className="truncate text-xs text-muted-foreground" title={fileNameFromPath(output)}>
+                      {fileNameFromPath(output)}
+                    </p>
+                    <p className="line-clamp-2 break-all text-[11px] leading-4 text-muted-foreground/70 select-text">
+                      {resolveProductFolderPath(job, output) || output}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button size="sm" className="h-9 justify-center" onClick={() => setPlaying(item)}>
+                      <Play className="mr-1.5 size-4" />
+                      播放
+                    </Button>
+                    <Button size="sm" variant="secondary" className="h-9 justify-center" onClick={() => openSubtitleWorkbench(job.id)}>
+                      <Captions className="mr-1.5 size-4" />
+                      字幕调整
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-9 justify-center" onClick={() => handleOpenFolder(item)} disabled={openingId === job.id}>
+                      <FolderOpen className="mr-1.5 size-4" />
+                      {openingId === job.id ? '打开中' : '文件夹'}
+                    </Button>
+                    <Button size="sm" variant="destructive" className="h-9 justify-center" onClick={() => setDeleteTarget(item)} disabled={deletingFolderId === job.id}>
+                      <FolderX className="mr-1.5 size-4" />
+                      {deletingFolderId === job.id ? '删除中' : '删除'}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )
+          })}
+        </div>
       )}
 
       <Dialog open={Boolean(playing)} onOpenChange={(open) => !open && setPlaying(null)}>
@@ -181,6 +220,18 @@ export function LibraryPanel() {
       </AlertDialog>
     </div>
   )
+}
+
+function resolveThumbnailSrc(job: AutomationJob) {
+  const coverPath = job.cover_asset_path?.trim()
+  if (coverPath) return automationApi.mediaUrl(coverPath)
+  return job.video_info?.thumbnail_url || null
+}
+
+function fileNameFromPath(path: string) {
+  const normalized = path.trim()
+  if (!normalized) return ''
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized
 }
 
 function resolveProductFolderPath(job: AutomationJob, output: string) {

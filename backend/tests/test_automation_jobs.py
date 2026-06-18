@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
-from backend.api.automation import _download_cover_asset, _run_automation_sync  # noqa: E402
+from backend.api.automation import _download_cover_asset, _run_automation_sync, list_automation_jobs  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
 
@@ -26,6 +26,9 @@ class FakeQuery:
         return self
 
     def filter(self, *_):
+        return self
+
+    def limit(self, *_):
         return self
 
     def all(self):
@@ -365,6 +368,68 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.stages[0].key, "parse")
         self.assertEqual(response.stages[0].status, "failed")
         self.assertIn("视频解析失败", response.stages[0].error_message or "")
+
+    def test_job_response_exposes_local_cover_asset_path(self):
+        """任务响应会返回本地封面路径，素材库可以直接显示缩略图"""
+        with tempfile.TemporaryDirectory(prefix="automation_cover_asset_") as temp_dir:
+            cover_path = os.path.join(temp_dir, "cover.jpg")
+            with open(cover_path, "wb") as file:
+                file.write(b"cover")
+            job = AutomationJobRecord(
+                id="auto-cover-asset",
+                source_url="https://youtube.com/watch?v=cover",
+                title="封面素材任务",
+                status="completed",
+                params=json.dumps({"cover_asset_path": cover_path}, ensure_ascii=False),
+            )
+
+            response = _job_to_response(job)
+
+        self.assertEqual(response.cover_asset_path, cover_path)
+
+    def test_list_jobs_prunes_completed_item_when_export_file_is_missing(self):
+        """本地成品文件夹被手动删除后，刷新任务列表会自动清理素材记录"""
+        missing_output = os.path.join(tempfile.gettempdir(), "missing-library-output.mp4")
+        job = AutomationJobRecord(
+            id="auto-missing-library",
+            source_url="https://youtube.com/watch?v=missing",
+            title="已删除素材",
+            status="completed",
+            output_path=missing_output,
+            stages=json.dumps([
+                {"key": "export", "status": "completed", "progress": 100, "task_id": None, "output_path": missing_output, "error_message": None},
+            ], ensure_ascii=False),
+        )
+        db = FakeTaskDb([job], [])
+
+        response = list_automation_jobs(db)
+
+        self.assertEqual(response, [])
+        self.assertEqual(db.jobs, [])
+
+    def test_list_jobs_keeps_completed_item_when_export_file_exists(self):
+        """成品文件仍存在时，刷新任务列表不会误删素材记录"""
+        with tempfile.TemporaryDirectory(prefix="automation_library_exists_") as temp_dir:
+            output_path = os.path.join(temp_dir, "final.mp4")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+            job = AutomationJobRecord(
+                id="auto-existing-library",
+                source_url="https://youtube.com/watch?v=exists",
+                title="存在素材",
+                status="completed",
+                output_path=output_path,
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": None, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [])
+
+            response = list_automation_jobs(db)
+
+        self.assertEqual(len(response), 1)
+        self.assertEqual(response[0].id, "auto-existing-library")
+        self.assertEqual(db.jobs, [job])
 
     def test_automation_cover_download_uses_custom_output_dir(self):
         """一键流程自动保存封面时使用用户选择的封面目录"""

@@ -48,6 +48,7 @@ SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 LOCAL_VIDEO_SOURCE_PREFIX = "local:"
 LOCAL_VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
@@ -165,6 +166,7 @@ class AutomationJobResponse(BaseModel):
     translated_subtitle_path: Optional[str] = None
     source_video_path: Optional[str] = None
     voice_asset_path: Optional[str] = None
+    cover_asset_path: Optional[str] = None
     stages: list[AutomationStageResult] = Field(default_factory=list)
     subtitle_text: str = ""
     created_at: Optional[datetime] = None
@@ -404,6 +406,7 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         translated_subtitle_path=_find_job_subtitle_param_path(job, db, ("translated_subtitle_path",)),
         source_video_path=_find_job_source_video_path(job),
         voice_asset_path=_find_job_voice_asset_path(job),
+        cover_asset_path=_find_job_cover_asset_path(job),
         stages=stages,
         subtitle_text=job.subtitle_text or "",
         created_at=job.created_at,
@@ -593,6 +596,28 @@ def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[
 def _find_job_voice_asset_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
     """推导配音音轨路径"""
     return _stage_output_if_reusable(job, "voice")
+
+
+def _find_job_cover_asset_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
+    """读取本地封面路径，优先使用一键流程自动保存的封面文件"""
+    if not job:
+        return None
+    params = _get_job_params(job)
+    cover_path = _existing_file(str(params.get("cover_asset_path") or ""), IMAGE_EXTENSIONS)
+    if cover_path:
+        return cover_path
+
+    workspace_dir = str(params.get("workspace_dir") or "").strip()
+    if not workspace_dir:
+        return None
+    normalized_workspace = os.path.abspath(os.path.expanduser(workspace_dir))
+    if not os.path.isdir(normalized_workspace):
+        return None
+    for pattern in ("cover.*", "*_cover.*", "thumbnail.*"):
+        for candidate in glob(os.path.join(normalized_workspace, pattern)):
+            if _existing_file(candidate, IMAGE_EXTENSIONS):
+                return candidate
+    return None
 
 
 def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[str]:
@@ -2363,12 +2388,12 @@ def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
 
 
 def _safe_media_file_path(path: str) -> str:
-    """校验素材库播放器要读取的本地媒体文件路径"""
+    """校验素材库播放器或缩略图要读取的本地文件路径"""
     media_path = os.path.abspath(os.path.expanduser(path.strip()))
     if not os.path.exists(media_path) or not os.path.isfile(media_path):
         raise HTTPException(status_code=404, detail=f"媒体文件不存在: {media_path}")
-    if os.path.splitext(media_path)[1].lower() not in MEDIA_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="只支持播放常见音视频文件")
+    if os.path.splitext(media_path)[1].lower() not in MEDIA_EXTENSIONS | IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只支持读取常见音视频或封面图片文件")
     return media_path
 
 
@@ -2668,12 +2693,63 @@ def _deletable_job_workspace_dir(job: AutomationJobRecord, db: Optional[Session]
     raise HTTPException(status_code=400, detail="未找到可安全删除的独立视频文件夹。旧版公共目录不能整目录删除，请手动清理文件。")
 
 
-def _delete_job_record(db: Session, job: AutomationJobRecord) -> None:
+def _completed_job_assets_exist(job: AutomationJobRecord) -> bool:
+    """判断已完成素材是否仍有本地产物或视频工作目录，手动删文件夹后返回 False"""
+    if job.status != "completed":
+        return True
+
+    export_stage = _stage_by_key(job, "export")
+    expected_outputs = [
+        value for value in (job.output_path, (export_stage or {}).get("output_path"))
+        if isinstance(value, str) and value.strip()
+    ]
+    if expected_outputs:
+        return any(os.path.isfile(os.path.abspath(os.path.expanduser(path.strip()))) for path in expected_outputs)
+
+    for candidate in _job_output_candidates(job):
+        raw_path = str(candidate or "").strip()
+        if not raw_path:
+            continue
+        normalized = os.path.abspath(os.path.expanduser(raw_path))
+        if os.path.exists(normalized):
+            return True
+
+    params = _get_job_params(job)
+    for key in ("workspace_dir", "video_downloads_dir", "video_output_dir", "video_exports_dir", "cover_asset_path"):
+        raw_path = str(params.get(key) or "").strip()
+        if not raw_path:
+            continue
+        normalized = os.path.abspath(os.path.expanduser(raw_path))
+        if os.path.exists(normalized):
+            return True
+    return False
+
+
+def _prune_missing_completed_jobs(db: Session, jobs: list[AutomationJobRecord]) -> list[AutomationJobRecord]:
+    """清理本地文件夹已被手动删除的完成素材记录，并返回仍可展示的任务"""
+    active_jobs: list[AutomationJobRecord] = []
+    missing_jobs: list[AutomationJobRecord] = []
+    for job in jobs:
+        if _completed_job_assets_exist(job):
+            active_jobs.append(job)
+        else:
+            missing_jobs.append(job)
+
+    for job in missing_jobs:
+        clear_job_control_requests(db, job)
+        _delete_job_record(db, job, commit=False)
+    if missing_jobs:
+        db.commit()
+    return active_jobs
+
+
+def _delete_job_record(db: Session, job: AutomationJobRecord, commit: bool = True) -> None:
     """删除一键流程记录和它的子任务记录，不删除硬盘上的成品文件"""
     for task in db.query(DownloadTask).filter(DownloadTask.parent_job_id == job.id).all():
         db.delete(task)
     db.delete(job)
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def _pause_batch_jobs(db: Session, batch_id: str) -> int:
@@ -2950,6 +3026,7 @@ def start_batch_automation(request: AutomationBatchStartRequest, db: Session = D
 def list_automation_jobs(db: Session = Depends(get_db)):
     """获取自动化任务列表"""
     jobs = db.query(AutomationJobRecord).order_by(AutomationJobRecord.created_at.desc()).limit(50).all()
+    jobs = _prune_missing_completed_jobs(db, jobs)
     return [_job_to_response(job, db) for job in jobs]
 
 
