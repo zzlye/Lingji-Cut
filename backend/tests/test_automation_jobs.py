@@ -677,10 +677,13 @@ class AutomationJobTests(unittest.TestCase):
                     progress_callback(100)
                 return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,200", "text": "hello world"}], "en")
 
+        captured_text_settings: dict[str, dict] = {}
+
         class FakeTextEngine:
             """测试用文本引擎，模拟翻译接口返回中文"""
 
-            async def process_subtitle_entries(self, entries, **_kwargs):
+            async def process_subtitle_entries(self, entries, **kwargs):
+                captured_text_settings["settings"] = kwargs.get("settings") or {}
                 return [{**entry, "text": "你好世界"} for entry in entries]
 
         with tempfile.TemporaryDirectory(prefix="automation_translate_review_") as temp_dir:
@@ -697,7 +700,7 @@ class AutomationJobTests(unittest.TestCase):
                 base_url="https://example.test/v1",
                 api_key_encrypted="encrypted",
                 model="test-model",
-                extra_params="{}",
+                extra_params='{"system_prompt": "旧配置提示词"}',
             )
             task_ids = iter(range(20, 30))
             workspace_paths = {
@@ -736,6 +739,7 @@ class AutomationJobTests(unittest.TestCase):
                         burn_subtitles=False,
                         subtitle_operation="translate",
                         subtitle_target_language="zh-CN",
+                        text_system_prompt="独立提示词预设",
                         text_profile_id=11,
                         output_format="mp4",
                     ),
@@ -749,6 +753,7 @@ class AutomationJobTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(comparison_path))
             self.assertTrue(os.path.isfile(translated_path))
             self.assertTrue(os.path.isfile(ass_path))
+            self.assertEqual(captured_text_settings["settings"]["system_prompt"], "独立提示词预设")
             with open(comparison_path, "r", encoding="utf-8") as file:
                 comparison_content = file.read()
 

@@ -119,6 +119,7 @@ class AutomationRunRequest(BaseModel):
     subtitle_recognition_mode: str = "local"
     subtitle_operation: str = "none"
     subtitle_target_language: Optional[str] = None
+    text_system_prompt: Optional[str] = None
     burn_subtitles: bool = True
     enable_voice: bool = False
     voice_profile_id: Optional[int] = None
@@ -1927,6 +1928,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 target_language = request.subtitle_target_language or ("zh-CN" if request.subtitle_operation == "translate" else "")
                 try:
                     text_settings = _load_profile_settings(text_profile)
+                    text_prompt = str(request.text_system_prompt or "").strip()
+                    if text_prompt:
+                        text_settings["system_prompt"] = text_prompt
                     glossary_prompt = _glossary_prompt_suffix(request.glossary_terms)
                     if glossary_prompt:
                         text_settings["system_prompt"] = f"{text_settings.get('system_prompt') or '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。'}{glossary_prompt}"

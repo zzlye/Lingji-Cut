@@ -95,6 +95,7 @@ class SubtitleTextProcessRequest(BaseModel):
     operation: str = "polish"
     target_language: Optional[str] = None
     custom_instruction: Optional[str] = None
+    system_prompt: Optional[str] = None
 
 
 class SubtitleTextProcessResponse(BaseModel):
@@ -119,6 +120,7 @@ class SubtitleEntriesProcessRequest(BaseModel):
     operation: str = "polish"
     target_language: Optional[str] = None
     custom_instruction: Optional[str] = None
+    system_prompt: Optional[str] = None
 
 
 class SubtitleEntriesProcessResponse(BaseModel):
@@ -339,6 +341,15 @@ def _load_text_settings(profile: TextProviderProfile) -> dict:
         return {}
 
 
+def _text_settings_with_prompt(profile: TextProviderProfile, system_prompt: Optional[str]) -> dict:
+    """读取文本 API 参数，并用独立提示词预设覆盖旧配置里的提示词"""
+    settings = _load_text_settings(profile)
+    prompt = str(system_prompt or "").strip()
+    if prompt:
+        settings["system_prompt"] = prompt
+    return settings
+
+
 def _default_subtitle_presets() -> list[SubtitlePresetCreate]:
     """内置字幕样式预设，保证字幕设置页和一键流程开箱即用"""
     return [
@@ -421,7 +432,7 @@ async def process_subtitle_text(request: SubtitleTextProcessRequest, db: Session
             api_key=decrypt_api_key(profile.api_key_encrypted),
             base_url=profile.base_url,
             model=profile.model or "",
-            settings=_load_text_settings(profile),
+            settings=_text_settings_with_prompt(profile, request.system_prompt),
             operation=request.operation,
             target_language=request.target_language or "",
             custom_instruction=request.custom_instruction or "",
@@ -452,7 +463,7 @@ async def process_subtitle_entries(request: SubtitleEntriesProcessRequest, db: S
             api_key=decrypt_api_key(profile.api_key_encrypted),
             base_url=profile.base_url,
             model=profile.model or "",
-            settings=_load_text_settings(profile),
+            settings=_text_settings_with_prompt(profile, request.system_prompt),
             operation=request.operation,
             target_language=request.target_language or "",
             custom_instruction=request.custom_instruction or "",

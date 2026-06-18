@@ -2,6 +2,7 @@
 // 自动化请求参数 - 把画面处理配置和一键偏好合并成后端请求
 
 import { loadAutomationPreferences } from '@/lib/automationPreferences'
+import { getActiveTextSystemPrompt } from '@/lib/textPromptPresets'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
 import type { AutomationStartParams } from '@/lib/api'
 
@@ -46,6 +47,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     subtitle_recognition_mode: preferences.subtitle_recognition_mode,
     subtitle_operation: preferences.subtitle_operation,
     subtitle_target_language: subtitleTargetLanguage,
+    text_system_prompt: getActiveTextSystemPrompt(),
     burn_subtitles: preferences.burn_subtitles,
     enable_voice: preferences.enable_voice,
     voice_profile_id: voiceProfileId,

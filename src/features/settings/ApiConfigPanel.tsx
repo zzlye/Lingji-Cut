@@ -4,7 +4,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { profileApi } from '@/lib/api'
 import { saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
+import {
+  createTextPromptPreset,
+  DEFAULT_TEXT_SYSTEM_PROMPT,
+  deleteTextPromptPreset,
+  loadActiveTextPromptPresetId,
+  loadTextPromptPresets,
+  migrateTextPromptPresetsFromProfiles,
+  setActiveTextPromptPresetId,
+  upsertTextPromptPreset,
+} from '@/lib/textPromptPresets'
+import type { ApiProfile, TextApiSettings, TextModelOption, TextPromptPreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -30,7 +40,7 @@ function createDefaultSettings(): TextApiSettings {
   return {
     temperature: 0.7, top_p: 1, top_k: 40, max_tokens: 2048, concurrency: 2, timeout_seconds: 120, retry_count: 2,
     retry_interval_ms: 1200, rate_limit_rpm: 60, subtitle_batch_size: 12, subtitle_batch_chars: 2800,
-    system_prompt: '你是专业短视频字幕处理助手，请保持含义准确、语言自然、适合口播。', response_format: 'text', stream: false,
+    response_format: 'text', stream: false,
   }
 }
 
@@ -38,6 +48,34 @@ function createDefaultSettings(): TextApiSettings {
 function createProfileForm() {
   const provider = TEXT_PROVIDERS[0]
   return { name: 'OpenAI 文本', provider_type: provider.id, base_url: provider.baseUrl, api_key: '', model: provider.model, custom_model: '' }
+}
+
+/** 创建提示词编辑表单 */
+function createPromptForm(preset?: TextPromptPreset) {
+  return {
+    id: preset?.id || 'new',
+    name: preset?.name || '短视频字幕提示词',
+    prompt: preset?.prompt || DEFAULT_TEXT_SYSTEM_PROMPT,
+    description: preset?.description || '',
+  }
+}
+
+/** 读取 API 参数时忽略旧版混入的 system_prompt */
+function parseProfileSettings(extraParams?: string | null): TextApiSettings {
+  if (!extraParams) return createDefaultSettings()
+  try {
+    const parsed = JSON.parse(extraParams)
+    const { system_prompt: _legacyPrompt, ...settings } = parsed && typeof parsed === 'object' ? parsed : {}
+    return { ...createDefaultSettings(), ...settings }
+  } catch {
+    return createDefaultSettings()
+  }
+}
+
+/** 保存 API 参数时不再把提示词写入 API 渠道配置 */
+function serializeProfileSettings(settings: TextApiSettings): string {
+  const { system_prompt: _legacyPrompt, ...payload } = settings
+  return JSON.stringify(payload)
 }
 
 /**
@@ -54,12 +92,22 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [promptPresets, setPromptPresets] = useState<TextPromptPreset[]>(() => loadTextPromptPresets())
+  const [activePromptPresetId, setActivePromptPresetState] = useState(() => loadActiveTextPromptPresetId())
+  const [selectedPromptPresetId, setSelectedPromptPresetId] = useState<string>(() => loadActiveTextPromptPresetId())
+  const [promptForm, setPromptForm] = useState(() => {
+    const presets = loadTextPromptPresets()
+    const activeId = loadActiveTextPromptPresetId()
+    return createPromptForm(presets.find((preset) => preset.id === activeId) || presets[0])
+  })
   const { addLog } = useTaskStore()
   const profileRequestRef = useRef(0)
 
   const selectedProfile = useMemo(() => profiles.find((p) => p.id === selectedProfileId) || null, [profiles, selectedProfileId])
   const provider = TEXT_PROVIDERS.find((item) => item.id === profileForm.provider_type) || TEXT_PROVIDERS[0]
   const activeModel = profileForm.custom_model.trim() || profileForm.model
+  const activePromptPreset = useMemo(() => promptPresets.find((preset) => preset.id === activePromptPresetId) || promptPresets[0] || null, [promptPresets, activePromptPresetId])
+  const selectedPromptPreset = useMemo(() => promptPresets.find((preset) => preset.id === selectedPromptPresetId) || null, [promptPresets, selectedPromptPresetId])
 
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getTextSecret(profileId)
@@ -81,9 +129,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
       setProfileForm({ name: profile.name, provider_type: profile.provider_type, base_url: profile.base_url, api_key: '', model: profile.model || '', custom_model: '' })
       addLog('warn', `读取已保存文本 API Key 失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
-    if (profile.extra_params) {
-      try { setSettings({ ...createDefaultSettings(), ...JSON.parse(profile.extra_params) }) } catch { setSettings(createDefaultSettings()) }
-    } else { setSettings(createDefaultSettings()) }
+    setSettings(parseProfileSettings(profile.extra_params))
     setModelOptions(profile.model ? [{ id: profile.model, label: profile.model }] : [])
   }
 
@@ -91,6 +137,8 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const data = await profileApi.listText()
       setProfiles(data)
+      const migratedPrompts = migrateTextPromptPresetsFromProfiles(data)
+      refreshPromptPresets(migratedPrompts)
       const target = preferredProfileId
         ? data.find((item) => item.id === preferredProfileId) || null
         : selectedProfileId === null
@@ -139,7 +187,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     if (!selectedProfileId && !profileForm.api_key.trim()) { addLog('warn', '新建文本 API 配置需要填写 API Key'); return }
     setIsSaving(true)
     try {
-      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify(settings) }
+      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: serializeProfileSettings(settings) }
       const saved = selectedProfileId ? await profileApi.updateText(selectedProfileId, payload) : await profileApi.createText({ ...payload, api_key: profileForm.api_key })
       saveAutomationPreferences({ text_profile_id: saved.id })
       toast.success(`文本 API 配置 "${saved.name}" 已保存`)
@@ -161,6 +209,63 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
       const message = `测试文本 API 失败: ${error instanceof Error ? error.message : '未知错误'}`
       toast.error(message); addLog('error', message)
     } finally { setIsTesting(false) }
+  }
+
+  const refreshPromptPresets = (nextPresets = loadTextPromptPresets()) => {
+    setPromptPresets(nextPresets)
+    const activeId = loadActiveTextPromptPresetId()
+    const normalizedActiveId = nextPresets.some((preset) => preset.id === activeId) ? activeId : nextPresets[0]?.id || ''
+    if (normalizedActiveId && normalizedActiveId !== activeId) setActiveTextPromptPresetId(normalizedActiveId)
+    setActivePromptPresetState(normalizedActiveId)
+    if (selectedPromptPresetId !== 'new' && !nextPresets.some((preset) => preset.id === selectedPromptPresetId)) {
+      const fallback = nextPresets.find((preset) => preset.id === normalizedActiveId) || nextPresets[0]
+      setSelectedPromptPresetId(fallback?.id || 'new')
+      setPromptForm(createPromptForm(fallback))
+    }
+  }
+
+  const selectPromptPreset = (presetId: string) => {
+    if (presetId === 'new') {
+      setSelectedPromptPresetId('new')
+      setPromptForm(createPromptForm())
+      return
+    }
+    const preset = promptPresets.find((item) => item.id === presetId)
+    if (!preset) return
+    setSelectedPromptPresetId(preset.id)
+    setPromptForm(createPromptForm(preset))
+  }
+
+  const handleSavePromptPreset = () => {
+    const prompt = promptForm.prompt.trim()
+    if (!prompt) { addLog('warn', '请填写提示词内容'); return }
+    const preset = createTextPromptPreset(promptForm.name, prompt, promptForm.description)
+    const payload = promptForm.id === 'new' ? preset : { ...preset, id: promptForm.id }
+    const next = upsertTextPromptPreset(payload)
+    setSelectedPromptPresetId(payload.id)
+    setPromptForm(createPromptForm(payload))
+    refreshPromptPresets(next)
+    toast.success('提示词预设已保存')
+  }
+
+  const handleActivatePromptPreset = (presetId = promptForm.id) => {
+    const preset = promptPresets.find((item) => item.id === presetId)
+    if (!preset) { toast.warning('请先保存这个提示词预设'); return }
+    setActiveTextPromptPresetId(preset.id)
+    setActivePromptPresetState(preset.id)
+    setSelectedPromptPresetId(preset.id)
+    setPromptForm(createPromptForm(preset))
+    toast.success(`已启用提示词：${preset.name}`)
+  }
+
+  const handleDeletePromptPreset = () => {
+    if (promptForm.id === 'new') return
+    const next = deleteTextPromptPreset(promptForm.id)
+    refreshPromptPresets(next)
+    const fallback = next.find((preset) => preset.id === loadActiveTextPromptPresetId()) || next[0]
+    setSelectedPromptPresetId(fallback?.id || 'new')
+    setPromptForm(createPromptForm(fallback))
+    toast.success('提示词预设已删除')
   }
 
   const updateSetting = <K extends keyof TextApiSettings>(key: K, value: TextApiSettings[K]) => setSettings((current) => ({ ...current, [key]: value }))
@@ -210,12 +315,71 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
             <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
             <TextField label="自定义模型" value={profileForm.custom_model} placeholder={profileForm.model || provider.model || '例如 gpt-4.1-mini'} onChange={(v) => setProfileForm({ ...profileForm, custom_model: v })} />
           </div>
-          <TextareaField label="系统提示词" value={settings.system_prompt} rows={3} onChange={(v) => updateSetting('system_prompt', v)} />
           <div className="flex flex-wrap items-center gap-2 border-t pt-3">
             <Button onClick={handleSaveProfile} disabled={isSaving}>{isSaving ? '保存中…' : '保存配置'}</Button>
             <Button variant="outline" onClick={handleLoadModels} disabled={isLoadingModels}>{isLoadingModels ? '获取中…' : '获取模型'}</Button>
             <Button variant="outline" onClick={handleTestProfile} disabled={isTesting || !selectedProfileId}>{isTesting ? '测试中…' : '测试连接'}</Button>
             <span className="text-xs text-muted-foreground">当前模型：{activeModel || '未选择'}</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 独立提示词预设 */}
+      <Card>
+        <CardHeader><CardTitle className="text-sm">提示词预设</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-lg border bg-muted/25 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">当前启用：{activePromptPreset?.name || '未启用'}</p>
+                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{activePromptPreset?.prompt || DEFAULT_TEXT_SYSTEM_PROMPT}</p>
+              </div>
+              {activePromptPreset && <Button variant="outline" size="sm" onClick={() => selectPromptPreset(activePromptPreset.id)}>编辑当前</Button>}
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
+            <div className="space-y-2">
+              <SelectField
+                label="选择提示词"
+                value={selectedPromptPresetId}
+                options={[['new', '+ 新建提示词'], ...promptPresets.map((preset) => [preset.id, preset.id === activePromptPresetId ? `${preset.name} · 已启用` : preset.name] as FieldOption)]}
+                onChange={selectPromptPreset}
+              />
+              <div className="space-y-1.5">
+                {promptPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => selectPromptPreset(preset.id)}
+                    className={cn(
+                      'w-full rounded-lg border p-2.5 text-left transition-colors hover:border-primary/50',
+                      selectedPromptPresetId === preset.id ? 'border-primary bg-primary/10' : 'bg-card',
+                    )}
+                  >
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm font-medium">{preset.name}</span>
+                      {preset.id === activePromptPresetId && <span className="shrink-0 rounded bg-success/10 px-1.5 py-0.5 text-[11px] text-success">启用</span>}
+                    </span>
+                    {preset.description && <span className="mt-1 line-clamp-2 text-xs text-muted-foreground">{preset.description}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <TextField label="预设名称" value={promptForm.name} onChange={(v) => setPromptForm({ ...promptForm, name: v })} />
+                <TextField label="说明" value={promptForm.description} placeholder="例如：翻译时严格保留术语" onChange={(v) => setPromptForm({ ...promptForm, description: v })} />
+              </div>
+              <TextareaField label="提示词内容" value={promptForm.prompt} rows={8} onChange={(v) => setPromptForm({ ...promptForm, prompt: v })} />
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={handleSavePromptPreset}>保存提示词</Button>
+                <Button variant="outline" onClick={() => handleActivatePromptPreset()} disabled={!selectedPromptPreset || promptForm.id === 'new'}>启用当前</Button>
+                {promptForm.id !== 'new' && <Button variant="outline" className="text-destructive" onClick={handleDeletePromptPreset}>删除提示词</Button>}
+                <span className="text-xs text-muted-foreground">提示词会影响字幕翻译、润色和一键完成，不再跟某个 API Key 绑定。</span>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

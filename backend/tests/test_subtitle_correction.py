@@ -404,7 +404,7 @@ Language: ja
             api_key_encrypted=encrypt_api_key("sk-test"),
             base_url="https://example.com/v1",
             model="gpt-4.1-mini",
-            extra_params='{"subtitle_batch_size": 12}',
+            extra_params='{"subtitle_batch_size": 12, "system_prompt": "旧提示词"}',
         )
         db = TextProfileDb(profile)
         request = SubtitleEntriesProcessRequest(
@@ -412,6 +412,7 @@ Language: ja
             operation="translate",
             target_language="zh-CN",
             custom_instruction="保留游戏术语",
+            system_prompt="独立提示词预设",
             entries=[
                 SubtitleEntryPayload(index=1, start="00:00:01,000", end="00:00:02,500", text="hello"),
                 SubtitleEntryPayload(index=2, start="00:00:02,500", end="00:00:04,000", text="world"),
@@ -430,6 +431,8 @@ Language: ja
         self.assertEqual(response.entries[1].end, "00:00:04,000")
         self.assertEqual([entry.text for entry in response.entries], ["你好", "世界"])
         self.assertEqual(process_mock.call_args.kwargs["custom_instruction"], "保留游戏术语")
+        self.assertEqual(process_mock.call_args.kwargs["settings"]["system_prompt"], "独立提示词预设")
+        self.assertEqual(process_mock.call_args.kwargs["settings"]["subtitle_batch_size"], 12)
 
 
 if __name__ == "__main__":

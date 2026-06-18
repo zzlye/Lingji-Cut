@@ -214,6 +214,7 @@ export const subtitleApi = {
     operation?: 'generate' | 'translate' | 'polish'
     target_language?: string
     custom_instruction?: string
+    system_prompt?: string
   }) =>
     request<{ message: string; text: string; operation: string }>('/subtitles/process-text', {
       method: 'POST',
@@ -227,6 +228,7 @@ export const subtitleApi = {
     operation?: 'generate' | 'translate' | 'polish'
     target_language?: string
     custom_instruction?: string
+    system_prompt?: string
   }) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; operation: string }>('/subtitles/process-entries', {
       method: 'POST',
@@ -414,6 +416,7 @@ export type AutomationStartParams = {
   subtitle_recognition_mode?: 'local' | 'gemini_full' | 'gemini_align'
   subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
   subtitle_target_language?: string
+  text_system_prompt?: string
   burn_subtitles?: boolean
   enable_voice?: boolean
   voice_profile_id?: number

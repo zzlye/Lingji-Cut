@@ -154,7 +154,8 @@ export interface TextApiSettings {
   rate_limit_rpm: number
   subtitle_batch_size: number
   subtitle_batch_chars: number
-  system_prompt: string
+  /** 旧版兼容字段；新提示词预设已独立保存 */
+  system_prompt?: string
   response_format: 'text' | 'json'
   stream: boolean
 }
@@ -164,6 +165,14 @@ export interface TextModelOption {
   id: string
   label: string
   owned_by?: string | null
+}
+
+/** 文本 API 提示词预设，独立于 API 渠道配置 */
+export interface TextPromptPreset {
+  id: string
+  name: string
+  prompt: string
+  description: string
 }
 
 /** 自动处理流程阶段 */

@@ -4,6 +4,7 @@
 import { startTransition, type UIEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Search, Settings2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
+import { getActiveTextSystemPrompt, loadActiveTextPromptPreset } from '@/lib/textPromptPresets'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useTaskStore } from '@/stores/taskStore'
 import { usePrefsStore } from '@/stores/prefsStore'
@@ -119,6 +120,7 @@ export function StudioSubtitleWorkbench({
   const selectedEntryParts = useMemo(() => splitSubtitleByLanguage(selectedEntry?.text || ''), [selectedEntry?.text])
   const selectedOriginalText = selectedEntryParts.original
   const selectedTranslationText = selectedEntryParts.translation
+  const activePromptPreset = useMemo(() => loadActiveTextPromptPreset(), [selectedProfileId, isAiProcessing])
   const invalidCount = useMemo(
     () => entries.filter((entry) => timeToMs(entry.end) <= timeToMs(entry.start)).length,
     [entries],
@@ -572,6 +574,7 @@ export function StudioSubtitleWorkbench({
         operation,
         target_language: operation === 'translate' ? targetLanguage : undefined,
         custom_instruction: customInstruction || undefined,
+        system_prompt: getActiveTextSystemPrompt(),
       })
 
       setEntries((current) => {
@@ -1001,6 +1004,9 @@ export function StudioSubtitleWorkbench({
                 />
                 <SegmentedField label="处理范围" value={aiScope} options={AI_SCOPE_OPTIONS} onChange={(value) => setAiScope(value as 'checked' | 'current' | 'all')} />
                 <SelectField label="翻译目标语言" value={targetLanguage} options={TARGET_LANG_OPTIONS} onChange={handleTargetLanguageChange} />
+                <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  当前提示词：<span className="text-foreground">{activePromptPreset?.name || '默认提示词'}</span>
+                </div>
                 <div className="grid gap-1.5">
                   <Button onClick={() => openAiInstructionDialog('translate')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Languages className="mr-2 size-4" />
