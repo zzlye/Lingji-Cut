@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
-  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FileVideo, X,
+  CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FileVideo, X, Play,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
@@ -14,6 +14,7 @@ import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
@@ -70,6 +71,10 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       ? { ...activeJob.video_info, cover_asset_path: activeJob.cover_asset_path || activeJob.video_info.cover_asset_path || null }
       : null
   )
+  const activeJobMatchesDisplayVideo = Boolean(displayVideo && activeJob?.video_info && (
+    activeJob.video_info.id === displayVideo.id || activeJob.video_info.video_id === displayVideo.video_id
+  ))
+  const playableVideoPath = localVideoPath || (!currentVideo || activeJobMatchesDisplayVideo ? resolveJobOriginalVideo(activeJob) : '')
 
   const sourceForRun = localVideoPath ? toLocalVideoSource(localVideoPath) : url
   const hasSource = Boolean(sourceForRun.trim())
@@ -197,7 +202,13 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       {/* 双栏：左信息+进度，右配置摘要 */}
       <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
-          {displayVideo ? <VideoInfoCard video={displayVideo} isThumbnailLoading={Boolean(localVideoPath && isGeneratingLocalThumbnail)} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
+          {displayVideo ? (
+            <VideoInfoCard
+              video={displayVideo}
+              playableVideoPath={playableVideoPath}
+              isThumbnailLoading={Boolean(localVideoPath && isGeneratingLocalThumbnail)}
+            />
+          ) : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
           {activeJob && <JobProgressCard job={activeJob} />}
         </div>
         <ConfigSummary preferences={preferences} onOpenSettings={onOpenSettings} />
@@ -321,11 +332,21 @@ function PipelineStepper({ job }: { job?: AutomationJob }) {
 }
 
 /** 视频信息卡 */
-function VideoInfoCard({ video, isThumbnailLoading = false }: { video: VideoParseResult; isThumbnailLoading?: boolean }) {
+function VideoInfoCard({
+  video,
+  playableVideoPath = '',
+  isThumbnailLoading = false,
+}: {
+  video: VideoParseResult
+  playableVideoPath?: string
+  isThumbnailLoading?: boolean
+}) {
   const [isDownloadingCover, setIsDownloadingCover] = useState(false)
   const [lastCoverPath, setLastCoverPath] = useState('')
+  const [isPlayerOpen, setIsPlayerOpen] = useState(false)
   const previewUrl = video.thumbnail_url || (video.cover_asset_path ? automationApi.mediaUrl(video.cover_asset_path) : '')
   const canDownloadCover = Boolean(video.thumbnail_url)
+  const canPlayVideo = Boolean(playableVideoPath)
 
   const handleDownloadCover = async () => {
     if (isDownloadingCover || !canDownloadCover) return
@@ -371,6 +392,15 @@ function VideoInfoCard({ video, isThumbnailLoading = false }: { video: VideoPars
           </div>
           <div className="flex flex-wrap gap-2 pt-1">
             <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setIsPlayerOpen(true)}
+              disabled={!canPlayVideo}
+            >
+              <Play className="mr-1.5 size-3.5" />
+              播放视频
+            </Button>
+            <Button
               variant="outline"
               size="sm"
               onClick={handleDownloadCover}
@@ -388,6 +418,23 @@ function VideoInfoCard({ video, isThumbnailLoading = false }: { video: VideoPars
           )}
         </div>
       </CardContent>
+      <Dialog open={isPlayerOpen} onOpenChange={setIsPlayerOpen}>
+        <DialogContent className="sm:max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>{video.title || '视频预览'}</DialogTitle>
+            <DialogDescription className="break-all">{playableVideoPath || '暂无可播放视频文件'}</DialogDescription>
+          </DialogHeader>
+          {canPlayVideo && (
+            <video
+              key={playableVideoPath}
+              src={automationApi.mediaUrl(playableVideoPath)}
+              className="max-h-[70vh] w-full rounded-lg bg-black"
+              controls
+              autoPlay
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </Card>
   )
 }
@@ -516,4 +563,16 @@ function ConfigSummary({
       </CardContent>
     </Card>
   )
+}
+
+function resolveJobOriginalVideo(job?: AutomationJob) {
+  if (!job) return ''
+  const sourcePath = (job.source_video_path || '').trim()
+  if (isVideoPath(sourcePath)) return sourcePath
+  const downloadPath = (job.steps.find((step) => step.key === 'download')?.output_path || '').trim()
+  return isVideoPath(downloadPath) ? downloadPath : ''
+}
+
+function isVideoPath(path: string | null | undefined) {
+  return Boolean(path && /\.(mp4|mov|mkv|webm|avi|m4v)$/i.test(path))
 }
