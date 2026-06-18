@@ -76,8 +76,10 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
   ))
   const playableVideoPath = localVideoPath || (!currentVideo || activeJobMatchesDisplayVideo ? resolveJobOriginalVideo(activeJob) : '')
 
-  const sourceForRun = localVideoPath ? toLocalVideoSource(localVideoPath) : url
+  const reusableRunSource = resolveReusableRunSource(activeJobMatchesDisplayVideo || !currentVideo ? activeJob : undefined)
+  const sourceForRun = localVideoPath ? toLocalVideoSource(localVideoPath) : url.trim() ? url : reusableRunSource
   const hasSource = Boolean(sourceForRun.trim())
+  const isUsingReusableSource = !localVideoPath && !url.trim() && Boolean(reusableRunSource)
 
   const handleUrlChange = (value: string) => {
     setUrl(value)
@@ -173,7 +175,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
               {localVideoPath ? '重新选择本地视频' : '选择本地视频'}
             </Button>
             <AutoRunConfirm
-              disabled={!hasSource}
+              disabled={!hasSource || isStarting}
               isStarting={isStarting}
               preferences={preferences}
               onConfirm={handleStart}
@@ -191,7 +193,9 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
             </div>
           )}
           <p className="text-xs text-muted-foreground">
-            可以粘贴链接后先「解析」，也可以选择本地视频后直接「一键完成」；两种来源都会进入同一套处理流程。
+            {isUsingReusableSource
+              ? '已自动选择下方视频，可直接一键完成；新结果会覆盖同项目目录里的同名产物。'
+              : '可以粘贴链接后先「解析」，也可以选择本地视频后直接「一键完成」；两种来源都会进入同一套处理流程。'}
           </p>
         </CardContent>
       </Card>
@@ -571,6 +575,15 @@ function resolveJobOriginalVideo(job?: AutomationJob) {
   if (isVideoPath(sourcePath)) return sourcePath
   const downloadPath = (job.steps.find((step) => step.key === 'download')?.output_path || '').trim()
   return isVideoPath(downloadPath) ? downloadPath : ''
+}
+
+/** 从已有任务恢复可重新一键完成的来源，避免输入框为空时按钮被误禁用 */
+function resolveReusableRunSource(job?: AutomationJob) {
+  if (!job) return ''
+  const sourceUrl = (job.source_url || '').trim()
+  if (sourceUrl) return sourceUrl
+  const originalVideoPath = resolveJobOriginalVideo(job)
+  return originalVideoPath ? toLocalVideoSource(originalVideoPath) : ''
 }
 
 function isVideoPath(path: string | null | undefined) {
