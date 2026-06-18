@@ -23,7 +23,7 @@ const SECTION_GROUPS: Array<{ group: string; items: Array<{ id: SettingsSection;
   { group: '文本与配音', items: [
     { id: 'api', label: '文本 API', icon: Cpu },
     { id: 'prompts', label: '提示词预设', icon: MessageSquareText },
-    { id: 'voice', label: '配音', icon: Mic },
+    { id: 'voice', label: '配音设置', icon: Mic },
   ] },
   { group: '内容规则', items: [
     { id: 'glossary', label: '术语表', icon: BookMarked },
