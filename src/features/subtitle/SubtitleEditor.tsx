@@ -627,23 +627,23 @@ function FontPicker({ value, selectedFont, availability, installingFontName, onC
             <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent align="start" className="w-[620px] max-w-[calc(100vw-2rem)] p-0">
-          <div className="space-y-3 border-b p-3">
+        <PopoverContent align="start" className="w-[460px] max-w-[calc(100vw-2rem)] p-0">
+          <div className="space-y-2 border-b p-2.5">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索字体名、别名或厂商"
-                className="pl-8"
+                className="h-8 pl-8"
               />
             </div>
             <SegmentedField value={filter} options={FONT_FILTER_OPTIONS} onChange={(nextFilter) => setFilter(nextFilter as FontFilterKind)} />
           </div>
 
-          <div className="max-h-[360px] overflow-y-auto p-2">
+          <div className="max-h-[300px] overflow-y-auto p-1.5">
             {filteredFonts.length > 0 ? (
-              <div className="grid gap-2">
+              <div className="grid gap-1.5">
                 {filteredFonts.map((font) => (
                   <FontPickerOption
                     key={`${font.license}-${font.family}`}
@@ -663,7 +663,7 @@ function FontPicker({ value, selectedFont, availability, installingFontName, onC
             )}
           </div>
 
-          <div className="border-t px-3 py-2 text-xs leading-5 text-muted-foreground">
+          <div className="border-t px-2.5 py-2 text-xs leading-5 text-muted-foreground">
             免费字体可直接安装；商业字体不会被禁用，但需要你自行确认授权并先安装到系统。
           </div>
         </PopoverContent>
@@ -686,29 +686,29 @@ function FontPickerOption({ font, selected, available, installing, onSelect, onI
     <div
       style={{ fontFamily: buildCssFontFamily(font.family) }}
       className={cn(
-        'rounded-lg border bg-card p-3 text-xs transition-colors',
+        'rounded-md border bg-card p-2.5 text-xs transition-colors',
         selected ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground',
       )}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left hover:text-foreground">
           <span className="block truncate text-sm font-medium">{font.name}</span>
           <span className="mt-0.5 block truncate font-mono text-[11px] opacity-75">
             {font.family}{font.aliases?.length ? ` / ${font.aliases[0]}` : ''}
           </span>
-          <span className="mt-2 line-clamp-2 block leading-snug opacity-80">{font.note}</span>
+          <span className="mt-1 line-clamp-1 block leading-snug opacity-80">{font.note}</span>
         </button>
-        <div className="flex shrink-0 flex-col items-end gap-1.5">
+        <div className="flex shrink-0 flex-col items-end gap-1">
           {selected ? <Check className="size-4 shrink-0" /> : <FontLicenseBadge license={font.license} />}
           <FontAvailabilityBadge available={available} />
         </div>
       </div>
-      <div className="mt-2 flex items-center justify-between gap-2">
-        <Button type="button" size="sm" variant={selected ? 'secondary' : 'outline'} className="h-8 px-3" onClick={onSelect}>
+      <div className="mt-1.5 flex items-center justify-between gap-2">
+        <Button type="button" size="sm" variant={selected ? 'secondary' : 'outline'} className="h-7 px-2.5" onClick={onSelect}>
           {selected ? '已选择' : '选择'}
         </Button>
         {canInstall ? (
-          <Button type="button" size="sm" variant="outline" className="h-8 px-3" onClick={onInstall} disabled={installing}>
+          <Button type="button" size="sm" variant="outline" className="h-7 px-2.5" onClick={onInstall} disabled={installing}>
             {installing ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <Download className="mr-1.5 size-3.5" />}
             {installing ? '安装中' : '安装字体'}
           </Button>
