@@ -1,6 +1,6 @@
 // src/features/studio/StudioWorkspace.tsx
 // 工作台 - 一条主线串起 URL→解析→一键完成→实时进度，开屏即见，取代原先空白的素材库首页
-import { useRef, useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import {
   Sparkles, SlidersHorizontal, Film, Captions, Mic, BookMarked, ShieldAlert,
   CheckCircle2, Loader2, XCircle, CircleDashed, SkipForward, PauseCircle, ChevronRight, Download, FileVideo, X, Play,
@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -512,75 +513,140 @@ function ConfigSummary({
     <Card className="glass lg:self-start">
       <CardHeader className="space-y-1 p-4 pb-2">
         <CardTitle className="text-sm">本次配置</CardTitle>
-        <CardDescription className="text-xs">常用项直接切换，右侧按钮进详细设置</CardDescription>
+        <CardDescription className="text-xs">点分组展开，右侧按钮进详细设置</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2 p-4 pt-2">
-        <ConfigSwitchRow
-          icon={Film}
-          label="画面处理"
-          description="差异化重编码"
-          checked={preferences.enable_effects}
-          onChange={(value) => updatePrefs({ enable_effects: value })}
-          onOpenSettings={() => onOpenSettings('effects')}
-        />
-        <ConfigSwitchRow
-          icon={SlidersHorizontal}
-          label="最终导出"
-          description={preferences.export_with_settings ? '按导出设置统一输出' : '直接合成输出'}
-          checked={preferences.export_with_settings}
-          onChange={(value) => updatePrefs({ export_with_settings: value })}
-          onOpenSettings={() => onOpenSettings('export')}
-        />
-        <ConfigSelectRow
-          icon={Captions}
-          label="字幕处理"
-          value={preferences.subtitle_operation}
-          options={subtitleOptions}
-          onChange={(value) => updatePrefs({ subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
-          onOpenSettings={() => onOpenSettings('subtitle')}
-        />
-        <ConfigSwitchRow
-          icon={Captions}
-          label="烧录硬字幕"
-          description={preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
-          checked={preferences.burn_subtitles}
-          onChange={(value) => updatePrefs({ burn_subtitles: value })}
-          onOpenSettings={() => onOpenSettings('subtitle')}
-        />
-        <ConfigSwitchRow
-          icon={Mic}
-          label="配音"
-          description="开启后走配音生成"
-          checked={preferences.enable_voice}
-          onChange={(value) => updatePrefs({ enable_voice: value })}
-          onOpenSettings={() => onOpenSettings('voice')}
-        />
-        {preferences.enable_voice && (
-          <ConfigSwitchRow
-            icon={Download}
-            label="字幕版视频"
-            description="额外导出无配音版本"
-            checked={preferences.export_subtitle_only_when_voice}
-            onChange={(value) => updatePrefs({ export_subtitle_only_when_voice: value })}
-            onOpenSettings={() => onOpenSettings('voice')}
-          />
-        )}
-        <div className="grid grid-cols-2 gap-2">
-          <ConfigShortcutRow
+      <CardContent className="p-4 pt-2">
+        <Accordion type="multiple" defaultValue={['video', 'subtitle']} className="space-y-2">
+          <ConfigGroup
+            value="video"
+            icon={Film}
+            label="画面与导出"
+            summary={`${preferences.enable_effects ? '画面处理开' : '画面处理关'} · ${preferences.export_with_settings ? '按设置导出' : '直接输出'}`}
+          >
+            <ConfigSwitchRow
+              icon={Film}
+              label="画面处理"
+              description="差异化重编码"
+              checked={preferences.enable_effects}
+              onChange={(value) => updatePrefs({ enable_effects: value })}
+              onOpenSettings={() => onOpenSettings('effects')}
+            />
+            <ConfigSwitchRow
+              icon={SlidersHorizontal}
+              label="最终导出"
+              description={preferences.export_with_settings ? '按导出设置统一输出' : '直接合成输出'}
+              checked={preferences.export_with_settings}
+              onChange={(value) => updatePrefs({ export_with_settings: value })}
+              onOpenSettings={() => onOpenSettings('export')}
+            />
+          </ConfigGroup>
+
+          <ConfigGroup
+            value="subtitle"
+            icon={Captions}
+            label="字幕处理"
+            summary={`${SUBTITLE_OP_LABEL[preferences.subtitle_operation]} · ${preferences.burn_subtitles ? '烧录' : '不烧录'}`}
+          >
+            <ConfigSelectRow
+              icon={Captions}
+              label="处理方式"
+              value={preferences.subtitle_operation}
+              options={subtitleOptions}
+              onChange={(value) => updatePrefs({ subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
+              onOpenSettings={() => onOpenSettings('subtitle')}
+            />
+            <ConfigSwitchRow
+              icon={Captions}
+              label="烧录硬字幕"
+              description={preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
+              checked={preferences.burn_subtitles}
+              onChange={(value) => updatePrefs({ burn_subtitles: value })}
+              onOpenSettings={() => onOpenSettings('subtitle')}
+            />
+          </ConfigGroup>
+
+          <ConfigGroup
+            value="voice"
+            icon={Mic}
+            label="配音"
+            summary={preferences.enable_voice ? '开启' : '关闭'}
+          >
+            <ConfigSwitchRow
+              icon={Mic}
+              label="配音"
+              description="开启后走配音生成"
+              checked={preferences.enable_voice}
+              onChange={(value) => updatePrefs({ enable_voice: value })}
+              onOpenSettings={() => onOpenSettings('voice')}
+            />
+            {preferences.enable_voice && (
+              <ConfigSwitchRow
+                icon={Download}
+                label="字幕版视频"
+                description="额外导出无配音版本"
+                checked={preferences.export_subtitle_only_when_voice}
+                onChange={(value) => updatePrefs({ export_subtitle_only_when_voice: value })}
+                onOpenSettings={() => onOpenSettings('voice')}
+              />
+            )}
+          </ConfigGroup>
+
+          <ConfigGroup
+            value="words"
             icon={BookMarked}
-            label="术语库"
-            value={`${preferences.glossary_terms.length} 条`}
-            onOpenSettings={() => onOpenSettings('glossary')}
-          />
-          <ConfigShortcutRow
-            icon={ShieldAlert}
-            label="禁词"
-            value={`${preferences.banned_words.length} 个`}
-            onOpenSettings={() => onOpenSettings('banned')}
-          />
-        </div>
+            label="术语表与禁词"
+            summary={`${preferences.glossary_terms.length} 条术语 · ${preferences.banned_words.length} 个禁词`}
+          >
+            <div className="grid grid-cols-2 gap-2">
+              <ConfigShortcutRow
+                icon={BookMarked}
+                label="术语表"
+                value={`${preferences.glossary_terms.length} 条`}
+                onOpenSettings={() => onOpenSettings('glossary')}
+              />
+              <ConfigShortcutRow
+                icon={ShieldAlert}
+                label="禁词"
+                value={`${preferences.banned_words.length} 个`}
+                onOpenSettings={() => onOpenSettings('banned')}
+              />
+            </div>
+          </ConfigGroup>
+        </Accordion>
       </CardContent>
     </Card>
+  )
+}
+
+/** 本次配置里的折叠分组 */
+function ConfigGroup({
+  value,
+  icon: Icon,
+  label,
+  summary,
+  children,
+}: {
+  value: string
+  icon: typeof Film
+  label: string
+  summary: string
+  children: ReactNode
+}) {
+  return (
+    <AccordionItem value={value} className="rounded-lg border bg-card/70 px-2.5 last:border-b">
+      <AccordionTrigger className="py-2.5 hover:no-underline">
+        <span className="flex min-w-0 items-center gap-2">
+          <Icon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0">
+            <span className="block text-sm font-medium leading-5">{label}</span>
+            <span className="block truncate text-[11px] font-normal leading-4 text-muted-foreground">{summary}</span>
+          </span>
+        </span>
+      </AccordionTrigger>
+      <AccordionContent className="space-y-2 pb-2">
+        {children}
+      </AccordionContent>
+    </AccordionItem>
   )
 }
 
