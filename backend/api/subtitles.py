@@ -48,6 +48,11 @@ class SubtitlePresetCreate(BaseModel):
     margin_v: int = 30
 
 
+class SubtitlePresetRename(BaseModel):
+    """修改字幕预设名称请求"""
+    name: str
+
+
 class SubtitlePresetResponse(BaseModel):
     """字幕预设响应"""
     id: int
@@ -588,6 +593,22 @@ async def update_preset(preset_id: int, preset: SubtitlePresetCreate, db: Sessio
 
     for key, value in preset.model_dump().items():
         setattr(db_preset, key, value)
+    db.commit()
+    db.refresh(db_preset)
+    return db_preset
+
+
+@router.patch("/presets/{preset_id}/name", response_model=SubtitlePresetResponse)
+async def rename_preset(preset_id: int, request: SubtitlePresetRename, db: Session = Depends(get_db)):
+    """只修改字幕预设名称，不影响字号、颜色、字体等样式参数"""
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="预设名称不能为空")
+    db_preset = db.query(SubtitlePreset).filter(SubtitlePreset.id == preset_id).first()
+    if not db_preset:
+        raise HTTPException(status_code=404, detail="预设不存在")
+
+    db_preset.name = name
     db.commit()
     db.refresh(db_preset)
     return db_preset

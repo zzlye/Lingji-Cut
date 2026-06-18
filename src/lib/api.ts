@@ -194,6 +194,13 @@ export const subtitleApi = {
       body: JSON.stringify(preset),
     }),
 
+  /** 只修改字幕预设名称 */
+  renamePreset: (id: number, name: string) =>
+    request<import('@/types').SubtitlePreset>(`/subtitles/presets/${id}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
   /** 删除字幕预设 */
   deletePreset: (id: number) =>
     request<{ message: string }>(`/subtitles/presets/${id}`, { method: 'DELETE' }),

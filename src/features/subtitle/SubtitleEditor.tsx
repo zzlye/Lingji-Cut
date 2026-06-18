@@ -3,7 +3,7 @@
 // 交互重做：语言/字号/位置/主色 + 实时预览露出，字体/描边/阴影/一键策略收进高级折叠
 
 import { useEffect, useMemo, useState } from 'react'
-import { Check, ChevronDown, Download, Loader2, Search, Type } from 'lucide-react'
+import { Check, ChevronDown, Download, Loader2, Pencil, Plus, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { SubtitlePreset } from '@/types'
@@ -251,6 +251,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [customLanguage, setCustomLanguage] = useState('')
   const [automationOptions, setAutomationOptions] = useState(() => loadAutomationPreferences())
   const [isSaving, setIsSaving] = useState(false)
+  const [isRenaming, setIsRenaming] = useState(false)
   const [installingFontName, setInstallingFontName] = useState('')
   const [fontAvailabilityRefreshKey, setFontAvailabilityRefreshKey] = useState(0)
   const { addLog } = useTaskStore()
@@ -333,6 +334,28 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  const handleRenamePreset = async () => {
+    const nextName = window.prompt('请输入新的预设名称', form.name)?.trim()
+    if (!nextName || nextName === form.name) return
+    if (selectedId === 'new') {
+      updateForm('name', nextName)
+      addLog('info', '新预设名称已修改，保存预设后生效')
+      return
+    }
+
+    setIsRenaming(true)
+    try {
+      const renamed = await subtitleApi.renamePreset(selectedId, nextName)
+      setForm((current) => ({ ...current, name: renamed.name }))
+      setPresets((current) => current.map((preset) => (preset.id === renamed.id ? { ...preset, name: renamed.name } : preset)))
+      addLog('info', `字幕预设已改名为 "${renamed.name}"`)
+    } catch (error) {
+      addLog('error', `修改字幕预设名称失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsRenaming(false)
+    }
+  }
+
   const handleInstallFont = async (font: FontPreset) => {
     if (!font.installable) {
       addLog('warn', '这个字体没有内置下载源，请从字体官网安装后再选择。')
@@ -361,7 +384,10 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
       {/* 预设工具条 */}
       <div className="flex flex-wrap items-end gap-2">
         <div className="min-w-44 flex-1"><SelectField label="已保存预设" value={String(selectedId)} options={[['new', '＋ 新建预设'], ...presets.map((p) => [String(p.id), p.name] as FieldOption)]} onChange={handleSelectPreset} /></div>
-        <div className="min-w-44 flex-1"><TextField label="预设名称" value={form.name} onChange={(v) => updateForm('name', v)} /></div>
+        <Button type="button" variant="outline" onClick={handleRenamePreset} disabled={isRenaming}>
+          {selectedId === 'new' ? <Plus className="mr-1.5 size-4" /> : <Pencil className="mr-1.5 size-4" />}
+          {isRenaming ? '修改中…' : '修改名称'}
+        </Button>
         {selectedId !== 'new' && <Button variant="outline" className="text-destructive" onClick={handleDelete}>删除</Button>}
         <Button onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中…' : '保存预设'}</Button>
       </div>

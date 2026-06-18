@@ -19,10 +19,12 @@ if PROJECT_ROOT not in sys.path:
 from backend.api.subtitles import (  # noqa: E402
     _default_subtitle_presets,
     ensure_default_subtitle_presets,
+    rename_preset,
     SubtitleCorrectionSaveAssRequest,
     SubtitleCorrectionSaveRequest,
     SubtitleEntriesProcessRequest,
     SubtitleEntryPayload,
+    SubtitlePresetRename,
     process_subtitle_entries,
     save_corrected_ass,
     save_corrected_subtitle,
@@ -55,6 +57,9 @@ class PresetListQuery:
     def __init__(self, presets):
         self.presets = presets
 
+    def filter(self, *_args, **_kwargs):
+        return self
+
     def first(self):
         return self.presets[0] if self.presets else None
 
@@ -74,6 +79,9 @@ class PresetListDb:
 
     def commit(self):
         self.commit_count += 1
+
+    def refresh(self, _item):
+        return None
 
 
 class ProfileQuery:
@@ -277,6 +285,18 @@ Language: ja
         self.assertEqual(short_video.line_mode, "double")
         self.assertEqual(bilingual.line_mode, "double")
         self.assertEqual(db.commit_count, 0)
+
+    def test_rename_preset_only_changes_name(self):
+        """字幕预设改名不能改动其它样式参数"""
+        preset = SimpleNamespace(id=1, name="旧名称", line_mode="double", font_size=80)
+        db = PresetListDb([preset])
+
+        result = asyncio.run(rename_preset(1, SubtitlePresetRename(name="新名称"), db))
+
+        self.assertEqual(result.name, "新名称")
+        self.assertEqual(preset.line_mode, "double")
+        self.assertEqual(preset.font_size, 80)
+        self.assertEqual(db.commit_count, 1)
 
     def test_generate_ass_double_line_uses_secondary_font_size(self):
         """双行字幕第二行使用独立样式和字号"""
