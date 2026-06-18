@@ -395,6 +395,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionTrigger className="text-sm">一键配音策略</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
+            <SwitchField label="同时导出无配音字幕版" description="开启配音时额外保留一个只有字幕、没有配音的视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
             <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['segmented', '按字幕分段'], ['full', '整段生成']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
             <SwitchField label="多人对话" description="字幕出现说话人标签时按映射选音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v, voice_mode: v ? 'segmented' : automationOptions.voice_mode }))} />
             <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['mix', '保留原声并混合'], ['replace', '替换原声']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />

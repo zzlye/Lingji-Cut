@@ -32,6 +32,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_target_language: 'zh-CN',
   burn_subtitles: true,
   enable_voice: false,
+  export_subtitle_only_when_voice: false,
   voice_profile_id: null,
   voice_mode: 'segmented',
   audio_mode: 'mix',
@@ -141,6 +142,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
         ? parsed.subtitle_recognition_mode
         : 'local',
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
+      export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),

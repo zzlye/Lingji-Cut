@@ -155,6 +155,7 @@ class FakeAutomationProcessor:
         self.burn_calls: list[dict] = []
         self.effects_calls: list[dict] = []
         self.merge_calls: list[dict] = []
+        self.convert_calls: list[dict] = []
 
     def burn_subtitles(self, **kwargs):
         """记录烧录参数并返回假输出文件"""
@@ -180,9 +181,10 @@ class FakeAutomationProcessor:
             file.write(b"merged")
         return output_path
 
-    def convert_format(self, **_kwargs):
+    def convert_format(self, **kwargs):
         """返回假导出文件"""
-        output_path = os.path.join(self.temp_dir, "exported.mp4")
+        self.convert_calls.append(kwargs)
+        output_path = kwargs.get("output_path") or os.path.join(self.temp_dir, "exported.mp4")
         with open(output_path, "wb") as file:
             file.write(b"exported")
         return output_path
@@ -200,6 +202,24 @@ class FakeAutomationRecognizer:
         if progress_callback:
             progress_callback(100)
         return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "本地识别字幕"}], "zh")
+
+
+class FakeVoiceEngine:
+    """测试用配音引擎，返回假音频文件"""
+
+    async def generate_timed_voice_track(self, output_path, progress_callback=None, **_kwargs):
+        """模拟按字幕分段生成配音"""
+        if progress_callback:
+            progress_callback(100)
+        with open(output_path, "wb") as file:
+            file.write(b"voice")
+        return output_path
+
+    async def generate_voice(self, output_path, **_kwargs):
+        """模拟整段生成配音"""
+        with open(output_path, "wb") as file:
+            file.write(b"voice")
+        return output_path
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -239,8 +259,9 @@ class AutomationJobTests(unittest.TestCase):
             download_path = os.path.join(temp_dir, "downloaded.mp4")
             subtitle_ass_path = os.path.join(temp_dir, "downloaded_zh.ass")
             voice_path = os.path.join(temp_dir, "voice.mp3")
+            subtitle_only_path = os.path.join(temp_dir, "subtitle_only.mp4")
             subtitled_video_path = os.path.join(temp_dir, "downloaded_subtitled.mp4")
-            for path in (download_path, subtitle_ass_path, voice_path, subtitled_video_path):
+            for path in (download_path, subtitle_ass_path, voice_path, subtitle_only_path, subtitled_video_path):
                 with open(path, "wb") as file:
                     file.write(b"ok")
 
@@ -249,6 +270,7 @@ class AutomationJobTests(unittest.TestCase):
                 source_url="https://youtube.com/watch?v=test",
                 title="测试任务",
                 status="completed",
+                params=json.dumps({"subtitle_only_video_path": subtitle_only_path}, ensure_ascii=False),
                 stages=json.dumps([
                     {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": download_path, "error_message": None},
                     {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 2, "output_path": subtitled_video_path, "error_message": None},
@@ -271,6 +293,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.subtitle_asset_path, subtitle_ass_path)
         self.assertEqual(response.source_video_path, download_path)
         self.assertEqual(response.voice_asset_path, voice_path)
+        self.assertEqual(response.subtitle_only_video_path, subtitle_only_path)
 
     def test_job_response_prefers_comparison_subtitle_and_exposes_pair_paths(self):
         """字幕调整页优先拿中英对照字幕，同时暴露原文和译文路径用于旧任务补全"""
@@ -1308,6 +1331,73 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.effects_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
         self.assertFalse(fake_processor.effects_calls[0]["preset"]["transform"]["enabled"])
         self.assertEqual(fake_processor.effects_calls[0]["preset"]["canvas"]["resolution"], "1080p")
+
+    def test_automation_voice_can_export_subtitle_only_copy(self):
+        """开启配音时可额外导出一份只有字幕、没有配音的视频"""
+        with tempfile.TemporaryDirectory(prefix="automation_subtitle_only_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=1, platform="youtube", video_id="voice-copy", url="https://example.test/video", title="配音字幕版")
+            voice_profile = VoiceProviderProfile(
+                id=2,
+                name="配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            task_ids = iter(range(40, 50))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-copy",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation.VoiceEngine", return_value=FakeVoiceEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=True,
+                        export_subtitle_only_when_voice=True,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+            self.assertTrue(response.subtitle_only_video_path)
+            self.assertTrue(response.subtitle_only_video_path.endswith("_subtitle_only.mp4"))
+            self.assertTrue(os.path.isfile(response.subtitle_only_video_path))
+            self.assertEqual(len(fake_processor.convert_calls), 2)
+            self.assertEqual(fake_processor.convert_calls[0]["output_path"], response.subtitle_only_video_path)
+            self.assertNotIn("output_path", fake_processor.convert_calls[1])
+            self.assertEqual(fake_processor.merge_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
 
     def test_reexport_automation_job_uses_new_subtitle_and_updates_job_output(self):
         """字幕调整页重新导出会使用新 ASS 并覆盖任务的最新导出路径"""

@@ -19,6 +19,7 @@ import type { AutomationJob } from '@/types'
 type ProductItem = {
   job: AutomationJob
   output: string
+  kind: 'final' | 'subtitle_only'
   thumbnailSrc: string | null
 }
 
@@ -57,7 +58,11 @@ export function LibraryPanel() {
     .filter((job) => job.status === 'completed')
     .flatMap((job) => {
       const output = job.steps.find((step) => step.key === 'export')?.output_path
-      return output ? [{ job, output, thumbnailSrc: resolveThumbnailSrc(job) }] : []
+      const items: ProductItem[] = output ? [{ job, output, kind: 'final', thumbnailSrc: resolveThumbnailSrc(job) }] : []
+      if (job.subtitle_only_video_path) {
+        items.push({ job, output: job.subtitle_only_video_path, kind: 'subtitle_only', thumbnailSrc: resolveThumbnailSrc(job) })
+      }
+      return items
     })
 
   const handleOpenFolder = async (item: ProductItem) => {
@@ -124,7 +129,7 @@ export function LibraryPanel() {
             const { job, output, thumbnailSrc } = item
             const duration = formatDuration(job.video_info?.duration)
             return (
-              <Card key={job.id} className="overflow-hidden">
+              <Card key={`${job.id}:${item.kind}`} className="overflow-hidden">
                 <div className="relative aspect-video bg-muted">
                   {thumbnailSrc ? (
                     <img
@@ -147,9 +152,12 @@ export function LibraryPanel() {
                 </div>
                 <CardContent className="space-y-3 p-3">
                   <div className="min-h-10 space-y-1">
-                    <p className="truncate text-xs text-muted-foreground" title={fileNameFromPath(output)}>
-                      {fileNameFromPath(output)}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      {item.kind === 'subtitle_only' && <span className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[11px] text-info">字幕版</span>}
+                      <p className="truncate text-xs text-muted-foreground" title={fileNameFromPath(output)}>
+                        {fileNameFromPath(output)}
+                      </p>
+                    </div>
                     <p className="line-clamp-2 break-all text-[11px] leading-4 text-muted-foreground/70 select-text">
                       {resolveProductFolderPath(job, output) || output}
                     </p>
@@ -240,6 +248,7 @@ function resolveProductFolderPath(job: AutomationJob, output: string) {
     job.source_video_path,
     job.subtitle_asset_path,
     job.voice_asset_path,
+    job.subtitle_only_video_path,
     ...job.steps.map((step) => step.output_path || ''),
   ]) {
     const folderPath = folderPathFromMediaPath(candidate || '')

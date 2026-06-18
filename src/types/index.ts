@@ -209,6 +209,7 @@ export interface AutomationJob {
   translated_subtitle_path?: string | null
   source_video_path?: string | null
   voice_asset_path?: string | null
+  subtitle_only_video_path?: string | null
   cover_asset_path?: string | null
 }
 
@@ -238,6 +239,7 @@ export interface BackendAutomationJob {
   translated_subtitle_path?: string | null
   source_video_path?: string | null
   voice_asset_path?: string | null
+  subtitle_only_video_path?: string | null
   cover_asset_path?: string | null
 }
 
@@ -257,6 +259,7 @@ export interface AutomationRunResponse {
   video_id: number
   title: string | null
   output_path: string
+  subtitle_only_video_path?: string | null
   stages: AutomationStageResult[]
   subtitle_text: string
 }
@@ -339,6 +342,7 @@ export interface AutomationPreferences {
   subtitle_target_language: string
   burn_subtitles: boolean
   enable_voice: boolean
+  export_subtitle_only_when_voice: boolean
   voice_profile_id: number | null
   voice_mode: 'full' | 'segmented'
   audio_mode: 'replace' | 'mix'

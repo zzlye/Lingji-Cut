@@ -122,6 +122,7 @@ class AutomationRunRequest(BaseModel):
     text_system_prompt: Optional[str] = None
     burn_subtitles: bool = True
     enable_voice: bool = False
+    export_subtitle_only_when_voice: bool = False
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
     voice_mode: str = "segmented"
@@ -167,6 +168,7 @@ class AutomationJobResponse(BaseModel):
     translated_subtitle_path: Optional[str] = None
     source_video_path: Optional[str] = None
     voice_asset_path: Optional[str] = None
+    subtitle_only_video_path: Optional[str] = None
     cover_asset_path: Optional[str] = None
     stages: list[AutomationStageResult] = Field(default_factory=list)
     subtitle_text: str = ""
@@ -256,6 +258,7 @@ class AutomationRunResponse(BaseModel):
     video_id: int
     title: Optional[str] = None
     output_path: str
+    subtitle_only_video_path: Optional[str] = None
     stages: list[AutomationStageResult]
     subtitle_text: str = ""
 
@@ -428,6 +431,7 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         translated_subtitle_path=_find_job_subtitle_param_path(job, db, ("translated_subtitle_path",)),
         source_video_path=_find_job_source_video_path(job),
         voice_asset_path=_find_job_voice_asset_path(job),
+        subtitle_only_video_path=_find_job_subtitle_only_video_path(job),
         cover_asset_path=_cover_asset_path_for_response(job, db),
         stages=stages,
         subtitle_text=job.subtitle_text or "",
@@ -724,6 +728,14 @@ def _job_export_video_path(job: AutomationJobRecord) -> Optional[str]:
         if path:
             return path
     return None
+
+
+def _find_job_subtitle_only_video_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
+    """读取一键配音流程额外生成的无配音字幕版视频路径"""
+    if not job:
+        return None
+    params = _get_job_params(job)
+    return _existing_file(str(params.get("subtitle_only_video_path") or ""), MEDIA_EXTENSIONS)
 
 
 def _job_thumbnail_output_dir(job: AutomationJobRecord, video_path: str) -> str:
@@ -1741,6 +1753,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
     final_export_preset: dict[str, Any] = build_final_export_preset(request.export_settings)
     audio_path: Optional[str] = None
+    subtitle_only_output_path: Optional[str] = None
     warning_messages: list[str] = []
     preset_dict: dict[str, Any] = {}
 
@@ -2187,6 +2200,50 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             db.commit()
             if job:
                 _update_job_stage(db, job, "export", "running", progress=35, task_id=export_task.id)
+        subtitle_only_warning: Optional[str] = None
+        if request.export_subtitle_only_when_voice and audio_path and subtitle_ass_path:
+            try:
+                subtitle_only_stem = f"{_safe_cover_base_name(video.title or video.video_id or 'video')}_subtitle_only"
+                subtitle_only_working_video = working_video
+                if should_apply_final_export_settings(request.export_with_settings, request.export_settings):
+                    subtitle_only_working_video = processor.apply_effects(
+                        video_path=subtitle_only_working_video,
+                        preset=final_export_preset,
+                        output_path=os.path.join(paths["output_dir"], f"{subtitle_only_stem}_final.mp4"),
+                        control_keys=_control_keys(job, export_task),
+                        progress_callback=lambda progress: _update_export_progress(
+                            db,
+                            job,
+                            export_task,
+                            min(58.0, max(35.0, float(export_task.progress or 35.0)) + progress * 0.2),
+                        ),
+                    )
+                    _check_control(db, job, export_task)
+                subtitle_only_output_path = processor.convert_format(
+                    input_path=subtitle_only_working_video,
+                    output_format=request.output_format,
+                    output_path=os.path.join(paths["exports_dir"], f"{subtitle_only_stem}.{request.output_format}"),
+                    control_keys=_control_keys(job, export_task),
+                    progress_callback=lambda progress: _update_export_progress(
+                        db,
+                        job,
+                        export_task,
+                        min(62.0, max(45.0, float(export_task.progress or 45.0)) + progress * 0.1),
+                    ),
+                )
+                export_params = _read_task_params(export_task)
+                export_params["subtitle_only_video_path"] = subtitle_only_output_path
+                export_task.params = json.dumps(export_params, ensure_ascii=False)
+                if job:
+                    job_params = _get_job_params(job)
+                    job_params["subtitle_only_video_path"] = subtitle_only_output_path
+                    _set_job_params(job, job_params)
+                db.commit()
+            except TaskControlRequested:
+                raise
+            except Exception as subtitle_only_exc:
+                # 额外字幕版是附加产物，失败时保留主成片继续导出。
+                subtitle_only_warning = f"无配音字幕版导出失败: {subtitle_only_exc}"
         if audio_path:
             working_video = processor.merge_audio_video(
                 video_path=working_video,
@@ -2233,11 +2290,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         )
         _check_control(db, job, export_task)
         _complete_task(db, export_task, output_path)
+        if subtitle_only_warning:
+            export_task.error_message = subtitle_only_warning
+            db.commit()
         stages.append(AutomationStageResult(key="export", status="completed", task_id=export_task.id, output_path=output_path))
         if job:
             job.output_path = output_path
             job.completed_at = datetime.now()
-            _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path)
+            _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path, error_message=subtitle_only_warning)
             clear_job_control_requests(db, job)
             job.status = "completed"
             job.current_step = "流程完成"
@@ -2257,6 +2317,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         video_id=video.id,
         title=video.title,
         output_path=output_path,
+        subtitle_only_video_path=subtitle_only_output_path,
         stages=stages,
         subtitle_text=subtitle_text,
     )
@@ -2663,7 +2724,7 @@ def _job_output_candidates(job: AutomationJobRecord) -> list[str]:
     """收集任务已记录的文件产物路径，用于定位成品目录和视频工作目录"""
     candidates: list[str] = []
     params = _get_job_params(job)
-    for value in (job.output_path, params.get("source_video_path"), params.get("downloaded_video_path"), params.get("manual_subtitle_asset_path")):
+    for value in (job.output_path, params.get("subtitle_only_video_path"), params.get("source_video_path"), params.get("downloaded_video_path"), params.get("manual_subtitle_asset_path")):
         if isinstance(value, str) and value.strip():
             candidates.append(value)
     for stage in _load_job_stages(job):

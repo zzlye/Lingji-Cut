@@ -50,6 +50,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     text_system_prompt: getActiveTextSystemPrompt(),
     burn_subtitles: preferences.burn_subtitles,
     enable_voice: preferences.enable_voice,
+    export_subtitle_only_when_voice: preferences.enable_voice ? preferences.export_subtitle_only_when_voice : false,
     voice_profile_id: voiceProfileId,
     voice_mode: preferences.enable_voice ? preferences.voice_mode : undefined,
     audio_mode: preferences.enable_voice ? preferences.audio_mode : undefined,

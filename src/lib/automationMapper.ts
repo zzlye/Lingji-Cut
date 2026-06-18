@@ -60,6 +60,7 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     translated_subtitle_path: job.translated_subtitle_path || null,
     source_video_path: job.source_video_path || null,
     voice_asset_path: job.voice_asset_path || null,
+    subtitle_only_video_path: job.subtitle_only_video_path || null,
     cover_asset_path: job.cover_asset_path || null,
   }
 }

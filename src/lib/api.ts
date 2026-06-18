@@ -419,6 +419,7 @@ export type AutomationStartParams = {
   text_system_prompt?: string
   burn_subtitles?: boolean
   enable_voice?: boolean
+  export_subtitle_only_when_voice?: boolean
   voice_profile_id?: number
   voice_text?: string
   voice_mode?: 'full' | 'segmented'

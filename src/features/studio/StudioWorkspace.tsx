@@ -253,9 +253,21 @@ function AutoRunConfirm({
               </div>
               <Switch checked={preferences.enable_voice} onCheckedChange={(v) => updatePrefs({ enable_voice: v })} />
             </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
+              <div className="min-w-0">
+                <p className="text-sm">保留无配音字幕版</p>
+                <p className="text-xs text-muted-foreground">开启配音后额外导出一份只有字幕的视频</p>
+              </div>
+              <Switch
+                checked={preferences.enable_voice && preferences.export_subtitle_only_when_voice}
+                disabled={!preferences.enable_voice}
+                onCheckedChange={(v) => updatePrefs({ export_subtitle_only_when_voice: v })}
+              />
+            </div>
           </div>
           <ul className="space-y-1.5 text-xs text-muted-foreground">
             <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
+            {preferences.enable_voice && preferences.export_subtitle_only_when_voice && <li className="flex justify-between"><span>字幕版视频</span><span className="text-foreground">额外导出</span></li>}
             <li className="flex justify-between"><span>导出格式</span><span className="text-foreground uppercase">{preferences.output_format}</span></li>
             <li className="flex justify-between"><span>最终导出</span><span className="text-foreground">{preferences.export_with_settings ? '按导出设置' : '直接输出'}</span></li>
           </ul>
@@ -475,7 +487,7 @@ function ConfigSummary({
     { icon: Film, label: '画面处理', value: preferences.enable_effects ? '已开启' : '已关闭', tab: 'effects' },
     { icon: SlidersHorizontal, label: '最终导出', value: preferences.export_with_settings ? '按导出设置' : '直接输出', tab: 'export' },
     { icon: Captions, label: '字幕', value: SUBTITLE_OP_LABEL[preferences.subtitle_operation], tab: 'subtitle' },
-    { icon: Mic, label: '配音', value: preferences.enable_voice ? '已开启' : '已关闭', tab: 'voice' },
+    { icon: Mic, label: '配音', value: preferences.enable_voice ? (preferences.export_subtitle_only_when_voice ? '已开启·含字幕版' : '已开启') : '已关闭', tab: 'voice' },
     { icon: BookMarked, label: '术语字库', value: `${preferences.glossary_terms.length} 条`, tab: 'glossary' },
     { icon: ShieldAlert, label: '禁词', value: `${preferences.banned_words.length} 个`, tab: 'banned' },
   ]
