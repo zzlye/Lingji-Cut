@@ -163,7 +163,7 @@ export function LibraryPanel() {
                     </p>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
-                    <Button size="sm" className="h-9 justify-center" onClick={() => setPlaying(item)}>
+                    <Button size="sm" variant="outline" className="h-9 justify-center" onClick={() => setPlaying(item)}>
                       <Play className="mr-1.5 size-4" />
                       播放
                     </Button>
