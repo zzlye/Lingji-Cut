@@ -14,6 +14,7 @@ import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
@@ -179,7 +180,6 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
               isStarting={isStarting}
               preferences={preferences}
               onConfirm={handleStart}
-              onOpenSettings={onOpenSettings}
             />
           </div>
           {localVideoPath && (
@@ -227,16 +227,13 @@ function AutoRunConfirm({
   isStarting,
   preferences,
   onConfirm,
-  onOpenSettings,
 }: {
   disabled: boolean
   isStarting: boolean
   preferences: AutomationPreferences
   onConfirm: () => void
-  onOpenSettings: (tab?: SettingsSection) => void
 }) {
   const [open, setOpen] = useState(false)
-  const updatePrefs = usePrefsStore((s) => s.update)
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -249,46 +246,20 @@ function AutoRunConfirm({
         <div className="space-y-3">
           <div>
             <p className="text-sm font-medium">确认一键完成</p>
-            <p className="text-xs text-muted-foreground">可选步骤可在这里临时开关。</p>
+            <p className="text-xs text-muted-foreground">这里只确认当前设置；需要修改请关闭后在右侧“本次配置”或设置页调整。</p>
           </div>
           <Separator />
-          {/* 可选步骤开关：画面处理、配音 */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
-              <div className="min-w-0">
-                <p className="text-sm">画面处理</p>
-                <p className="text-xs text-muted-foreground">差异化重编码，关闭可明显加快</p>
-              </div>
-              <Switch checked={preferences.enable_effects} onCheckedChange={(v) => updatePrefs({ enable_effects: v })} />
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
-              <div className="min-w-0">
-                <p className="text-sm">配音</p>
-                <p className="text-xs text-muted-foreground">需先在设置里配置配音渠道</p>
-              </div>
-              <Switch checked={preferences.enable_voice} onCheckedChange={(v) => updatePrefs({ enable_voice: v })} />
-            </div>
-            <div className="flex items-center justify-between gap-3 rounded-md border p-2.5">
-              <div className="min-w-0">
-                <p className="text-sm">保留无配音字幕版</p>
-                <p className="text-xs text-muted-foreground">开启配音后额外导出一份只有字幕的视频</p>
-              </div>
-              <Switch
-                checked={preferences.enable_voice && preferences.export_subtitle_only_when_voice}
-                disabled={!preferences.enable_voice}
-                onCheckedChange={(v) => updatePrefs({ export_subtitle_only_when_voice: v })}
-              />
-            </div>
-          </div>
-          <ul className="space-y-1.5 text-xs text-muted-foreground">
+          <ul className="space-y-2 text-xs text-muted-foreground">
+            <li className="flex justify-between"><span>画面处理</span><span className="text-foreground">{preferences.enable_effects ? '开启' : '关闭'}</span></li>
             <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
+            <li className="flex justify-between"><span>配音</span><span className="text-foreground">{preferences.enable_voice ? '开启' : '关闭'}</span></li>
             {preferences.enable_voice && preferences.export_subtitle_only_when_voice && <li className="flex justify-between"><span>字幕版视频</span><span className="text-foreground">额外导出</span></li>}
             <li className="flex justify-between"><span>导出格式</span><span className="text-foreground uppercase">{preferences.output_format}</span></li>
             <li className="flex justify-between"><span>最终导出</span><span className="text-foreground">{preferences.export_with_settings ? '按导出设置' : '直接输出'}</span></li>
           </ul>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" className="flex-1" onClick={() => { setOpen(false); onOpenSettings('export') }}>
-              打开设置
+            <Button variant="outline" size="sm" className="flex-1" onClick={() => setOpen(false)}>
+              再检查一下
             </Button>
             <Button
               size="sm"
@@ -534,38 +505,189 @@ function ConfigSummary({
   preferences: AutomationPreferences
   onOpenSettings: (tab?: SettingsSection) => void
 }) {
-  const rows: Array<{ icon: typeof Film; label: string; value: string; tab: SettingsSection }> = [
-    { icon: Film, label: '画面处理', value: preferences.enable_effects ? '已开启' : '已关闭', tab: 'effects' },
-    { icon: SlidersHorizontal, label: '最终导出', value: preferences.export_with_settings ? '按导出设置' : '直接输出', tab: 'export' },
-    { icon: Captions, label: '字幕', value: SUBTITLE_OP_LABEL[preferences.subtitle_operation], tab: 'subtitle' },
-    { icon: Mic, label: '配音', value: preferences.enable_voice ? (preferences.export_subtitle_only_when_voice ? '已开启·含字幕版' : '已开启') : '已关闭', tab: 'voice' },
-    { icon: BookMarked, label: '术语字库', value: `${preferences.glossary_terms.length} 条`, tab: 'glossary' },
-    { icon: ShieldAlert, label: '禁词', value: `${preferences.banned_words.length} 个`, tab: 'banned' },
-  ]
+  const updatePrefs = usePrefsStore((state) => state.update)
+  const subtitleOptions = Object.entries(SUBTITLE_OP_LABEL) as Array<[AutomationPreferences['subtitle_operation'], string]>
+
   return (
     <Card className="glass lg:h-full lg:self-stretch">
       <CardHeader>
         <CardTitle className="text-sm">本次配置</CardTitle>
-        <CardDescription className="text-xs">点任意项可跳转设置调整</CardDescription>
+        <CardDescription className="text-xs">常用项可直接切换，右侧按钮进入详细设置</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-1">
-        {rows.map((row) => {
-          const Icon = row.icon
-          return (
-            <button
-              key={row.label}
-              onClick={() => onOpenSettings(row.tab)}
-              className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-accent"
-            >
-              <Icon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="flex-1">{row.label}</span>
-              <span className="text-xs text-muted-foreground">{row.value}</span>
-              <SlidersHorizontal className="size-3.5 text-muted-foreground/50" />
-            </button>
-          )
-        })}
+      <CardContent className="space-y-3">
+        <ConfigSwitchRow
+          icon={Film}
+          label="画面处理"
+          description="差异化重编码"
+          checked={preferences.enable_effects}
+          onChange={(value) => updatePrefs({ enable_effects: value })}
+          onOpenSettings={() => onOpenSettings('effects')}
+        />
+        <ConfigSwitchRow
+          icon={SlidersHorizontal}
+          label="最终导出"
+          description={preferences.export_with_settings ? '按导出设置统一输出' : '直接合成输出'}
+          checked={preferences.export_with_settings}
+          onChange={(value) => updatePrefs({ export_with_settings: value })}
+          onOpenSettings={() => onOpenSettings('export')}
+        />
+        <ConfigSelectRow
+          icon={Captions}
+          label="字幕处理"
+          value={preferences.subtitle_operation}
+          options={subtitleOptions}
+          onChange={(value) => updatePrefs({ subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
+          onOpenSettings={() => onOpenSettings('subtitle')}
+        />
+        <ConfigSwitchRow
+          icon={Captions}
+          label="烧录硬字幕"
+          description={preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
+          checked={preferences.burn_subtitles}
+          onChange={(value) => updatePrefs({ burn_subtitles: value })}
+          onOpenSettings={() => onOpenSettings('subtitle')}
+        />
+        <ConfigSwitchRow
+          icon={Mic}
+          label="配音"
+          description="开启后走配音生成"
+          checked={preferences.enable_voice}
+          onChange={(value) => updatePrefs({ enable_voice: value })}
+          onOpenSettings={() => onOpenSettings('voice')}
+        />
+        {preferences.enable_voice && (
+          <ConfigSwitchRow
+            icon={Download}
+            label="字幕版视频"
+            description="额外导出无配音版本"
+            checked={preferences.export_subtitle_only_when_voice}
+            onChange={(value) => updatePrefs({ export_subtitle_only_when_voice: value })}
+            onOpenSettings={() => onOpenSettings('voice')}
+          />
+        )}
+        <ConfigShortcutRow
+          icon={BookMarked}
+          label="术语库"
+          value={`${preferences.glossary_terms.length} 条`}
+          onOpenSettings={() => onOpenSettings('glossary')}
+        />
+        <ConfigShortcutRow
+          icon={ShieldAlert}
+          label="禁词"
+          value={`${preferences.banned_words.length} 个`}
+          onOpenSettings={() => onOpenSettings('banned')}
+        />
       </CardContent>
     </Card>
+  )
+}
+
+/** 本次配置里的开关行 */
+function ConfigSwitchRow({
+  icon: Icon,
+  label,
+  description,
+  checked,
+  onChange,
+  onOpenSettings,
+}: {
+  icon: typeof Film
+  label: string
+  description: string
+  checked: boolean
+  onChange: (value: boolean) => void
+  onOpenSettings: () => void
+}) {
+  return (
+    <div className="flex items-center gap-2.5 rounded-lg border bg-card/70 px-3 py-2.5">
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">{label}</p>
+        <p className="truncate text-xs text-muted-foreground">{description}</p>
+      </div>
+      <Switch checked={checked} onCheckedChange={onChange} aria-label={`${checked ? '关闭' : '开启'}${label}`} />
+      <ConfigSettingsButton label={label} onClick={onOpenSettings} />
+    </div>
+  )
+}
+
+/** 本次配置里的下拉选择行 */
+function ConfigSelectRow({
+  icon: Icon,
+  label,
+  value,
+  options,
+  onChange,
+  onOpenSettings,
+}: {
+  icon: typeof Film
+  label: string
+  value: string
+  options: Array<[string, string]>
+  onChange: (value: string) => void
+  onOpenSettings: () => void
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border bg-card/70 px-3 py-2.5">
+      <div className="flex items-center gap-2.5">
+        <Icon className="size-4 shrink-0 text-muted-foreground" />
+        <p className="min-w-0 flex-1 text-sm font-medium">{label}</p>
+        <ConfigSettingsButton label={label} onClick={onOpenSettings} />
+      </div>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-8 w-full text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map(([optionValue, optionLabel]) => (
+            <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  )
+}
+
+/** 本次配置里的管理入口行 */
+function ConfigShortcutRow({
+  icon: Icon,
+  label,
+  value,
+  onOpenSettings,
+}: {
+  icon: typeof Film
+  label: string
+  value: string
+  onOpenSettings: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpenSettings}
+      className="flex w-full items-center gap-2.5 rounded-lg border bg-card/70 px-3 py-2.5 text-left transition-colors hover:bg-accent"
+    >
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 text-sm font-medium">{label}</span>
+      <span className="text-xs text-muted-foreground">{value}</span>
+      <SlidersHorizontal className="size-3.5 text-muted-foreground/50" />
+    </button>
+  )
+}
+
+/** 详细设置入口按钮 */
+function ConfigSettingsButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      className="shrink-0 text-muted-foreground"
+      onClick={onClick}
+      aria-label={`打开${label}详细设置`}
+      title="详细设置"
+    >
+      <SlidersHorizontal className="size-3.5" />
+    </Button>
   )
 }
 
