@@ -12,10 +12,13 @@ import { SettingsWorkspace } from '@/features/settings/SettingsWorkspace'
 import { SubtitleWorkbenchPage } from '@/features/subtitle/SubtitleWorkbenchPage'
 import { useUiStore } from '@/stores/uiStore'
 import { useAutomationStream } from '@/hooks/useAutomationStream'
+import { useBackendLogs } from '@/hooks/useBackendLogs'
 
 export function AppShell() {
   // 全局唯一的自动化进度流（SSE）入口
   useAutomationStream()
+  // 同步后端业务日志到活动日志抽屉
+  useBackendLogs()
   const workspace = useUiStore((s) => s.workspace)
   const openSettings = useUiStore((s) => s.openSettings)
 

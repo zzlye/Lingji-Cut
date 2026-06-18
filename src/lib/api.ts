@@ -54,6 +54,13 @@ function normalizeApiErrorDetail(detail: unknown): string {
   return ''
 }
 
+/** 活动日志 API */
+export const logsApi = {
+  /** 获取后端最近 200 条日志 */
+  list: () =>
+    request<import('@/types').BackendLogEntry[]>('/logs'),
+}
+
 /** 视频 API */
 export const videoApi = {
   /** 解析 YouTube 视频 */

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .models import init_db
-from .api import automation_router, videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router
+from .api import automation_router, videos_router, tasks_router, subtitles_router, profiles_router, voice_router, exports_router, effects_router, settings_router, logs_router
 from .api.automation import recover_automation_jobs_on_startup
 from .api.tasks import mark_interrupted_tasks
 from .api.subtitles import ensure_default_subtitle_presets
@@ -42,6 +42,7 @@ app.include_router(exports_router)
 app.include_router(effects_router)
 app.include_router(settings_router)
 app.include_router(automation_router)
+app.include_router(logs_router)
 
 
 @app.on_event("startup")
@@ -81,7 +82,8 @@ async def root():
             "profiles": "/profiles",
             "effects": "/effects",
             "settings": "/settings",
-            "automation": "/automation"
+            "automation": "/automation",
+            "logs": "/logs"
         }
     }
 
@@ -94,5 +96,6 @@ if __name__ == "__main__":
         host=os.environ.get("LINGJIAN_HOST", "127.0.0.1"),
         port=int(os.environ.get("LINGJIAN_PORT", "8765")),
         reload=False,
-        log_level="info"
+        log_level="info",
+        access_log=False,
     )

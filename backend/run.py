@@ -24,6 +24,7 @@ def main() -> None:
         port=port,
         reload=False,
         log_level="info",
+        access_log=False,
     )
 
 

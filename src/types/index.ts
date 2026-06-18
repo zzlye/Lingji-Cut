@@ -456,4 +456,14 @@ export interface LogEntry {
   timestamp: string
   level: 'info' | 'warn' | 'error'
   message: string
+  source?: string
+}
+
+/** 后端活动日志条目 */
+export interface BackendLogEntry {
+  id: number
+  timestamp: string
+  level: 'info' | 'warn' | 'error'
+  source: string
+  message: string
 }

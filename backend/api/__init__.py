@@ -10,6 +10,7 @@ from .exports import router as exports_router
 from .effects import router as effects_router
 from .settings import router as settings_router
 from .automation import router as automation_router
+from .logs import router as logs_router
 
 __all__ = [
     "videos_router",
@@ -21,4 +22,5 @@ __all__ = [
     "effects_router",
     "settings_router",
     "automation_router",
+    "logs_router",
 ]
