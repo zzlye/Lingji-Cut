@@ -65,6 +65,11 @@ type ParsedSubtitleCandidate = {
   entries: SubtitleEntry[]
   output_path?: string
 }
+type PreviewSegment = {
+  entry: SubtitleEntry
+  entryIndex: number
+  sessionId: number
+}
 
 interface StudioSubtitleWorkbenchProps {
   suggestedSubtitlePath?: string | null
@@ -112,15 +117,20 @@ export function StudioSubtitleWorkbench({
   const [showPasteImport, setShowPasteImport] = useState(false)
   const [showAdvancedOutput, setShowAdvancedOutput] = useState(false)
   const [listScrollTop, setListScrollTop] = useState(0)
-  const [playingEntry, setPlayingEntry] = useState<SubtitleEntry | null>(null)
+  const [previewSegment, setPreviewSegment] = useState<PreviewSegment | null>(null)
   const [previewError, setPreviewError] = useState('')
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const previewStartAtRef = useRef<number | null>(null)
   const previewStopAtRef = useRef<number | null>(null)
+  const previewFrameRef = useRef<number | null>(null)
+  const previewSessionIdRef = useRef(0)
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
 
   const selectedEntry = entries[selectedIndex] || null
+  const playingEntry = previewSegment?.entry || null
+  const playingEntryIndex = previewSegment?.entryIndex ?? selectedIndex
   const selectedEntryParts = useMemo(() => splitSubtitleByLanguage(selectedEntry?.text || ''), [selectedEntry?.text])
   const selectedOriginalText = selectedEntryParts.original
   const selectedTranslationText = selectedEntryParts.translation
@@ -200,39 +210,120 @@ export function StudioSubtitleWorkbench({
   const isPrimaryOutputBusy = isSaving || isReExporting
   const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
 
+  function createPreviewSegment(entry: SubtitleEntry, entryIndex: number): PreviewSegment {
+    const sessionId = previewSessionIdRef.current + 1
+    previewSessionIdRef.current = sessionId
+    return {
+      entry: { ...entry, index: entry.index || entryIndex + 1 },
+      entryIndex,
+      sessionId,
+    }
+  }
+
+  function entrySegmentSeconds(entry: SubtitleEntry) {
+    const startSeconds = Math.max(0, timeToMs(entry.start) / 1000)
+    const endSeconds = Math.max(startSeconds + 0.15, timeToMs(entry.end) / 1000)
+    return { startSeconds, endSeconds }
+  }
+
+  function boundedPreviewTime(video: HTMLVideoElement, seconds: number) {
+    const safeSeconds = Math.max(0, seconds)
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      return Math.min(safeSeconds, video.duration)
+    }
+    return safeSeconds
+  }
+
+  function cancelPreviewFrame() {
+    if (previewFrameRef.current !== null) {
+      cancelAnimationFrame(previewFrameRef.current)
+      previewFrameRef.current = null
+    }
+  }
+
+  function pausePreviewAtStop(video: HTMLVideoElement, stopAt: number) {
+    video.pause()
+    video.currentTime = boundedPreviewTime(video, stopAt)
+    previewStopAtRef.current = null
+    cancelPreviewFrame()
+  }
+
+  function enforcePreviewBounds(video: HTMLVideoElement) {
+    const startAt = previewStartAtRef.current
+    const stopAt = previewStopAtRef.current
+    if (startAt === null || stopAt === null) {
+      cancelPreviewFrame()
+      return
+    }
+    if (video.paused || video.ended) {
+      previewFrameRef.current = null
+      return
+    }
+
+    // 只允许播放器停留在当前字幕片段内，避免继续播到下一条字幕。
+    if (video.currentTime < startAt - 0.15) {
+      video.currentTime = boundedPreviewTime(video, startAt)
+    }
+    if (video.currentTime >= stopAt) {
+      pausePreviewAtStop(video, stopAt)
+      return
+    }
+    previewFrameRef.current = requestAnimationFrame(() => enforcePreviewBounds(video))
+  }
+
+  function startPreviewFrame(video: HTMLVideoElement) {
+    cancelPreviewFrame()
+    previewFrameRef.current = requestAnimationFrame(() => enforcePreviewBounds(video))
+  }
+
   useEffect(() => {
     return () => {
       if (listScrollFrameRef.current !== null) {
         cancelAnimationFrame(listScrollFrameRef.current)
       }
+      cancelPreviewFrame()
     }
   }, [])
 
   useEffect(() => {
+    previewStartAtRef.current = null
     previewStopAtRef.current = null
+    cancelPreviewFrame()
     setPreviewError('')
-    setPlayingEntry(null)
+    setPreviewSegment(null)
   }, [previewVideoUrl])
 
   useEffect(() => {
-    if (!playingEntry || !selectedEntry) return
-    setPlayingEntry(selectedEntry)
-    // 播放器已打开时切换字幕行，需要重新启用片段结束点。
-    previewStopAtRef.current = null
-  }, [selectedEntry?.end, selectedEntry?.start, selectedIndex])
+    if (!previewSegment || !selectedEntry) return
+    if (
+      previewSegment.entryIndex === selectedIndex
+      && previewSegment.entry.start === selectedEntry.start
+      && previewSegment.entry.end === selectedEntry.end
+    ) {
+      return
+    }
+    setPreviewSegment(createPreviewSegment(selectedEntry, selectedIndex))
+  }, [previewSegment, selectedEntry?.end, selectedEntry?.start, selectedIndex])
 
   useEffect(() => {
-    if (!playingEntry || !previewVideoUrl) return
+    if (!previewSegment || !previewVideoUrl) return
     const video = previewVideoRef.current
     if (!video) return
 
-    const startSeconds = timeToMs(playingEntry.start) / 1000
-    const endSeconds = Math.max(startSeconds + 0.15, timeToMs(playingEntry.end) / 1000)
+    const { startSeconds, endSeconds } = entrySegmentSeconds(previewSegment.entry)
+    previewStartAtRef.current = startSeconds
     previewStopAtRef.current = endSeconds
+    cancelPreviewFrame()
 
+    let disposed = false
     const seekAndPlay = () => {
+      if (disposed) return
       try {
-        video.currentTime = Math.max(0, startSeconds)
+        video.pause()
+        video.currentTime = boundedPreviewTime(video, startSeconds)
+        previewStartAtRef.current = startSeconds
+        previewStopAtRef.current = endSeconds
+        startPreviewFrame(video)
         const playPromise = video.play()
         if (playPromise) {
           playPromise.catch(() => setPreviewError('播放器未能自动播放，请点播放器播放。'))
@@ -241,16 +332,21 @@ export function StudioSubtitleWorkbench({
         setPreviewError(`播放失败: ${error instanceof Error ? error.message : '未知错误'}`)
       }
     }
+    const cleanupPlayback = () => {
+      disposed = true
+      cancelPreviewFrame()
+      video.removeEventListener('loadedmetadata', seekAndPlay)
+    }
 
     if (video.readyState >= 1) {
       seekAndPlay()
-      return
+      return cleanupPlayback
     }
 
     video.addEventListener('loadedmetadata', seekAndPlay, { once: true })
     video.load()
-    return () => video.removeEventListener('loadedmetadata', seekAndPlay)
-  }, [playingEntry, previewVideoUrl])
+    return cleanupPlayback
+  }, [previewSegment?.sessionId, previewVideoUrl])
 
   useEffect(() => {
     if (!subtitlePath && suggestedSubtitleFile) {
@@ -512,32 +608,60 @@ export function StudioSubtitleWorkbench({
 
   const selectEntryForPreview = (index: number) => {
     setSelectedIndex(index)
+    const entry = entries[index]
+    if (previewSegment && entry) {
+      setPreviewSegment(createPreviewSegment(entry, index))
+    }
   }
 
-  const previewSubtitleEntry = (entry?: SubtitleEntry | null) => {
+  const previewSubtitleEntry = (entry?: SubtitleEntry | null, entryIndex = selectedIndex) => {
     if (!entry) return
     if (!previewVideoUrl) {
       setPreviewError('当前任务没有可播放的视频。')
       return
     }
     setPreviewError('')
-    setPlayingEntry(entry)
+    setPreviewSegment(createPreviewSegment(entry, entryIndex))
   }
 
   const handlePreviewTimeUpdate = () => {
     const video = previewVideoRef.current
+    const startAt = previewStartAtRef.current
     const stopAt = previewStopAtRef.current
     if (!video || stopAt === null) return
-    if (video.currentTime >= stopAt) {
-      video.pause()
-      previewStopAtRef.current = null
+    if (startAt !== null && video.currentTime < startAt - 0.25) {
+      video.currentTime = boundedPreviewTime(video, startAt)
+      return
     }
+    if (video.currentTime >= stopAt) {
+      pausePreviewAtStop(video, stopAt)
+    }
+  }
+
+  const handlePreviewPlay = () => {
+    if (!playingEntry) return
+    const video = previewVideoRef.current
+    if (!video) return
+
+    const { startSeconds, endSeconds } = entrySegmentSeconds(playingEntry)
+    const shouldRestart = previewStopAtRef.current === null
+      || video.currentTime >= endSeconds
+      || video.currentTime < startSeconds - 0.25
+
+    previewStartAtRef.current = startSeconds
+    previewStopAtRef.current = endSeconds
+    if (shouldRestart) {
+      video.currentTime = boundedPreviewTime(video, startSeconds)
+    }
+    startPreviewFrame(video)
   }
 
   const closeSegmentPlayer = () => {
     previewVideoRef.current?.pause()
+    previewStartAtRef.current = null
     previewStopAtRef.current = null
-    setPlayingEntry(null)
+    cancelPreviewFrame()
+    setPreviewSegment(null)
   }
 
   const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -1020,7 +1144,7 @@ export function StudioSubtitleWorkbench({
               <Button
                 variant="outline"
                 className="h-10 w-full"
-                onClick={() => previewSubtitleEntry(selectedEntry)}
+                onClick={() => previewSubtitleEntry(selectedEntry, selectedIndex)}
                 disabled={!selectedEntry || !previewVideoUrl}
               >
                 <Play className="mr-1.5 size-4" />
@@ -1129,20 +1253,24 @@ export function StudioSubtitleWorkbench({
             <DialogHeader>
               <DialogTitle>{selectedJob?.title || '播放字幕片段'}</DialogTitle>
               <DialogDescription className="break-all">
-                {playingEntry ? `第 ${playingEntry.index || selectedIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}` : selectedJobPreviewVideo}
+                {playingEntry ? `第 ${playingEntryIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}` : selectedJobPreviewVideo}
               </DialogDescription>
             </DialogHeader>
             {playingEntry && previewVideoUrl && (
               <video
-                key={`${previewVideoUrl}-${playingEntry.index}-${playingEntry.start}-${playingEntry.end}`}
+                key={`${previewVideoUrl}-${previewSegment?.sessionId || 0}-${playingEntryIndex}-${playingEntry.start}-${playingEntry.end}`}
                 ref={previewVideoRef}
                 src={previewVideoUrl}
                 className="max-h-[70vh] w-full rounded-lg bg-black"
                 controls
-                autoPlay
                 preload="metadata"
+                onPlay={handlePreviewPlay}
                 onTimeUpdate={handlePreviewTimeUpdate}
-                onEnded={() => { previewStopAtRef.current = null }}
+                onEnded={() => {
+                  previewStartAtRef.current = null
+                  previewStopAtRef.current = null
+                  cancelPreviewFrame()
+                }}
               >
                 <track kind="captions" />
               </video>
