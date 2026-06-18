@@ -1,7 +1,7 @@
 // src/features/subtitle/StudioSubtitleWorkbench.tsx
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 翻译/润色，并保留时间轴
 
-import { startTransition, type UIEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, type UIEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Play, Search, Settings2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { getActiveTextSystemPrompt, loadActiveTextPromptPreset } from '@/lib/textPromptPresets'
@@ -134,6 +134,8 @@ export function StudioSubtitleWorkbench({
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const previewAutoplayTokenRef = useRef(0)
+  const previewPlayedTokenRef = useRef(0)
   const previewStartAtRef = useRef<number | null>(null)
   const previewStopAtRef = useRef<number | null>(null)
   const previewFrameRef = useRef<number | null>(null)
@@ -225,6 +227,7 @@ export function StudioSubtitleWorkbench({
   function createPreviewSegment(entry: SubtitleEntry, entryIndex: number): PreviewSegment {
     const sessionId = previewSessionIdRef.current + 1
     previewSessionIdRef.current = sessionId
+    previewAutoplayTokenRef.current = sessionId
     return {
       entry: { ...entry, index: entry.index || entryIndex + 1 },
       entryIndex,
@@ -288,6 +291,46 @@ export function StudioSubtitleWorkbench({
     previewFrameRef.current = requestAnimationFrame(() => enforcePreviewBounds(video))
   }
 
+  function playPreviewEntry(video: HTMLVideoElement, entry: SubtitleEntry, autoplayToken: number) {
+    if (previewPlayedTokenRef.current === autoplayToken) return
+    previewPlayedTokenRef.current = autoplayToken
+    const { startSeconds, endSeconds } = entrySegmentSeconds(entry)
+    previewStartAtRef.current = startSeconds
+    previewStopAtRef.current = endSeconds
+    cancelPreviewFrame()
+
+    const seekAndPlay = () => {
+      if (previewAutoplayTokenRef.current !== autoplayToken) return
+      try {
+        video.pause()
+        video.currentTime = boundedPreviewTime(video, startSeconds)
+        previewStartAtRef.current = startSeconds
+        previewStopAtRef.current = endSeconds
+        startPreviewFrame(video)
+        const playPromise = video.play()
+        if (playPromise) {
+          playPromise.catch(() => setPreviewError('播放器未能自动播放，请点播放器播放。'))
+        }
+      } catch (error) {
+        setPreviewError(`播放失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      }
+    }
+
+    if (video.readyState >= 1) {
+      seekAndPlay()
+      return
+    }
+    video.addEventListener('loadedmetadata', seekAndPlay, { once: true })
+    video.load()
+  }
+
+  const bindPreviewVideo = useCallback((video: HTMLVideoElement | null) => {
+    previewVideoRef.current = video
+    if (!video || !previewSegment || !previewVideoUrl) return
+    // 弹窗首次打开时 ref 会晚于 state 更新，节点挂载后主动播放，避免用户需要点第二次。
+    playPreviewEntry(video, previewSegment.entry, previewSegment.sessionId)
+  }, [previewSegment, previewVideoUrl])
+
   useEffect(() => {
     return () => {
       if (listScrollFrameRef.current !== null) {
@@ -321,43 +364,8 @@ export function StudioSubtitleWorkbench({
     if (!previewSegment || !previewVideoUrl) return
     const video = previewVideoRef.current
     if (!video) return
-
-    const { startSeconds, endSeconds } = entrySegmentSeconds(previewSegment.entry)
-    previewStartAtRef.current = startSeconds
-    previewStopAtRef.current = endSeconds
-    cancelPreviewFrame()
-
-    let disposed = false
-    const seekAndPlay = () => {
-      if (disposed) return
-      try {
-        video.pause()
-        video.currentTime = boundedPreviewTime(video, startSeconds)
-        previewStartAtRef.current = startSeconds
-        previewStopAtRef.current = endSeconds
-        startPreviewFrame(video)
-        const playPromise = video.play()
-        if (playPromise) {
-          playPromise.catch(() => setPreviewError('播放器未能自动播放，请点播放器播放。'))
-        }
-      } catch (error) {
-        setPreviewError(`播放失败: ${error instanceof Error ? error.message : '未知错误'}`)
-      }
-    }
-    const cleanupPlayback = () => {
-      disposed = true
-      cancelPreviewFrame()
-      video.removeEventListener('loadedmetadata', seekAndPlay)
-    }
-
-    if (video.readyState >= 1) {
-      seekAndPlay()
-      return cleanupPlayback
-    }
-
-    video.addEventListener('loadedmetadata', seekAndPlay, { once: true })
-    video.load()
-    return cleanupPlayback
+    playPreviewEntry(video, previewSegment.entry, previewSegment.sessionId)
+    return () => cancelPreviewFrame()
   }, [previewSegment?.sessionId, previewVideoUrl])
 
   useEffect(() => {
@@ -1496,7 +1504,7 @@ export function StudioSubtitleWorkbench({
             {playingEntry && previewVideoUrl && (
               <video
                 key={`${previewVideoUrl}-${previewSegment?.sessionId || 0}-${playingEntryIndex}-${playingEntry.start}-${playingEntry.end}`}
-                ref={previewVideoRef}
+                ref={bindPreviewVideo}
                 src={previewVideoUrl}
                 className="max-h-[70vh] w-full rounded-lg bg-black"
                 controls
