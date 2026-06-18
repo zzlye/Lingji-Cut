@@ -2918,9 +2918,9 @@ def _deletable_job_workspace_dir(job: AutomationJobRecord, db: Optional[Session]
     raise HTTPException(status_code=400, detail="未找到可安全删除的独立视频文件夹。旧版公共目录不能整目录删除，请手动清理文件。")
 
 
-def _completed_job_assets_exist(job: AutomationJobRecord) -> bool:
-    """判断已完成素材是否仍有本地产物或视频工作目录，手动删文件夹后返回 False"""
-    if job.status != "completed":
+def _job_assets_exist(job: AutomationJobRecord) -> bool:
+    """判断终态任务是否仍有本地产物或视频工作目录，手动删文件夹后返回 False"""
+    if job.status not in TERMINAL_STATUSES:
         return True
 
     export_stage = _stage_by_key(job, "export")
@@ -2951,11 +2951,11 @@ def _completed_job_assets_exist(job: AutomationJobRecord) -> bool:
 
 
 def _prune_missing_completed_jobs(db: Session, jobs: list[AutomationJobRecord]) -> list[AutomationJobRecord]:
-    """清理本地文件夹已被手动删除的完成素材记录，并返回仍可展示的任务"""
+    """清理本地文件夹已被手动删除的终态素材记录，并返回仍可展示的任务"""
     active_jobs: list[AutomationJobRecord] = []
     missing_jobs: list[AutomationJobRecord] = []
     for job in jobs:
-        if _completed_job_assets_exist(job):
+        if _job_assets_exist(job):
             active_jobs.append(job)
         else:
             missing_jobs.append(job)
@@ -3336,7 +3336,15 @@ def delete_automation_job_folder(job_id: str, db: Session = Depends(get_db)):
     if job.status in {"pending", "running"}:
         raise HTTPException(status_code=400, detail="执行中任务不能删除文件夹，请先暂停或取消")
 
-    folder_path = _deletable_job_workspace_dir(job, db)
+    try:
+        folder_path = _deletable_job_workspace_dir(job, db)
+    except HTTPException:
+        if _job_assets_exist(job):
+            raise
+        clear_job_control_requests(db, job)
+        _delete_job_record(db, job)
+        return AutomationJobFolderResponse(message="文件夹已不存在，记录已删除", job_id=job_id, folder_path="")
+
     clear_job_control_requests(db, job)
     try:
         shutil.rmtree(folder_path)

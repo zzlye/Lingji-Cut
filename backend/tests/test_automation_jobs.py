@@ -532,6 +532,26 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response[0].id, "auto-existing-library")
         self.assertEqual(db.jobs, [job])
 
+    def test_list_jobs_prunes_failed_item_when_all_assets_are_missing(self):
+        """失败素材如果本地产物都没了，刷新列表时应自动清理"""
+        job = AutomationJobRecord(
+            id="auto-missing-failed",
+            source_url="https://youtube.com/watch?v=failed",
+            title="失败且已删",
+            status="failed",
+            output_path="D:/missing/final.mp4",
+            stages=json.dumps([
+                {"key": "download", "status": "failed", "progress": 40, "task_id": None, "output_path": None, "error_message": "中断"},
+                {"key": "export", "status": "failed", "progress": 10, "task_id": None, "output_path": None, "error_message": "中断"},
+            ], ensure_ascii=False),
+        )
+        db = FakeTaskDb([job], [])
+
+        response = list_automation_jobs(db)
+
+        self.assertEqual(response, [])
+        self.assertEqual(db.jobs, [])
+
     def test_automation_cover_download_uses_custom_output_dir(self):
         """一键流程自动保存封面时使用用户选择的封面目录"""
         with tempfile.TemporaryDirectory(prefix="automation_cover_") as default_dir:
@@ -1864,6 +1884,29 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             self.assertEqual(context.exception.status_code, 400)
             self.assertTrue(os.path.exists(output_path))
             self.assertEqual(db.jobs, [job])
+
+    def test_delete_job_folder_removes_record_when_files_already_missing(self):
+        """素材文件夹已经被手动删除时，删除按钮只清理记录不报错"""
+        missing_workspace = "D:/missing/videos/video-1"
+        missing_output = "D:/missing/videos/video-1/exports/final.mp4"
+        job = AutomationJobRecord(
+            id="auto-missing-folder",
+            source_url="https://youtube.com/watch?v=1",
+            status="failed",
+            output_path=missing_output,
+            params=json.dumps({"workspace_dir": missing_workspace}, ensure_ascii=False),
+            stages=json.dumps([
+                {"key": "export", "status": "failed", "progress": 20, "task_id": 9, "output_path": missing_output, "error_message": "中断"},
+            ], ensure_ascii=False),
+        )
+        task = DownloadTask(id=9, video_id=1, task_type="export", status="failed", parent_job_id=job.id, output_path=missing_output)
+        db = FakeTaskDb([job], [task])
+
+        response = delete_automation_job_folder(job.id, db)
+
+        self.assertEqual(response.folder_path, "")
+        self.assertEqual(db.jobs, [])
+        self.assertEqual(db.tasks, [])
 
     def test_voice_for_segment_uses_speaker_map(self):
         """分段配音按说话人选择音色，未匹配时回退默认音色"""
