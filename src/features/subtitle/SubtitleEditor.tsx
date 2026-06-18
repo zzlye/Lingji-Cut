@@ -209,14 +209,6 @@ const POSITION_OPTIONS: Array<{ value: SubtitlePosition; label: string }> = [
 ]
 const POSITION_GRID_OPTIONS: FieldOption[] = POSITION_OPTIONS.map((p) => [p.value, p.label])
 
-/** 快速样式模板 */
-const STYLE_TEMPLATES: Array<{ name: string; description: string; patch: Partial<SubtitlePresetForm> }> = [
-  { name: '短视频清晰', description: '白字黑边，底部单行', patch: { line_mode: 'single', font_name: 'Source Han Sans SC', font_size: 48, secondary_font_size: 42, font_color: '#FFFFFF', secondary_color: '#FDE68A', outline_color: '#000000', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 48 } },
-  { name: '电影双语', description: '主副字幕分色，底部留白', patch: { line_mode: 'double', font_name: 'Noto Sans SC', font_size: 42, secondary_font_size: 32, font_color: '#FFFFFF', secondary_color: '#D1D5DB', outline_color: '#111827', outline_width: 3, shadow_enabled: true, shadow_color: '#000000', shadow_x: 1, shadow_y: 2, background_alpha: 0, position: 'bottom', margin_v: 62 } },
-  { name: '知识讲解', description: '黄字高亮，适合解说', patch: { line_mode: 'single', font_name: 'Alibaba PuHuiTi', font_size: 50, secondary_font_size: 42, font_color: '#FACC15', secondary_color: '#FFFFFF', outline_color: '#1F2937', outline_width: 4, shadow_enabled: true, shadow_color: '#000000', shadow_x: 2, shadow_y: 3, background_alpha: 0, position: 'bottom', margin_v: 46 } },
-  { name: '干净信息条', description: '半透明背景，低描边', patch: { line_mode: 'single', font_name: 'HarmonyOS Sans SC', font_size: 40, secondary_font_size: 34, font_color: '#FFFFFF', secondary_color: '#BAE6FD', outline_color: '#000000', outline_width: 1, shadow_enabled: false, background_alpha: 128, position: 'bottom', margin_v: 36 } },
-]
-
 /** 字幕预设默认值 */
 function createDefaultForm(name = '短视频清晰字幕'): SubtitlePresetForm {
   return {
@@ -305,7 +297,6 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   }
 
   const updateForm = <K extends keyof SubtitlePresetForm>(key: K, value: SubtitlePresetForm[K]) => setForm((current) => ({ ...current, [key]: value }))
-  const applyTemplate = (patch: Partial<SubtitlePresetForm>) => setForm((current) => ({ ...current, ...patch }))
 
   const handleSave = async () => {
     const name = form.name.trim()
@@ -343,7 +334,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     <div className="mx-auto max-w-5xl space-y-5 p-6">
       <div>
         <h2 className="text-base font-semibold">字幕设置</h2>
-        <p className="text-sm text-muted-foreground">先选快速模板，再微调语言、字号、位置和颜色；右侧实时预览。</p>
+        <p className="text-sm text-muted-foreground">选择已保存预设后，可微调语言、字号、位置和颜色；右侧实时预览。</p>
       </div>
 
       {/* 预设工具条 */}
@@ -356,16 +347,6 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="min-w-0 space-y-5">
-          {/* 快速模板 */}
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-            {STYLE_TEMPLATES.map((template) => (
-              <button key={template.name} onClick={() => applyTemplate(template.patch)} className="rounded-lg border bg-card p-3 text-left transition-colors hover:border-primary hover:bg-primary/5">
-                <p className="text-sm font-medium">{template.name}</p>
-                <p className="mt-1 text-xs text-muted-foreground">{template.description}</p>
-              </button>
-            ))}
-          </div>
-
           {/* 常用 */}
           <Card>
             <CardHeader><CardTitle className="text-sm">常用</CardTitle></CardHeader>
