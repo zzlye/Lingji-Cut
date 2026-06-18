@@ -64,36 +64,3 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     cover_asset_path: job.cover_asset_path || null,
   }
 }
-
-/** 批次聚合摘要 */
-export type BatchSummary = {
-  batchId: string
-  total: number
-  running: number
-  pending: number
-  paused: number
-  cancelled: number
-  completed: number
-  failed: number
-  progress: number
-}
-
-/** 按批次聚合自动任务，用于批量暂停和恢复 */
-export function collectBatchSummaries(jobs: AutomationJob[]): BatchSummary[] {
-  const map = new Map<string, BatchSummary>()
-  for (const job of jobs) {
-    if (!job.batch_id) continue
-    const summary = map.get(job.batch_id) || {
-      batchId: job.batch_id,
-      total: 0, running: 0, pending: 0, paused: 0, cancelled: 0, completed: 0, failed: 0, progress: 0,
-    }
-    summary.total += 1
-    summary.progress += job.progress || 0
-    summary[job.status] += 1
-    map.set(job.batch_id, summary)
-  }
-  return Array.from(map.values()).map((summary) => ({
-    ...summary,
-    progress: summary.total ? Math.round(summary.progress / summary.total) : 0,
-  }))
-}
