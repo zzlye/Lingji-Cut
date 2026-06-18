@@ -1,12 +1,13 @@
 // src/features/settings/SettingsWorkspace.tsx
 // 设置工作区 - 左侧分组导航 + 右侧内容，取代原先挤在一个弹窗里的 9 个页签
-import { Film, Captions, Cpu, Mic, BookMarked, ShieldAlert, FolderCog, Download } from 'lucide-react'
+import { Film, Captions, Cpu, Mic, BookMarked, ShieldAlert, FolderCog, Download, MessageSquareText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useUiStore, type SettingsSection } from '@/stores/uiStore'
 import { EffectsSettingsPanel } from '@/features/effects/EffectsPanel'
 import { ExportSettingsPanel } from '@/features/export/ExportSettingsPanel'
 import { SubtitleEditor } from '@/features/subtitle/SubtitleEditor'
 import { ApiConfigPanel } from './ApiConfigPanel'
+import { TextPromptPresetPanel } from './TextPromptPresetPanel'
 import { VoiceConfigPanel } from '@/features/voice/VoiceConfigPanel'
 import { GlossaryPanel } from './GlossaryPanel'
 import { BannedWordsPanel } from './BannedWordsPanel'
@@ -21,6 +22,7 @@ const SECTION_GROUPS: Array<{ group: string; items: Array<{ id: SettingsSection;
   ] },
   { group: '文本与配音', items: [
     { id: 'api', label: '文本 API', icon: Cpu },
+    { id: 'prompts', label: '提示词预设', icon: MessageSquareText },
     { id: 'voice', label: '配音', icon: Mic },
   ] },
   { group: '内容规则', items: [
@@ -69,6 +71,7 @@ export function SettingsWorkspace() {
         {section === 'export' && <ExportSettingsPanel />}
         {section === 'subtitle' && <SubtitleEditor compact />}
         {section === 'api' && <ApiConfigPanel compact />}
+        {section === 'prompts' && <TextPromptPresetPanel />}
         {section === 'voice' && <VoiceConfigPanel compact />}
         {section === 'glossary' && <GlossaryPanel />}
         {section === 'banned' && <BannedWordsPanel />}
