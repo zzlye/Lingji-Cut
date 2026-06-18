@@ -550,6 +550,7 @@ export const automationApi = {
     subtitle_path?: string
     audio_path?: string
     video_path?: string
+    output_path?: string
     output_format?: string
     export_with_settings?: boolean
     export_settings?: import('@/types').AutomationExportSettings

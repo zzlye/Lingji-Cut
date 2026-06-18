@@ -211,6 +211,7 @@ class AutomationReExportRequest(BaseModel):
     subtitle_path: Optional[str] = None
     audio_path: Optional[str] = None
     video_path: Optional[str] = None
+    output_path: Optional[str] = None
     output_format: Optional[str] = None
     export_with_settings: Optional[bool] = None
     export_settings: dict[str, Any] = Field(default_factory=dict)
@@ -604,6 +605,35 @@ def _subtitle_search_basenames(source_video_path: Optional[str], subtitle_stage_
                 break
 
     return basenames
+
+
+def _normalize_reexport_output_path(output_path: Optional[str]) -> Optional[str]:
+    """校验字幕调整覆盖导出的目标路径，只允许覆盖常规视频文件"""
+    path = str(output_path or "").strip()
+    if not path:
+        return None
+    normalized = os.path.abspath(os.path.expanduser(path))
+    ext = os.path.splitext(normalized)[1].lower()
+    if ext not in LOCAL_VIDEO_SOURCE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="覆盖导出目标必须是视频文件")
+    return normalized
+
+
+def _temporary_overwrite_output_path(output_path: str) -> str:
+    """覆盖成品前先写临时文件，避免 ffmpeg 一边读旧文件一边写同一路径"""
+    directory = os.path.dirname(output_path) or ensure_project_dirs()["exports_dir"]
+    stem, ext = os.path.splitext(os.path.basename(output_path))
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, f"{stem}.reexport_tmp_{uuid.uuid4().hex}{ext or '.mp4'}")
+
+
+def _replace_reexport_output(temp_path: str, output_path: str) -> str:
+    """导出成功后再替换旧成品；如果失败，旧成品仍然保留"""
+    if not temp_path or not os.path.isfile(temp_path):
+        raise RuntimeError("覆盖导出失败：临时成品不存在")
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    os.replace(temp_path, output_path)
+    return output_path
 
 
 def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
@@ -3398,6 +3428,9 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
     export_settings = request.export_settings or (job_params.get("export_settings") if isinstance(job_params.get("export_settings"), dict) else {})
     final_export_preset = build_final_export_preset(export_settings)
     subtitle_preset_dict = _subtitle_preset_dict_for_export(db, job_params)
+    overwrite_output_path = _normalize_reexport_output_path(request.output_path)
+    if overwrite_output_path:
+        output_format = os.path.splitext(overwrite_output_path)[1].lower().lstrip(".") or output_format
 
     if request.subtitle_path:
         job_params["manual_subtitle_asset_path"] = subtitle_path
@@ -3416,6 +3449,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
             "video_path": source_video_path,
             "subtitle_path": subtitle_path,
             "audio_path": audio_path,
+            "output_path": overwrite_output_path,
             "output_format": output_format,
             "audio_mode": audio_mode,
             "original_volume": original_volume,
@@ -3486,6 +3520,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
         output_path = processor.convert_format(
             input_path=working_video,
             output_format=output_format,
+            output_path=_temporary_overwrite_output_path(overwrite_output_path) if overwrite_output_path else None,
             control_keys=_control_keys(job, export_task),
             progress_callback=lambda progress: _update_export_progress(
                 db,
@@ -3495,6 +3530,8 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
             ),
         )
         _check_control(db, job, export_task)
+        if overwrite_output_path:
+            output_path = _replace_reexport_output(output_path, overwrite_output_path)
         _complete_task(db, export_task, output_path)
         _update_job_stage(db, job, "export", "completed", task_id=export_task.id, output_path=output_path)
         clear_job_control_requests(db, job)

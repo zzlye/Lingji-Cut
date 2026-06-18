@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Progress } from '@/components/ui/progress'
 import { SelectField, SegmentedField, type FieldOption } from '@/components/fields'
 
 const SAMPLE_SUBTITLE_TEXT = `1
@@ -127,6 +128,8 @@ export function StudioSubtitleWorkbench({
   const [aiDialogOperation, setAiDialogOperation] = useState<ManualAiOperation | null>(null)
   const [aiCustomInstruction, setAiCustomInstruction] = useState('')
   const [isReExporting, setIsReExporting] = useState(false)
+  const [reExportProgress, setReExportProgress] = useState(0)
+  const [reExportProgressText, setReExportProgressText] = useState('')
   const [entryKeyword, setEntryKeyword] = useState('')
   const [checkedEntryIndexes, setCheckedEntryIndexes] = useState<number[]>([])
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
@@ -153,6 +156,7 @@ export function StudioSubtitleWorkbench({
   const previewFrameRef = useRef<number | null>(null)
   const previewSessionIdRef = useRef(0)
   const subtitleDialogListScrollRef = useRef<HTMLDivElement | null>(null)
+  const reExportProgressTimerRef = useRef<number | null>(null)
   const latestDraftRef = useRef<typeof draft>(null)
   const latestSuggestedSubtitleFileRef = useRef('')
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
@@ -179,6 +183,7 @@ export function StudioSubtitleWorkbench({
   const draftKey = useMemo(() => buildSubtitleDraftKey(selectedJob), [selectedJob?.id])
   const selectedJobResolvedSubtitle = selectedJob?.id ? (resolvedJobSubtitlePaths[selectedJob.id] || '').trim() : ''
   const selectedJobSourceVideo = useMemo(() => resolveJobSourceVideo(selectedJob), [selectedJob])
+  const selectedJobExportVideo = useMemo(() => resolveJobExportVideo(selectedJob), [selectedJob])
   const selectedJobPreviewVideo = useMemo(() => resolveJobPreviewVideo(selectedJob, selectedJobSourceVideo), [selectedJob, selectedJobSourceVideo])
   const previewVideoUrl = selectedJobPreviewVideo ? automationApi.mediaUrl(selectedJobPreviewVideo) : ''
   const selectedJobSourceSubtitleFile = useMemo(() => editableSubtitlePath(selectedJob?.source_subtitle_path), [selectedJob?.source_subtitle_path])
@@ -252,7 +257,7 @@ export function StudioSubtitleWorkbench({
   const dialogBottomSpacer = Math.max(0, (filteredEntryIndexes.length - dialogListEnd) * SUBTITLE_MODAL_ROW_HEIGHT)
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
-  const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
+  const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || (Boolean(selectedJobSourceVideo) && Boolean(selectedJobExportVideo)))
 
   latestDraftRef.current = draft
   latestSuggestedSubtitleFileRef.current = suggestedSubtitleFile
@@ -462,6 +467,9 @@ export function StudioSubtitleWorkbench({
     return () => {
       if (listScrollFrameRef.current !== null) {
         cancelAnimationFrame(listScrollFrameRef.current)
+      }
+      if (reExportProgressTimerRef.current !== null) {
+        window.clearInterval(reExportProgressTimerRef.current)
       }
       cancelPreviewFrame()
     }
@@ -896,6 +904,34 @@ export function StudioSubtitleWorkbench({
     updatePreferences({ subtitle_target_language: value })
   }
 
+  const stopReExportProgressPolling = () => {
+    if (reExportProgressTimerRef.current !== null) {
+      window.clearInterval(reExportProgressTimerRef.current)
+      reExportProgressTimerRef.current = null
+    }
+  }
+
+  const applyReExportProgressFromJob = (job: AutomationJob) => {
+    const exportStep = job.steps.find((step) => step.key === 'export')
+    const progress = Math.max(0, Math.min(100, Math.round(exportStep?.progress ?? job.progress ?? 0)))
+    setReExportProgress(progress)
+    setReExportProgressText(exportStep?.status === 'completed' ? '覆盖导出完成' : `覆盖导出中 ${progress}%`)
+    syncBackendJob(job)
+  }
+
+  const startReExportProgressPolling = (jobId: string) => {
+    stopReExportProgressPolling()
+    setReExportProgress(5)
+    setReExportProgressText('正在准备覆盖导出...')
+    reExportProgressTimerRef.current = window.setInterval(() => {
+      void automationApi.getJob(jobId)
+        .then(applyReExportProgressFromJob)
+        .catch(() => {
+          setReExportProgressText('正在等待后端导出进度...')
+        })
+    }, 1000)
+  }
+
   const handlePrimaryOutput = async () => {
     if (selectedJob?.id) {
       await reExport()
@@ -1284,21 +1320,27 @@ export function StudioSubtitleWorkbench({
       return
     }
     if (selectedJob.status === 'running' || selectedJob.status === 'pending') {
-      setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再导出新视频。' })
+      setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再覆盖导出。' })
       return
     }
     if (!selectedJobSourceVideo) {
-      setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能导出新视频。' })
+      setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能覆盖导出。' })
+      return
+    }
+    if (!selectedJobExportVideo) {
+      setNotice({ type: 'warning', message: '这个任务还没有原导出视频，不能覆盖，请先完成一次一键导出。' })
       return
     }
     if (!canSave(entries, invalidCount, setNotice)) return
 
     setIsReExporting(true)
-    setNotice({ type: 'info', message: '正在保存字幕并导出新视频...' })
+    startReExportProgressPolling(selectedJob.id)
+    setNotice({ type: 'info', message: '正在保存字幕并覆盖导出视频...' })
     try {
       const assPath = await ensureAssForReExport()
       const result = await automationApi.reExport(selectedJob.id, {
         subtitle_path: assPath,
+        output_path: selectedJobExportVideo,
         output_format: preferences.output_format,
         export_with_settings: preferences.export_with_settings,
         export_settings: preferences.export_settings,
@@ -1309,13 +1351,16 @@ export function StudioSubtitleWorkbench({
       if (result.output_path) {
         setLastSavedPath(result.output_path)
       }
-      setNotice({ type: 'success', message: `已导出新视频：${result.output_path}` })
-      addLog('info', `字幕调整后导出完成: ${result.output_path}`)
+      setReExportProgress(100)
+      setReExportProgressText('覆盖导出完成')
+      setNotice({ type: 'success', message: `已覆盖原视频：${result.output_path}` })
+      addLog('info', `字幕调整后覆盖导出完成: ${result.output_path}`)
     } catch (error) {
-      const message = `导出新视频失败: ${error instanceof Error ? error.message : '未知错误'}`
+      const message = `覆盖导出失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
       addLog('error', message)
     } finally {
+      stopReExportProgressPolling()
       setIsReExporting(false)
     }
   }
@@ -1327,7 +1372,7 @@ export function StudioSubtitleWorkbench({
 
         <section className="shrink-0 rounded-xl border bg-background/60 p-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <SectionTitle title="字幕调整流程" description="选任务并读取字幕，改完后点右侧主按钮即可保存并导出新视频。" />
+            <SectionTitle title="字幕调整流程" description="选任务并读取字幕，改完后点右侧主按钮即可保存字幕并覆盖原导出视频。" />
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary">{entries.length ? `${entries.length} 条字幕` : '未载入字幕'}</Badge>
               <Badge variant={validCheckedEntryIndexes.length ? 'default' : 'outline'}>已勾选 {validCheckedEntryIndexes.length}</Badge>
@@ -1355,9 +1400,12 @@ export function StudioSubtitleWorkbench({
                   <Badge variant={selectedJobSourceVideo ? 'default' : 'destructive'}>
                     {selectedJobSourceVideo ? '可导出视频' : '缺少源视频'}
                   </Badge>
+                  <Badge variant={selectedJobExportVideo ? 'default' : 'outline'}>
+                    {selectedJobExportVideo ? '可覆盖原视频' : '无原导出视频'}
+                  </Badge>
                 </div>
               ) : (
-                <span>没有绑定任务时，只会保存字幕文件，不会导出新视频。</span>
+                <span>没有绑定任务时，只会保存字幕文件，不会导出视频。</span>
               )}
             </div>
             <Button
@@ -1369,6 +1417,16 @@ export function StudioSubtitleWorkbench({
             </Button>
           </div>
 
+          {isReExporting && (
+            <div className="mt-3 rounded-lg border bg-muted/30 px-3 py-2">
+              <div className="mb-1 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>{reExportProgressText || '正在覆盖导出...'}</span>
+                <span className="tabular-nums">{Math.round(reExportProgress)}%</span>
+              </div>
+              <Progress value={reExportProgress} />
+            </div>
+          )}
+
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button variant="ghost" size="sm" onClick={() => setShowPasteImport((value) => !value)}>
               {showPasteImport ? '收起其它导入方式' : '其它导入方式'}
@@ -1377,7 +1435,10 @@ export function StudioSubtitleWorkbench({
               {showAdvancedOutput ? '收起高级输出' : '高级输出'}
             </Button>
             {selectedJob?.id && !selectedJobSourceVideo && (
-              <span className="text-xs text-warning">当前任务缺少源视频，暂时不能导出新视频。</span>
+              <span className="text-xs text-warning">当前任务缺少源视频，暂时不能覆盖导出。</span>
+            )}
+            {selectedJob?.id && selectedJobSourceVideo && !selectedJobExportVideo && (
+              <span className="text-xs text-warning">当前任务还没有原导出视频，请先完成一次一键导出。</span>
             )}
           </div>
 
@@ -2328,6 +2389,13 @@ function resolveJobSourceVideo(job: AutomationJob | null) {
     if (isMediaPath(stagePath)) return stagePath
   }
   return ''
+}
+
+function resolveJobExportVideo(job: AutomationJob | null) {
+  const finalPath = (job?.output_path || '').trim()
+  if (isMediaPath(finalPath)) return finalPath
+  const exportStagePath = (job?.steps.find((step) => step.key === 'export')?.output_path || '').trim()
+  return isMediaPath(exportStagePath) ? exportStagePath : ''
 }
 
 function resolveJobPreviewVideo(job: AutomationJob | null, sourceVideoPath: string) {

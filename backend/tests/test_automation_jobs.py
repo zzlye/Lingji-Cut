@@ -1519,6 +1519,58 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             self.assertNotRegex(dialogue_text, r"[，。、,.]|\.{3,}|…")
             self.assertIn("我已经度过了前100天 等等 还有 顿号", dialogue_text)
 
+    def test_reexport_automation_job_overwrites_original_output_after_success(self):
+        """字幕调整覆盖导出会先写临时文件，成功后再替换原成品"""
+        with tempfile.TemporaryDirectory(prefix="automation_reexport_overwrite_") as temp_dir:
+            source_video_path = os.path.join(temp_dir, "source.mp4")
+            output_path = os.path.join(temp_dir, "old.mp4")
+            subtitle_path = os.path.join(temp_dir, "manual.ass")
+            with open(source_video_path, "wb") as file:
+                file.write(b"source")
+            with open(output_path, "wb") as file:
+                file.write(b"old")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("[Script Info]\nScriptType: v4.00+\n")
+
+            job = AutomationJobRecord(
+                id="auto-reexport-overwrite",
+                video_id=9,
+                source_url="https://youtube.com/watch?v=overwrite",
+                status="completed",
+                output_path=output_path,
+                params=json.dumps({"output_format": "mp4", "export_with_settings": False}, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": source_video_path, "error_message": None},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 2, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(50, 60))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+            ):
+                response = reexport_automation_job(
+                    "auto-reexport-overwrite",
+                    AutomationReExportRequest(subtitle_path=subtitle_path, output_path=output_path),
+                    db,
+                )
+
+            self.assertEqual(response.output_path, output_path)
+            self.assertEqual(job.output_path, output_path)
+            self.assertNotEqual(fake_processor.convert_calls[0]["output_path"], output_path)
+            self.assertFalse(os.path.exists(fake_processor.convert_calls[0]["output_path"]))
+            with open(output_path, "rb") as file:
+                self.assertEqual(file.read(), b"exported")
+
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""
         job = AutomationJobRecord(id="auto-delete", source_url="https://youtube.com/watch?v=1", status="completed")
