@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -386,6 +387,43 @@ class AutomationJobTests(unittest.TestCase):
             response = _job_to_response(job)
 
         self.assertEqual(response.cover_asset_path, cover_path)
+
+    def test_job_response_generates_thumbnail_from_completed_export(self):
+        """本地完成素材没有封面时，会从成品视频生成一张缩略图"""
+        with tempfile.TemporaryDirectory(prefix="automation_generated_thumb_") as temp_dir:
+            output_path = os.path.join(temp_dir, "exports", "final.mp4")
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+            job = AutomationJobRecord(
+                id="auto-generated-thumb",
+                source_url="local:D:\\input.mp4",
+                title="本地缩略图任务",
+                status="completed",
+                output_path=output_path,
+                params=json.dumps({"workspace_dir": temp_dir}, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": None, "output_path": output_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [])
+
+            def fake_run(cmd, **_kwargs):
+                """模拟 ffmpeg 截帧并写出缩略图"""
+                with open(cmd[-1], "wb") as file:
+                    file.write(b"jpg")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch("backend.api.automation.get_ffmpeg_command", return_value="ffmpeg"), \
+                    patch("backend.api.automation.subprocess.run", side_effect=fake_run) as run_mock:
+                response = _job_to_response(job, db)
+
+            params = json.loads(job.params)
+
+        self.assertTrue(response.cover_asset_path.endswith("thumbnail.jpg"))
+        self.assertEqual(params["cover_asset_path"], response.cover_asset_path)
+        self.assertEqual(db.commit_count, 1)
+        self.assertTrue(run_mock.called)
 
     def test_list_jobs_prunes_completed_item_when_export_file_is_missing(self):
         """本地成品文件夹被手动删除后，刷新任务列表会自动清理素材记录"""

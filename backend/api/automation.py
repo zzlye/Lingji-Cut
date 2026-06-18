@@ -28,7 +28,7 @@ from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_vid
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
-from ..core.tooling import assert_required_tools_available
+from ..core.tooling import assert_required_tools_available, get_ffmpeg_command
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
 from ..utils import decrypt_api_key
 from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plain_text
@@ -406,7 +406,7 @@ def _job_to_response(job: AutomationJobRecord, db: Optional[Session] = None) -> 
         translated_subtitle_path=_find_job_subtitle_param_path(job, db, ("translated_subtitle_path",)),
         source_video_path=_find_job_source_video_path(job),
         voice_asset_path=_find_job_voice_asset_path(job),
-        cover_asset_path=_find_job_cover_asset_path(job),
+        cover_asset_path=_cover_asset_path_for_response(job, db),
         stages=stages,
         subtitle_text=job.subtitle_text or "",
         created_at=job.created_at,
@@ -618,6 +618,103 @@ def _find_job_cover_asset_path(job: Optional[AutomationJobRecord]) -> Optional[s
             if _existing_file(candidate, IMAGE_EXTENSIONS):
                 return candidate
     return None
+
+
+def _cover_asset_path_for_response(job: AutomationJobRecord, db: Optional[Session]) -> Optional[str]:
+    """返回素材库封面；没有封面时从本地成品视频截取一张缩略图"""
+    cover_path = _find_job_cover_asset_path(job)
+    if cover_path:
+        return cover_path
+    generated_path = _ensure_job_video_thumbnail(job, db)
+    return generated_path or None
+
+
+def _ensure_job_video_thumbnail(job: AutomationJobRecord, db: Optional[Session]) -> Optional[str]:
+    """为本地成品视频生成缩略图并缓存路径，避免素材库只能显示占位图"""
+    if job.status != "completed":
+        return None
+
+    video_path = _job_export_video_path(job)
+    if not video_path:
+        return None
+
+    output_dir = _job_thumbnail_output_dir(job, video_path)
+    os.makedirs(output_dir, exist_ok=True)
+    thumbnail_path = os.path.join(output_dir, "thumbnail.jpg")
+    if os.path.isfile(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+        _store_job_cover_path(job, db, thumbnail_path)
+        return thumbnail_path
+
+    cmd = [
+        get_ffmpeg_command(),
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-ss", "1",
+        "-i", video_path,
+        "-frames:v", "1",
+        "-vf", "scale=640:-2",
+        "-q:v", "3",
+        thumbnail_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0 or not os.path.isfile(thumbnail_path) or os.path.getsize(thumbnail_path) <= 0:
+        try:
+            if os.path.exists(thumbnail_path):
+                os.remove(thumbnail_path)
+        except OSError:
+            pass
+        return None
+
+    _store_job_cover_path(job, db, thumbnail_path)
+    return thumbnail_path
+
+
+def _job_export_video_path(job: AutomationJobRecord) -> Optional[str]:
+    """读取素材库卡片要预览的最终成品视频路径"""
+    export_stage = _stage_by_key(job, "export")
+    for candidate in (job.output_path, (export_stage or {}).get("output_path")):
+        path = _existing_file(str(candidate or ""), MEDIA_EXTENSIONS)
+        if path:
+            return path
+    return None
+
+
+def _job_thumbnail_output_dir(job: AutomationJobRecord, video_path: str) -> str:
+    """缩略图优先放在单视频工作目录，旧任务回退到成品所在目录"""
+    params = _get_job_params(job)
+    workspace_dir = str(params.get("workspace_dir") or "").strip()
+    if workspace_dir:
+        normalized_workspace = os.path.abspath(os.path.expanduser(workspace_dir))
+        if os.path.isdir(normalized_workspace):
+            return normalized_workspace
+
+    detected = detect_video_workspace(video_path)
+    if detected and os.path.isdir(detected["workspace_dir"]):
+        return detected["workspace_dir"]
+    return os.path.dirname(video_path)
+
+
+def _store_job_cover_path(job: AutomationJobRecord, db: Optional[Session], cover_path: str) -> None:
+    """把自动生成的封面路径写回任务参数，后续刷新直接复用"""
+    params = _get_job_params(job)
+    if params.get("cover_asset_path") == cover_path:
+        return
+    params["cover_asset_path"] = cover_path
+    _set_job_params(job, params)
+    if db:
+        db.commit()
 
 
 def _find_job_editable_subtitle_path(job: Optional[AutomationJobRecord], db: Optional[Session] = None) -> Optional[str]:
