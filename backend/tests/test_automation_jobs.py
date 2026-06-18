@@ -1571,6 +1571,27 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             with open(output_path, "rb") as file:
                 self.assertEqual(file.read(), b"exported")
 
+    def test_prepare_export_rerun_keeps_previous_output_path(self):
+        """重新导出开始时保留旧成品路径，避免中断后素材库找不到记录"""
+        output_path = "D:/videos/final.mp4"
+        job = AutomationJobRecord(
+            id="auto-export-rerun-keep-output",
+            source_url="https://youtube.com/watch?v=1",
+            status="completed",
+            output_path=output_path,
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/videos/source.mp4", "error_message": None},
+                {"key": "export", "status": "completed", "progress": 100, "task_id": 2, "output_path": output_path, "error_message": None},
+            ], ensure_ascii=False),
+        )
+
+        _prepare_job_export_stage_for_rerun(job)
+        stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+        self.assertEqual(job.output_path, output_path)
+        self.assertEqual(stages["export"]["output_path"], output_path)
+        self.assertEqual(stages["export"]["status"], "pending")
+
     def test_delete_job_record_removes_child_tasks_but_keeps_files(self):
         """删除素材记录只删数据库任务，不碰磁盘成品文件"""
         job = AutomationJobRecord(id="auto-delete", source_url="https://youtube.com/watch?v=1", status="completed")

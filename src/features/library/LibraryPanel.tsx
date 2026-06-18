@@ -1,5 +1,5 @@
 // src/features/library/LibraryPanel.tsx
-// 素材库 - 展示一键流程导出的成品视频
+// 素材库 - 展示一键流程导出的成品和中断后仍可恢复的视频
 import { useCallback, useEffect, useState } from 'react'
 import { Captions, Film, FolderOpen, FolderX, ImageIcon, Play, RefreshCw } from 'lucide-react'
 import { automationApi } from '@/lib/api'
@@ -19,7 +19,7 @@ import type { AutomationJob } from '@/types'
 type ProductItem = {
   job: AutomationJob
   output: string
-  kind: 'final' | 'subtitle_only'
+  kind: 'final' | 'subtitle_only' | 'partial'
   thumbnailSrc: string | null
 }
 
@@ -53,17 +53,9 @@ export function LibraryPanel() {
     return () => window.clearInterval(timer)
   }, [refreshLibrary])
 
-  // 取已完成流程的导出阶段产物作为成品
+  // 只要本地还有可播放产物就展示；导出被强杀时也能从字幕阶段找回视频。
   const products: ProductItem[] = jobs
-    .filter((job) => job.status === 'completed')
-    .flatMap((job) => {
-      const output = job.steps.find((step) => step.key === 'export')?.output_path
-      const items: ProductItem[] = output ? [{ job, output, kind: 'final', thumbnailSrc: resolveThumbnailSrc(job) }] : []
-      if (job.subtitle_only_video_path) {
-        items.push({ job, output: job.subtitle_only_video_path, kind: 'subtitle_only', thumbnailSrc: resolveThumbnailSrc(job) })
-      }
-      return items
-    })
+    .flatMap(buildProductItems)
 
   const handleOpenFolder = async (item: ProductItem) => {
     if (openingId) return
@@ -109,7 +101,7 @@ export function LibraryPanel() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold">素材库</h2>
-          <p className="text-sm text-muted-foreground">一键流程导出的成品视频会出现在这里。</p>
+          <p className="text-sm text-muted-foreground">一键流程导出的成品和中断后仍可恢复的视频会出现在这里。</p>
         </div>
         <Button variant="outline" size="sm" className="h-9" onClick={() => refreshLibrary(true)} disabled={refreshing}>
           <RefreshCw className={`mr-1.5 size-4 ${refreshing ? 'animate-spin' : ''}`} />
@@ -121,7 +113,7 @@ export function LibraryPanel() {
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed py-14 text-center">
           <Film className="size-8 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">暂无成品</p>
-          <p className="text-xs text-muted-foreground/70">完成一次一键处理后会自动出现在素材库</p>
+          <p className="text-xs text-muted-foreground/70">完成一次一键处理，或有可恢复的视频产物后会自动出现在素材库</p>
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -154,6 +146,8 @@ export function LibraryPanel() {
                   <div className="min-h-10 space-y-1">
                     <div className="flex items-center gap-2">
                       {item.kind === 'subtitle_only' && <span className="shrink-0 rounded bg-info/10 px-1.5 py-0.5 text-[11px] text-info">字幕版</span>}
+                      {item.kind === 'partial' && <span className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning">导出中断</span>}
+                      {item.kind === 'final' && job.status !== 'completed' && <span className="shrink-0 rounded bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning">旧成品</span>}
                       <p className="truncate text-xs text-muted-foreground" title={fileNameFromPath(output)}>
                         {fileNameFromPath(output)}
                       </p>
@@ -234,6 +228,32 @@ function resolveThumbnailSrc(job: AutomationJob) {
   const coverPath = job.cover_asset_path?.trim()
   if (coverPath) return automationApi.mediaUrl(coverPath)
   return job.video_info?.thumbnail_url || null
+}
+
+function buildProductItems(job: AutomationJob): ProductItem[] {
+  const thumbnailSrc = resolveThumbnailSrc(job)
+  const items: ProductItem[] = []
+  const finalOutput = firstPath(job.output_path, stageOutput(job, 'export'))
+  if (finalOutput) {
+    items.push({ job, output: finalOutput, kind: 'final', thumbnailSrc })
+  } else if (job.status !== 'completed') {
+    const partialOutput = firstPath(stageOutput(job, 'subtitle'), stageOutput(job, 'effects'), stageOutput(job, 'download'))
+    if (partialOutput) {
+      items.push({ job, output: partialOutput, kind: 'partial', thumbnailSrc })
+    }
+  }
+  if (job.subtitle_only_video_path) {
+    items.push({ job, output: job.subtitle_only_video_path, kind: 'subtitle_only', thumbnailSrc })
+  }
+  return items
+}
+
+function stageOutput(job: AutomationJob, key: AutomationJob['steps'][number]['key']) {
+  return job.steps.find((step) => step.key === key)?.output_path || ''
+}
+
+function firstPath(...paths: Array<string | null | undefined>) {
+  return paths.find((path) => Boolean(path?.trim()))?.trim() || ''
 }
 
 function fileNameFromPath(path: string) {

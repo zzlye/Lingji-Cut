@@ -2452,12 +2452,11 @@ def _prepare_job_export_stage_for_rerun(job: AutomationJobRecord) -> None:
         stage["status"] = "pending"
         stage["progress"] = 0
         stage["task_id"] = None
-        stage["output_path"] = None
+        # 重新导出期间保留旧成品路径，导出失败或 ffmpeg 被强杀时素材库仍能找到原文件。
         stage["error_message"] = None
         break
     job.status = "running"
     job.current_step = "字幕调整重新导出"
-    job.output_path = None
     job.error_message = None
     job.completed_at = None
     job.stages = json.dumps(stages, ensure_ascii=False)
@@ -3565,7 +3564,10 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
         job.current_step = "重新导出失败"
         job.error_message = str(exc)
         job.completed_at = datetime.now()
-        _update_job_stage(db, job, "export", "failed", task_id=export_task.id, error_message=str(exc))
+        retained_output_path = overwrite_output_path if overwrite_output_path and os.path.isfile(overwrite_output_path) else None
+        _update_job_stage(db, job, "export", "failed", task_id=export_task.id, output_path=retained_output_path, error_message=str(exc))
+        if retained_output_path:
+            job.output_path = retained_output_path
         db.commit()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
