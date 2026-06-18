@@ -509,12 +509,12 @@ function ConfigSummary({
   const subtitleOptions = Object.entries(SUBTITLE_OP_LABEL) as Array<[AutomationPreferences['subtitle_operation'], string]>
 
   return (
-    <Card className="glass lg:h-full lg:self-stretch">
-      <CardHeader>
+    <Card className="glass lg:self-start">
+      <CardHeader className="space-y-1 p-4 pb-2">
         <CardTitle className="text-sm">本次配置</CardTitle>
-        <CardDescription className="text-xs">常用项可直接切换，右侧按钮进入详细设置</CardDescription>
+        <CardDescription className="text-xs">常用项直接切换，右侧按钮进详细设置</CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-2 p-4 pt-2">
         <ConfigSwitchRow
           icon={Film}
           label="画面处理"
@@ -565,18 +565,20 @@ function ConfigSummary({
             onOpenSettings={() => onOpenSettings('voice')}
           />
         )}
-        <ConfigShortcutRow
-          icon={BookMarked}
-          label="术语库"
-          value={`${preferences.glossary_terms.length} 条`}
-          onOpenSettings={() => onOpenSettings('glossary')}
-        />
-        <ConfigShortcutRow
-          icon={ShieldAlert}
-          label="禁词"
-          value={`${preferences.banned_words.length} 个`}
-          onOpenSettings={() => onOpenSettings('banned')}
-        />
+        <div className="grid grid-cols-2 gap-2">
+          <ConfigShortcutRow
+            icon={BookMarked}
+            label="术语库"
+            value={`${preferences.glossary_terms.length} 条`}
+            onOpenSettings={() => onOpenSettings('glossary')}
+          />
+          <ConfigShortcutRow
+            icon={ShieldAlert}
+            label="禁词"
+            value={`${preferences.banned_words.length} 个`}
+            onOpenSettings={() => onOpenSettings('banned')}
+          />
+        </div>
       </CardContent>
     </Card>
   )
@@ -599,11 +601,11 @@ function ConfigSwitchRow({
   onOpenSettings: () => void
 }) {
   return (
-    <div className="flex items-center gap-2.5 rounded-lg border bg-card/70 px-3 py-2.5">
+    <div className="flex items-center gap-2 rounded-lg border bg-card/70 px-2.5 py-2">
       <Icon className="size-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium">{label}</p>
-        <p className="truncate text-xs text-muted-foreground">{description}</p>
+        <p className="text-sm font-medium leading-5">{label}</p>
+        <p className="truncate text-[11px] leading-4 text-muted-foreground">{description}</p>
       </div>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={`${checked ? '关闭' : '开启'}${label}`} />
       <ConfigSettingsButton label={label} onClick={onOpenSettings} />
@@ -628,14 +630,14 @@ function ConfigSelectRow({
   onOpenSettings: () => void
 }) {
   return (
-    <div className="space-y-2 rounded-lg border bg-card/70 px-3 py-2.5">
-      <div className="flex items-center gap-2.5">
+    <div className="space-y-1.5 rounded-lg border bg-card/70 px-2.5 py-2">
+      <div className="flex items-center gap-2">
         <Icon className="size-4 shrink-0 text-muted-foreground" />
         <p className="min-w-0 flex-1 text-sm font-medium">{label}</p>
         <ConfigSettingsButton label={label} onClick={onOpenSettings} />
       </div>
       <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="h-8 w-full text-xs">
+        <SelectTrigger className="h-7 w-full text-xs">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -664,11 +666,11 @@ function ConfigShortcutRow({
     <button
       type="button"
       onClick={onOpenSettings}
-      className="flex w-full items-center gap-2.5 rounded-lg border bg-card/70 px-3 py-2.5 text-left transition-colors hover:bg-accent"
+      className="flex min-w-0 items-center gap-1.5 rounded-lg border bg-card/70 px-2.5 py-2 text-left transition-colors hover:bg-accent"
     >
       <Icon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 text-sm font-medium">{label}</span>
-      <span className="text-xs text-muted-foreground">{value}</span>
+      <span className="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
+      <span className="shrink-0 text-[11px] text-muted-foreground">{value}</span>
       <SlidersHorizontal className="size-3.5 text-muted-foreground/50" />
     </button>
   )
