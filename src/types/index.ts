@@ -212,6 +212,7 @@ export interface AutomationJob {
   voice_asset_path?: string | null
   subtitle_only_video_path?: string | null
   cover_asset_path?: string | null
+  output_path?: string | null
 }
 
 /** 后端持久化自动化任务 */

@@ -62,5 +62,6 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     voice_asset_path: job.voice_asset_path || null,
     subtitle_only_video_path: job.subtitle_only_video_path || null,
     cover_asset_path: job.cover_asset_path || null,
+    output_path: job.output_path || null,
   }
 }

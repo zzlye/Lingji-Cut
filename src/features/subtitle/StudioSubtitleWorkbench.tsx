@@ -215,6 +215,13 @@ export function StudioSubtitleWorkbench({
   }, [previewVideoUrl])
 
   useEffect(() => {
+    if (!playingEntry || !selectedEntry) return
+    setPlayingEntry(selectedEntry)
+    // 播放器已打开时切换字幕行，需要重新启用片段结束点。
+    previewStopAtRef.current = null
+  }, [selectedEntry?.end, selectedEntry?.start, selectedIndex])
+
+  useEffect(() => {
     if (!playingEntry || !previewVideoUrl) return
     const video = previewVideoRef.current
     if (!video) return
@@ -1497,13 +1504,16 @@ function resolveJobSourceVideo(job: AutomationJob | null) {
 }
 
 function resolveJobPreviewVideo(job: AutomationJob | null, sourceVideoPath: string) {
-  if (sourceVideoPath) return sourceVideoPath
-  for (const key of ['subtitle', 'export'] as const) {
+  // 字幕校对预览应优先使用一键完成后的成品，源视频只作为最后兜底。
+  const finalPath = (job?.output_path || '').trim()
+  if (isMediaPath(finalPath)) return finalPath
+  for (const key of ['export', 'subtitle', 'effects'] as const) {
     const stagePath = (job?.steps.find((step) => step.key === key)?.output_path || '').trim()
     if (isMediaPath(stagePath)) return stagePath
   }
   const subtitleOnlyPath = (job?.subtitle_only_video_path || '').trim()
   if (isMediaPath(subtitleOnlyPath)) return subtitleOnlyPath
+  if (sourceVideoPath) return sourceVideoPath
   return ''
 }
 
