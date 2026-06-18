@@ -9,6 +9,7 @@ import type { SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { cn } from '@/lib/utils'
 import { TextField, SelectField, SegmentedField, SliderField, ColorField, SwitchField, PositionGrid, type FieldOption } from '@/components/fields'
@@ -19,23 +20,96 @@ type SubtitlePosition = SubtitlePreset['position']
 /** 字幕表单状态 */
 type SubtitlePresetForm = Omit<SubtitlePreset, 'id'>
 
+/** 字体授权类型 */
+type FontLicenseKind = 'free' | 'system' | 'paid'
+
+/** 字体库条目；这里只保存字体名，不内置或分发字体文件 */
+type FontPreset = {
+  name: string
+  family: string
+  license: FontLicenseKind
+  note: string
+}
+
 /** 可选语言配置 */
 const LANGUAGE_OPTIONS: FieldOption[] = [
   ['auto', '跟随原视频'], ['zh-CN', '中文 简体'], ['zh-TW', '中文 繁体'], ['en', '英文'], ['ja', '日文'],
   ['ko', '韩文'], ['es', '西班牙语'], ['fr', '法语'], ['de', '德语'], ['vi', '越南语'], ['th', '泰语'], ['custom', '自定义'],
 ]
 
-/** 免费或常见可商用字体预设，最终渲染取决于本机是否安装对应字体 */
-const FONT_PRESETS = [
-  { name: '思源黑体', family: 'Source Han Sans SC' },
-  { name: 'Noto Sans SC', family: 'Noto Sans SC' },
-  { name: '阿里巴巴普惠体', family: 'Alibaba PuHuiTi' },
-  { name: 'HarmonyOS Sans', family: 'HarmonyOS Sans SC' },
-  { name: 'MiSans', family: 'MiSans' },
-  { name: '霞鹜文楷', family: 'LXGW WenKai' },
-  { name: '思源宋体', family: 'Source Han Serif SC' },
-  { name: '微软雅黑', family: 'Microsoft YaHei' },
+/** 字体授权标签样式 */
+const FONT_LICENSE_META: Record<FontLicenseKind, { label: string; className: string }> = {
+  free: { label: '免费可商用', className: 'border-success/40 bg-success/10 text-success' },
+  system: { label: '随系统授权', className: 'border-info/40 bg-info/10 text-info' },
+  paid: { label: '需商用授权', className: 'border-warning/50 bg-warning/10 text-warning' },
+}
+
+/** 字体分组；实际渲染取决于本机是否安装对应字体 */
+const FONT_GROUPS: Array<{ title: string; description: string; fonts: FontPreset[] }> = [
+  {
+    title: '免费可商用',
+    description: '适合默认优先使用，仍需按字体官网协议安装和使用。',
+    fonts: [
+      { name: '思源黑体', family: 'Source Han Sans SC', license: 'free', note: 'Adobe / Google 开源 CJK 黑体' },
+      { name: '思源宋体', family: 'Source Han Serif SC', license: 'free', note: '开源 CJK 宋体' },
+      { name: 'Noto Sans SC', family: 'Noto Sans SC', license: 'free', note: 'Google Fonts 简中黑体' },
+      { name: 'Noto Serif SC', family: 'Noto Serif SC', license: 'free', note: 'Google Fonts 简中宋体' },
+      { name: 'Noto Sans CJK SC', family: 'Noto Sans CJK SC', license: 'free', note: 'Noto CJK 本地安装名' },
+      { name: '阿里巴巴普惠体', family: 'Alibaba PuHuiTi', license: 'free', note: '电商和短视频常用黑体' },
+      { name: '阿里巴巴普惠体 2.0', family: 'Alibaba PuHuiTi 2.0', license: 'free', note: '新版普惠体安装名' },
+      { name: 'MiSans', family: 'MiSans', license: 'free', note: '小米字体，作品使用需遵守官方协议' },
+      { name: 'HarmonyOS Sans', family: 'HarmonyOS Sans SC', license: 'free', note: '华为字体，作品使用需遵守官方协议' },
+      { name: '霞鹜文楷', family: 'LXGW WenKai', license: 'free', note: '开源手写楷体风格' },
+      { name: '得意黑', family: 'Smiley Sans', license: 'free', note: '标题感强，适合短视频封面字幕' },
+      { name: '站酷庆科黄油体', family: 'ZCOOL QingKe HuangYou', license: 'free', note: '偏标题和轻松风格' },
+      { name: '站酷快乐体', family: 'ZCOOL KuaiLe', license: 'free', note: '活泼标题字' },
+      { name: '站酷小薇体', family: 'ZCOOL XiaoWei', license: 'free', note: '宋体标题风格' },
+      { name: '马善政毛笔', family: 'Ma Shan Zheng', license: 'free', note: '毛笔风格，适合少量强调' },
+      { name: '龙藏体', family: 'Long Cang', license: 'free', note: '书法风格，适合片头短句' },
+      { name: '志莽行书', family: 'Zhi Mang Xing', license: 'free', note: '行书风格，适合装饰性字幕' },
+      { name: 'M PLUS Rounded 1c', family: 'M PLUS Rounded 1c', license: 'free', note: '圆角日文字体' },
+      { name: 'Zen Maru Gothic', family: 'Zen Maru Gothic', license: 'free', note: '日文圆体' },
+    ],
+  },
+  {
+    title: '系统自带 / 随系统授权',
+    description: '通常不能复制分发字体文件；用来烧录本机视频前请确认系统或软件授权。',
+    fonts: [
+      { name: '微软雅黑', family: 'Microsoft YaHei', license: 'system', note: 'Windows 简中常见字体' },
+      { name: '微软正黑体', family: 'Microsoft JhengHei', license: 'system', note: 'Windows 繁中常见字体' },
+      { name: '黑体', family: 'SimHei', license: 'system', note: 'Windows 传统黑体' },
+      { name: '宋体', family: 'SimSun', license: 'system', note: 'Windows 传统宋体' },
+      { name: '等线', family: 'DengXian', license: 'system', note: 'Windows 现代黑体' },
+      { name: '楷体', family: 'KaiTi', license: 'system', note: 'Windows 楷体' },
+      { name: '仿宋', family: 'FangSong', license: 'system', note: 'Windows 仿宋' },
+      { name: '苹方', family: 'PingFang SC', license: 'system', note: 'macOS / iOS 简中系统字体' },
+      { name: '冬青黑体', family: 'Hiragino Sans GB', license: 'system', note: 'macOS 常见中文黑体' },
+      { name: '华文黑体', family: 'STHeiti', license: 'system', note: 'macOS 常见中文字体' },
+      { name: '游ゴシック', family: 'Yu Gothic', license: 'system', note: 'Windows / macOS 日文字体' },
+      { name: 'Meiryo', family: 'Meiryo', license: 'system', note: 'Windows 日文字体' },
+      { name: 'Malgun Gothic', family: 'Malgun Gothic', license: 'system', note: 'Windows 韩文字体' },
+    ],
+  },
+  {
+    title: '商业字体 / 需授权',
+    description: '只提供常见字体名入口；用于商单、账号运营或公开视频前应购买或确认授权。',
+    fonts: [
+      { name: '方正兰亭黑', family: 'FZLanTingHei', license: 'paid', note: '方正系商业字体' },
+      { name: '方正黑体', family: 'FZHei-B01', license: 'paid', note: '方正系商业字体' },
+      { name: '方正综艺', family: 'FZZongYi-M05', license: 'paid', note: '方正标题字体' },
+      { name: '汉仪旗黑', family: 'HYQiHei', license: 'paid', note: '汉仪系商业字体' },
+      { name: '汉仪中黑', family: 'HYZhongHei', license: 'paid', note: '汉仪系商业字体' },
+      { name: '汉仪雅酷黑', family: 'HYYaKuHei', license: 'paid', note: '汉仪系商业字体' },
+      { name: '造字工房悦黑', family: 'ZaoZiGongFangYueHei', license: 'paid', note: '造字工房商业字体' },
+      { name: '造字工房朗倩', family: 'ZaoZiGongFangLangQian', license: 'paid', note: '造字工房商业字体' },
+      { name: '华康黑体', family: 'DFHei', license: 'paid', note: '华康系商业字体' },
+      { name: '蒙纳黑体', family: 'MHei', license: 'paid', note: '蒙纳系商业字体' },
+      { name: '文鼎黑体', family: 'AR Hei', license: 'paid', note: '文鼎系商业字体' },
+      { name: '字魂字体', family: 'ZiHun', license: 'paid', note: '字魂字体需按套餐授权' },
+    ],
+  },
 ]
+const FONT_LIBRARY = FONT_GROUPS.flatMap((group) => group.fonts)
 
 /** 九宫格字幕位置 */
 const POSITION_OPTIONS: Array<{ value: SubtitlePosition; label: string }> = [
@@ -98,6 +172,10 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
 
   const usesCustomLanguage = useMemo(() => !LANGUAGE_OPTIONS.some(([value]) => value === form.language), [form.language])
   const selectedLanguage = usesCustomLanguage ? 'custom' : form.language
+  const selectedFont = useMemo(
+    () => FONT_LIBRARY.find((font) => font.family.toLowerCase() === form.font_name.trim().toLowerCase()),
+    [form.font_name],
+  )
 
   const loadPresets = async () => {
     try {
@@ -220,13 +298,35 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="font" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">字体</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
-                <TextField label="字体名称" value={form.font_name} onChange={(v) => updateForm('font_name', v)} description="渲染效果取决于本机是否安装该字体" />
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {FONT_PRESETS.map((font) => (
-                    <button key={font.family} onClick={() => updateForm('font_name', font.family)} style={{ fontFamily: font.family }}
-                      className={cn('rounded-md border px-2.5 py-2 text-left text-xs transition-colors', form.font_name === font.family ? 'border-primary bg-primary/10 text-primary' : 'bg-card text-muted-foreground hover:border-primary/50 hover:text-foreground')}>
-                      <span className="block truncate font-medium">{font.name}</span>
-                    </button>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-muted-foreground">当前字体</span>
+                    <span className="font-medium" style={{ fontFamily: form.font_name }}>{form.font_name}</span>
+                    {selectedFont ? <FontLicenseBadge license={selectedFont.license} /> : <Badge variant="outline">自定义</Badge>}
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    字体库只写入字体名称，不会安装或内置字体文件；最终渲染取决于本机是否安装该字体。
+                  </p>
+                </div>
+                <TextField label="字体名称" value={form.font_name} onChange={(v) => updateForm('font_name', v)} description="可手动填写本机已安装字体名称" />
+                <div className="space-y-3">
+                  {FONT_GROUPS.map((group) => (
+                    <div key={group.title} className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium">{group.title}</p>
+                        <p className="text-xs text-muted-foreground">{group.description}</p>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                        {group.fonts.map((font) => (
+                          <FontOptionButton
+                            key={`${font.license}-${font.family}`}
+                            font={font}
+                            selected={form.font_name === font.family}
+                            onSelect={() => updateForm('font_name', font.family)}
+                          />
+                        ))}
+                      </div>
+                    </div>
                   ))}
                 </div>
               </AccordionContent>
@@ -276,6 +376,36 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
         </aside>
       </div>
     </div>
+  )
+}
+
+/** 字体授权标签 */
+function FontLicenseBadge({ license }: { license: FontLicenseKind }) {
+  const meta = FONT_LICENSE_META[license]
+  return <Badge variant="outline" className={meta.className}>{meta.label}</Badge>
+}
+
+/** 字体选择卡片 */
+function FontOptionButton({ font, selected, onSelect }: { font: FontPreset; selected: boolean; onSelect: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      style={{ fontFamily: font.family }}
+      className={cn(
+        'min-h-24 rounded-lg border bg-card p-3 text-left text-xs transition-colors hover:border-primary/50 hover:bg-primary/5',
+        selected ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground',
+      )}
+    >
+      <span className="flex items-start justify-between gap-2">
+        <span className="min-w-0">
+          <span className="block truncate text-sm font-medium">{font.name}</span>
+          <span className="mt-0.5 block truncate font-mono text-[11px] opacity-75">{font.family}</span>
+        </span>
+        <FontLicenseBadge license={font.license} />
+      </span>
+      <span className="mt-2 line-clamp-2 block leading-snug opacity-80">{font.note}</span>
+    </button>
   )
 }
 
