@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.api.profiles import ProfileCreate, ProfileUpdate, create_text_profile, get_text_profile_secret, get_voice_profile_secret, update_text_profile  # noqa: E402
+from backend.api.profiles import ProfileCreate, ProfileRename, ProfileUpdate, create_text_profile, delete_text_profile, get_text_profile_secret, get_voice_profile_secret, rename_text_profile, update_text_profile  # noqa: E402
 from backend.models import TextProviderProfile, VoiceProviderProfile  # noqa: E402
 from backend.utils import encrypt_api_key  # noqa: E402
 
@@ -55,6 +55,12 @@ class FakeDb:
 
     def refresh(self, _item):
         return None
+
+    def delete(self, item):
+        if isinstance(item, TextProviderProfile):
+            self.text_profiles = [profile for profile in self.text_profiles if profile is not item]
+        elif isinstance(item, VoiceProviderProfile):
+            self.voice_profiles = [profile for profile in self.voice_profiles if profile is not item]
 
 
 class ProfileSecretTests(unittest.TestCase):
@@ -99,6 +105,27 @@ class ProfileSecretTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("API Key", context.exception.detail)
+
+    def test_rename_text_profile_only_changes_name(self):
+        """文本配置改名接口不改动渠道和密钥"""
+        profile = TextProviderProfile(id=1, name="旧名称", provider_type="openai", base_url="https://example.com", api_key_encrypted=encrypt_api_key("sk-text"), model="gpt")
+        db = FakeDb(text_profiles=[profile])
+
+        result = asyncio.run(rename_text_profile(1, ProfileRename(name="新名称"), db))
+
+        self.assertEqual(result.name, "新名称")
+        self.assertEqual(profile.provider_type, "openai")
+        self.assertEqual(profile.model, "gpt")
+
+    def test_delete_text_profile_removes_profile(self):
+        """文本配置删除接口会移除选中的配置"""
+        profile = TextProviderProfile(id=1, name="文本", provider_type="openai", base_url="https://example.com", api_key_encrypted=encrypt_api_key("sk-text"), model="gpt")
+        db = FakeDb(text_profiles=[profile])
+
+        result = asyncio.run(delete_text_profile(1, db))
+
+        self.assertEqual(result["profile_id"], 1)
+        self.assertEqual(db.text_profiles, [])
 
 
 if __name__ == "__main__":

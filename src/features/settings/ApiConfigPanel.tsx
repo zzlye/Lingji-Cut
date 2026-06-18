@@ -2,6 +2,7 @@
 // 文本 API 配置面板 - 管理模型渠道、模型获取、生成参数和自动化参数（shadcn 重做）
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { profileApi } from '@/lib/api'
 import { saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
@@ -10,7 +11,6 @@ import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
-import { cn } from '@/lib/utils'
 import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, type FieldOption } from '@/components/fields'
 
 /** 文本 API 渠道配置 */
@@ -69,6 +69,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const [settings, setSettings] = useState<TextApiSettings>(() => createDefaultSettings())
   const [modelOptions, setModelOptions] = useState<TextModelOption[]>([])
   const [isSaving, setIsSaving] = useState(false)
+  const [isProfileActionBusy, setIsProfileActionBusy] = useState(false)
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
@@ -78,6 +79,11 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const selectedProfile = useMemo(() => profiles.find((p) => p.id === selectedProfileId) || null, [profiles, selectedProfileId])
   const provider = TEXT_PROVIDERS.find((item) => item.id === profileForm.provider_type) || TEXT_PROVIDERS[0]
   const activeModel = profileForm.custom_model.trim() || profileForm.model
+  const profileSelectOptions = useMemo<FieldOption[]>(
+    () => [['new', '+ 新建配置'], ...profiles.map((profile) => [String(profile.id), `${profile.name} · ${providerLabel(profile.provider_type)}`] as FieldOption)],
+    [profiles],
+  )
+  const selectedProfileValue = selectedProfileId ? String(selectedProfileId) : 'new'
 
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getTextSecret(profileId)
@@ -123,10 +129,73 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
   const createNewProfile = () => {
     profileRequestRef.current += 1
     setSelectedProfileId(null)
+    saveAutomationPreferences({ text_profile_id: null })
     setProfileForm(createProfileForm())
     setSettings(createDefaultSettings())
     setModelOptions([])
     setShowApiKey(false)
+  }
+
+  const handleSelectProfileValue = async (value: string) => {
+    if (value === 'new') {
+      createNewProfile()
+      return
+    }
+    const profile = profiles.find((item) => item.id === Number(value))
+    if (profile) await selectProfile(profile)
+  }
+
+  const handleRenameProfile = async () => {
+    const nextName = window.prompt('请输入新的配置名称', profileForm.name)?.trim()
+    if (!nextName || nextName === profileForm.name) return
+    if (!selectedProfileId) {
+      setProfileForm((current) => ({ ...current, name: nextName }))
+      toast.success('新配置名称已修改，保存配置后生效')
+      return
+    }
+
+    setIsProfileActionBusy(true)
+    try {
+      const renamed = await profileApi.renameText(selectedProfileId, nextName)
+      setProfileForm((current) => ({ ...current, name: renamed.name }))
+      setProfiles((current) => current.map((profile) => (profile.id === renamed.id ? { ...profile, name: renamed.name } : profile)))
+      toast.success('配置名称已修改')
+      addLog('info', `文本 API 配置已改名为 "${renamed.name}"`)
+    } catch (error) {
+      const message = `修改文本 API 配置名称失败: ${error instanceof Error ? error.message : '未知错误'}`
+      toast.error(message)
+      addLog('error', message)
+    } finally {
+      setIsProfileActionBusy(false)
+    }
+  }
+
+  const handleDeleteProfile = async () => {
+    if (!selectedProfileId || !selectedProfile) {
+      toast.warning('请先选择要删除的配置')
+      return
+    }
+    if (!window.confirm(`确定删除文本 API 配置「${selectedProfile.name}」吗？`)) return
+
+    setIsProfileActionBusy(true)
+    try {
+      await profileApi.deleteText(selectedProfileId)
+      const remainingProfiles = profiles.filter((profile) => profile.id !== selectedProfileId)
+      setProfiles(remainingProfiles)
+      toast.success('文本 API 配置已删除')
+      addLog('info', `文本 API 配置 "${selectedProfile.name}" 已删除`)
+      if (remainingProfiles.length > 0) {
+        await selectProfile(remainingProfiles[0])
+      } else {
+        createNewProfile()
+      }
+    } catch (error) {
+      const message = `删除文本 API 配置失败: ${error instanceof Error ? error.message : '未知错误'}`
+      toast.error(message)
+      addLog('error', message)
+    } finally {
+      setIsProfileActionBusy(false)
+    }
   }
 
   const updateProvider = (providerType: string) => {
@@ -194,23 +263,28 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
         <p className="text-sm text-muted-foreground">用于字幕生成、翻译、润色。配好渠道与模型后点「测试连接」确认是否可用。</p>
       </div>
 
-      {/* 已保存渠道 */}
-      <div className="flex flex-wrap items-center gap-2">
-        {profiles.map((profile) => (
-          <button key={profile.id} onClick={() => selectProfile(profile)} className={cn('rounded-lg border px-3 py-2 text-left text-sm transition-colors', selectedProfileId === profile.id ? 'border-primary bg-primary/10' : 'bg-card hover:border-primary/50')}>
-            <span className="block font-medium">{profile.name}</span>
-            <span className="block text-xs text-muted-foreground">{providerLabel(profile.provider_type)}</span>
-          </button>
-        ))}
-        <Button variant="outline" size="sm" onClick={createNewProfile}>+ 新建渠道</Button>
-      </div>
-
       {/* 渠道与模型 */}
       <Card>
         <CardHeader><CardTitle className="text-sm">渠道与模型</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
-            <TextField label="配置名称" value={profileForm.name} onChange={(v) => setProfileForm({ ...profileForm, name: v })} />
+            <div className="grid gap-2 sm:col-span-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+              <SelectField
+                label="配置名称"
+                value={selectedProfileValue}
+                options={profileSelectOptions}
+                onChange={handleSelectProfileValue}
+                description={selectedProfile ? `当前配置名：${profileForm.name}` : `新配置名：${profileForm.name}`}
+              />
+              <Button type="button" variant="outline" onClick={handleRenameProfile} disabled={isProfileActionBusy}>
+                {selectedProfileId ? <Pencil className="mr-1.5 size-4" /> : <Plus className="mr-1.5 size-4" />}
+                修改名称
+              </Button>
+              <Button type="button" variant="outline" className="text-destructive" onClick={handleDeleteProfile} disabled={!selectedProfileId || isProfileActionBusy}>
+                <Trash2 className="mr-1.5 size-4" />
+                删除配置
+              </Button>
+            </div>
             <SelectField label="渠道" value={profileForm.provider_type} options={TEXT_PROVIDERS.map((p) => [p.id, p.name] as FieldOption)} onChange={updateProvider} description={provider.description} />
             <TextField label="Base URL" value={profileForm.base_url} onChange={(v) => setProfileForm({ ...profileForm, base_url: v })} />
             <SecretField

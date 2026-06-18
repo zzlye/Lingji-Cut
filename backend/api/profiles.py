@@ -40,6 +40,11 @@ class ProfileUpdate(BaseModel):
     extra_params: Optional[str] = None
 
 
+class ProfileRename(BaseModel):
+    """修改配置名称请求"""
+    name: str
+
+
 class ProfileResponse(BaseModel):
     """配置响应（不包含 api_key）"""
     id: int
@@ -481,6 +486,28 @@ async def update_text_profile(profile_id: int, profile: ProfileUpdate, db: Sessi
     db.commit()
     db.refresh(db_profile)
     return db_profile
+
+
+@router.patch("/text/{profile_id}/name", response_model=ProfileResponse)
+async def rename_text_profile(profile_id: int, request: ProfileRename, db: Session = Depends(get_db)):
+    """只修改文本 API 配置名称，不触碰密钥、渠道和模型"""
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="配置名称不能为空")
+    db_profile = _get_text_profile_or_404(profile_id, db)
+    db_profile.name = name
+    db.commit()
+    db.refresh(db_profile)
+    return db_profile
+
+
+@router.delete("/text/{profile_id}")
+async def delete_text_profile(profile_id: int, db: Session = Depends(get_db)):
+    """删除文本 API 配置"""
+    db_profile = _get_text_profile_or_404(profile_id, db)
+    db.delete(db_profile)
+    db.commit()
+    return {"message": "文本 API 配置已删除", "profile_id": profile_id}
 
 
 @router.post("/text/models", response_model=TextModelListResponse)

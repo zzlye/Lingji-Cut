@@ -302,6 +302,17 @@ export const profileApi = {
       body: JSON.stringify(profile),
     }),
 
+  /** 只修改文本 API 配置名称 */
+  renameText: (id: number, name: string) =>
+    request<import('@/types').ApiProfile>(`/profiles/text/${id}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
+
+  /** 删除文本 API 配置 */
+  deleteText: (id: number) =>
+    request<{ message: string; profile_id: number }>(`/profiles/text/${id}`, { method: 'DELETE' }),
+
   /** 获取文本模型列表 */
   listTextModels: (params: { provider_type: string; base_url: string; api_key?: string; profile_id?: number | null }) =>
     request<{ models: import('@/types').TextModelOption[]; source: string; message: string }>('/profiles/text/models', {
