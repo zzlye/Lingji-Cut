@@ -195,7 +195,7 @@ export function StudioWorkspace({ onOpenSettings }: StudioWorkspaceProps) {
       <PipelineStepper job={activeJob} />
 
       {/* 双栏：左信息+进度，右配置摘要 */}
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <div className="grid items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_300px]">
         <div className="min-w-0 space-y-5">
           {displayVideo ? <VideoInfoCard video={displayVideo} isThumbnailLoading={Boolean(localVideoPath && isGeneratingLocalThumbnail)} /> : activeJob ? <AutoRunPendingCard job={activeJob} /> : <ParseHint />}
           {activeJob && <JobProgressCard job={activeJob} />}
@@ -492,7 +492,7 @@ function ConfigSummary({
     { icon: ShieldAlert, label: '禁词', value: `${preferences.banned_words.length} 个`, tab: 'banned' },
   ]
   return (
-    <Card className="glass h-fit">
+    <Card className="glass lg:h-full lg:self-stretch">
       <CardHeader>
         <CardTitle className="text-sm">本次配置</CardTitle>
         <CardDescription className="text-xs">点任意项可跳转设置调整</CardDescription>
