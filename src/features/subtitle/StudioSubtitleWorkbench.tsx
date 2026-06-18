@@ -30,13 +30,17 @@ const AI_SCOPE_OPTIONS: FieldOption[] = [['checked', '已勾选'], ['current', '
 const SUBTITLE_LIST_ROW_HEIGHT = 64
 const SUBTITLE_LIST_OVERSCAN = 8
 const SUBTITLE_LIST_VISIBLE_COUNT = 20
-type ManualAiOperation = Extract<SubtitleTextOperation, 'translate' | 'polish'>
+type ManualAiOperation = Extract<SubtitleTextOperation, 'translate' | 'polish'> | 'merge' | 'split'
 
 const AI_OPERATION_LABEL: Record<ManualAiOperation, string> = {
+  merge: 'AI 合并',
   polish: 'AI 润色',
+  split: 'AI 拆分',
   translate: 'AI 翻译',
 }
 const AI_INSTRUCTION_PLACEHOLDER: Record<ManualAiOperation, string> = {
+  merge: '例如：合并成一句自然中文，去掉重复口癖，保留关键信息，原文也要保留。',
+  split: '例如：按语义停顿拆成 2-4 条，每条不要太长，不要拆出单个字，保留中英/中日对照。',
   translate: '例如：翻译成自然中文，保留游戏术语，不要漏译，不要添加解释，不要扩写。',
   polish: '例如：只优化表达和断句，保留原意和信息量，不要编造新内容。',
 }
@@ -730,6 +734,18 @@ export function StudioSubtitleWorkbench({
   }
 
   const openAiInstructionDialog = (operation: ManualAiOperation) => {
+    if (operation === 'merge' && validCheckedEntryIndexes.length < 2) {
+      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
+      return
+    }
+    if (operation === 'merge' && !areContinuousEntryIndexes(validCheckedEntryIndexes)) {
+      setNotice({ type: 'warning', message: '合并字幕需要勾选连续的字幕条目，请先调整勾选范围。' })
+      return
+    }
+    if (operation === 'split' && !selectedEntry) {
+      setNotice({ type: 'warning', message: '请先在左侧选择一条要拆分的字幕。' })
+      return
+    }
     setAiDialogOperation(operation)
     setAiCustomInstruction('')
   }
@@ -739,10 +755,134 @@ export function StudioSubtitleWorkbench({
     const operation = aiDialogOperation
     const customInstruction = aiCustomInstruction.trim()
     setAiDialogOperation(null)
+    if (operation === 'merge') {
+      await handleAiMergeEntries(customInstruction)
+      return
+    }
+    if (operation === 'split') {
+      await handleAiSplitEntry(customInstruction)
+      return
+    }
     await handleAiProcess(operation, customInstruction)
   }
 
-  const handleAiProcess = async (operation: ManualAiOperation, customInstruction = '') => {
+  const handleDirectMergeEntries = () => {
+    if (validCheckedEntryIndexes.length < 2) {
+      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
+      return
+    }
+    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
+      setNotice({ type: 'warning', message: '合并字幕需要勾选连续的字幕条目，请先调整勾选范围。' })
+      return
+    }
+
+    const targetIndexes = validCheckedEntryIndexes
+    const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
+    const mergedEntry = buildMergedSubtitleEntry(targetEntries)
+    const nextEntries = replaceEntriesAtIndexes(entries, targetIndexes, [mergedEntry])
+    const nextSelectedIndex = Math.min(targetIndexes[0], Math.max(0, nextEntries.length - 1))
+    setEntries(nextEntries)
+    setSelectedIndex(nextSelectedIndex)
+    setCheckedEntryIndexes(nextEntries.length ? [nextSelectedIndex] : [])
+    setNotice({ type: 'success', message: `已直接合并 ${targetEntries.length} 条字幕。` })
+    addLog('info', `已直接合并 ${targetEntries.length} 条字幕`)
+  }
+
+  const handleAiMergeEntries = async (customInstruction = '') => {
+    if (!selectedProfileId) {
+      setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
+      return
+    }
+    if (validCheckedEntryIndexes.length < 2) {
+      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
+      return
+    }
+    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
+      setNotice({ type: 'warning', message: 'AI 合并需要勾选连续的字幕条目，请先调整勾选范围。' })
+      return
+    }
+
+    const targetIndexes = validCheckedEntryIndexes
+    const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
+    const actionLabel = AI_OPERATION_LABEL.merge
+    setIsAiProcessing(true)
+    setActiveAiLabel(actionLabel)
+    setNotice({ type: 'info', message: `${actionLabel}处理中...` })
+    try {
+      const result = await subtitleApi.processText({
+        text: buildAiStructureSourceText(targetEntries),
+        profile_id: selectedProfileId,
+        operation: 'polish',
+        custom_instruction: buildAiMergeInstruction(customInstruction),
+        system_prompt: getActiveTextSystemPrompt(),
+      })
+      const mergedText = normalizeAiMergedSubtitleText(result.text)
+      if (!mergedText) {
+        throw new Error('文本 API 没有返回可用的合并字幕')
+      }
+      const mergedEntry = buildMergedSubtitleEntry(targetEntries, mergedText)
+      const nextEntries = replaceEntriesAtIndexes(entries, targetIndexes, [mergedEntry])
+      const nextSelectedIndex = Math.min(targetIndexes[0], Math.max(0, nextEntries.length - 1))
+      setEntries(nextEntries)
+      setSelectedIndex(nextSelectedIndex)
+      setCheckedEntryIndexes(nextEntries.length ? [nextSelectedIndex] : [])
+      setNotice({ type: 'success', message: `${actionLabel}完成，已合并 ${targetEntries.length} 条字幕。` })
+      addLog('info', `${actionLabel}完成，已合并 ${targetEntries.length} 条字幕`)
+    } catch (error) {
+      const message = `${actionLabel}失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsAiProcessing(false)
+      setActiveAiLabel('')
+    }
+  }
+
+  const handleAiSplitEntry = async (customInstruction = '') => {
+    if (!selectedProfileId) {
+      setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
+      return
+    }
+    if (!selectedEntry) {
+      setNotice({ type: 'warning', message: '请先在左侧选择一条要拆分的字幕。' })
+      return
+    }
+
+    const actionLabel = AI_OPERATION_LABEL.split
+    setIsAiProcessing(true)
+    setActiveAiLabel(actionLabel)
+    setNotice({ type: 'info', message: `${actionLabel}处理中...` })
+    try {
+      const result = await subtitleApi.processText({
+        text: buildAiStructureSourceText([selectedEntry]),
+        profile_id: selectedProfileId,
+        operation: 'polish',
+        custom_instruction: buildAiSplitInstruction(customInstruction),
+        system_prompt: getActiveTextSystemPrompt(),
+      })
+      const splitTexts = parseAiSubtitleParts(result.text)
+      if (splitTexts.length < 2) {
+        throw new Error('文本 API 没有返回可用的拆分字幕')
+      }
+      const nextSplitEntries = splitSubtitleEntryByTexts(selectedEntry, splitTexts)
+      const nextEntries = replaceEntriesAtIndexes(entries, [selectedIndex], nextSplitEntries)
+      const checkedIndexes = nextSplitEntries.map((_, index) => selectedIndex + index).filter((index) => index < nextEntries.length)
+      setEntries(nextEntries)
+      setSelectedIndex(Math.min(selectedIndex, Math.max(0, nextEntries.length - 1)))
+      setCheckedEntryIndexes(checkedIndexes)
+      setNotice({ type: 'success', message: `${actionLabel}完成，已拆分为 ${nextSplitEntries.length} 条字幕。` })
+      addLog('info', `${actionLabel}完成，已拆分为 ${nextSplitEntries.length} 条字幕`)
+    } catch (error) {
+      const message = `${actionLabel}失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsAiProcessing(false)
+      setActiveAiLabel('')
+    }
+  }
+
+  const handleAiProcess = async (operation: Extract<ManualAiOperation, 'translate' | 'polish'>, customInstruction = '') => {
     if (!selectedProfileId) {
       setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
       return
@@ -1236,6 +1376,18 @@ export function StudioSubtitleWorkbench({
                     <Wand2 className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.polish ? 'AI 润色中…' : 'AI 润色'}
                   </Button>
+                  <Button variant="outline" onClick={handleDirectMergeEntries} disabled={isAiProcessing || validCheckedEntryIndexes.length < 2}>
+                    <FileText className="mr-2 size-4" />
+                    直接合并
+                  </Button>
+                  <Button variant="outline" onClick={() => openAiInstructionDialog('merge')} disabled={isAiProcessing || validCheckedEntryIndexes.length < 2 || !selectedProfileId}>
+                    <Bot className="mr-2 size-4" />
+                    {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.merge ? 'AI 合并中…' : 'AI 合并'}
+                  </Button>
+                  <Button variant="outline" onClick={() => openAiInstructionDialog('split')} disabled={isAiProcessing || !selectedEntry || !selectedProfileId}>
+                    <FileText className="mr-2 size-4" />
+                    {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.split ? 'AI 拆分中…' : 'AI 拆分'}
+                  </Button>
                 </div>
                 {!textProfiles.length && (
                   <Button variant="secondary" className="w-full" onClick={onOpenTextSettings}>
@@ -1285,12 +1437,16 @@ export function StudioSubtitleWorkbench({
               <DialogDescription>
                 {aiDialogOperation === 'translate'
                   ? '按当前范围翻译已有字幕，并保留原文对照和时间轴。'
-                  : '按当前范围润色已有字幕，只优化表达，不生成新内容。'}
+                  : aiDialogOperation === 'merge'
+                    ? '把勾选的多条字幕合成一条，合并后只保留一条时间轴。'
+                    : aiDialogOperation === 'split'
+                      ? '把当前字幕拆成多条，拆分后按原时间轴范围重新分配。'
+                      : '按当前范围润色已有字幕，只优化表达，不生成新内容。'}
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-2">
               <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                处理范围：{aiScope === 'checked' ? '已勾选字幕' : aiScope === 'current' ? '当前条字幕' : '全部字幕'}
+                处理范围：{aiDialogOperation === 'split' ? '当前条字幕' : aiDialogOperation === 'merge' ? '已勾选字幕' : aiScope === 'checked' ? '已勾选字幕' : aiScope === 'current' ? '当前条字幕' : '全部字幕'}
                 {aiDialogOperation === 'translate' ? ` · 目标语言：${TARGET_LANG_OPTIONS.find(([value]) => value === targetLanguage)?.[1] || targetLanguage}` : ''}
               </div>
               <div className="space-y-1.5">
@@ -1481,6 +1637,142 @@ function subtitleEntryTranslatedText(entry: SubtitleEntry) {
 
 function subtitleEntryPlainText(entry: SubtitleEntry) {
   return splitSubtitleLines(entry.text).all.join('\n')
+}
+
+// 合并字幕时保留第一条开始时间和最后一条结束时间，中间文本按双语结构拼接。
+function buildMergedSubtitleEntry(entries: SubtitleEntry[], overrideText?: string): SubtitleEntry {
+  const firstEntry = entries[0]
+  const lastEntry = entries[entries.length - 1] || firstEntry
+  return {
+    ...(firstEntry || { index: 1, start: '00:00:00,000', end: '00:00:00,000', text: '' }),
+    start: firstEntry?.start || '00:00:00,000',
+    end: lastEntry?.end || firstEntry?.end || firstEntry?.start || '00:00:00,000',
+    text: overrideText?.trim() || mergeSubtitleEntryTexts(entries),
+  }
+}
+
+function mergeSubtitleEntryTexts(entries: SubtitleEntry[]) {
+  const translations: string[] = []
+  const originals: string[] = []
+  for (const entry of entries) {
+    const { original, translation } = splitSubtitleByLanguage(entry.text)
+    if (translation.trim()) translations.push(translation.trim())
+    if (original.trim()) originals.push(original.trim())
+    if (!translation.trim() && !original.trim()) {
+      const plainText = subtitleEntryPlainText(entry).trim()
+      if (plainText) translations.push(plainText)
+    }
+  }
+  return joinSubtitleLines(joinSubtitleFragments(translations), joinSubtitleFragments(originals))
+}
+
+function joinSubtitleFragments(parts: string[]) {
+  return parts
+    .flatMap((part) => splitSubtitleLines(part).all)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(' ')
+}
+
+// 合并会生成一个覆盖整段的新时间轴，只允许连续选择，避免和中间字幕重叠。
+function areContinuousEntryIndexes(indexes: number[]) {
+  const sortedIndexes = Array.from(new Set(indexes)).sort((left, right) => left - right)
+  return sortedIndexes.every((index, position) => position === 0 || index === sortedIndexes[position - 1] + 1)
+}
+
+// 用一个或多个新条目替换原来的连续/非连续勾选条目，随后统一重新编号。
+function replaceEntriesAtIndexes(entries: SubtitleEntry[], targetIndexes: number[], replacementEntries: SubtitleEntry[]) {
+  const sortedIndexes = Array.from(new Set(targetIndexes)).sort((left, right) => left - right)
+  if (!sortedIndexes.length) return normalizeEntries(entries)
+  const targetSet = new Set(sortedIndexes)
+  const firstTargetIndex = sortedIndexes[0]
+  const nextEntries: SubtitleEntry[] = []
+  entries.forEach((entry, index) => {
+    if (index === firstTargetIndex) {
+      nextEntries.push(...replacementEntries)
+    }
+    if (!targetSet.has(index)) {
+      nextEntries.push(entry)
+    }
+  })
+  return normalizeEntries(nextEntries)
+}
+
+// 给 AI 的结构化输入带上序号，便于模型理解多条字幕边界，但返回时不要求保留编号。
+function buildAiStructureSourceText(entries: SubtitleEntry[]) {
+  return entries
+    .map((entry, index) => {
+      const { original, translation } = splitSubtitleByLanguage(entry.text)
+      const text = joinSubtitleLines(translation || subtitleEntryPlainText(entry), original)
+      return `${index + 1}. ${text.replace(/\r?\n/g, ' / ')}`
+    })
+    .join('\n')
+}
+
+// AI 合并和拆分都会走 processText，这里用强约束避免模型输出解释或时间轴。
+function buildAiMergeInstruction(customInstruction: string) {
+  const extra = customInstruction.trim()
+  return [
+    '把输入的多条字幕合并成一条字幕。',
+    '如果包含译文和原文，请输出两行：第一行译文，第二行原文。',
+    '不要输出编号、解释、Markdown、时间轴。',
+    '不要新增原字幕没有的信息，不要漏掉关键信息。',
+    extra ? `用户具体要求：${extra}` : '',
+  ].filter(Boolean).join('\n')
+}
+
+function buildAiSplitInstruction(customInstruction: string) {
+  const extra = customInstruction.trim()
+  return [
+    '把输入的当前字幕按语义拆分成多条短字幕。',
+    '每条字幕单独一行输出；如果是双语字幕，每条用“译文 / 原文”的格式输出。',
+    '不要输出编号、解释、Markdown、时间轴。',
+    '不要拆出单字或纯标点，尽量保持每条信息完整。',
+    extra ? `用户具体要求：${extra}` : '',
+  ].filter(Boolean).join('\n')
+}
+
+function normalizeAiMergedSubtitleText(text: string) {
+  const parts = parseAiSubtitleParts(text)
+  if (!parts.length) return ''
+  if (parts.length === 1) return parts[0]
+  return parts.join('\n')
+}
+
+// 兼容模型返回 Markdown、编号列表、普通多行文本，并过滤时间轴/纯编号。
+function parseAiSubtitleParts(text: string) {
+  const cleanedText = String(text || '')
+    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```(?:json|text|srt)?/gi, '').replace(/```/g, ''))
+    .replace(/\r\n/g, '\n')
+  const lines = cleanedText
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)、]|["“”'])\s*/, '').replace(/["“”']$/g, '').trim())
+    .filter((line) => line && !/^第?\d+\s*条[:：]?$/.test(line) && !/^\d+$/.test(line) && !/-->|^\d{1,2}:\d{2}/.test(line))
+  const uniqueLines: string[] = []
+  for (const line of lines) {
+    const normalized = cleanSubtitleTextForDisplay(line.replace(/\s+\/\s+/g, '\n'))
+    if (normalized && !uniqueLines.includes(normalized)) uniqueLines.push(normalized)
+  }
+  return uniqueLines
+}
+
+// AI 拆分只改变当前条内部的文本和时间分段，不挪动前后字幕时间轴。
+function splitSubtitleEntryByTexts(entry: SubtitleEntry, texts: string[]) {
+  const startMs = timeToMs(entry.start)
+  const endMs = Math.max(startMs + texts.length, timeToMs(entry.end))
+  const duration = Math.max(texts.length, endMs - startMs)
+  return texts.map((text, index) => {
+    const partStart = startMs + Math.round((duration * index) / texts.length)
+    const partEnd = index === texts.length - 1
+      ? endMs
+      : startMs + Math.round((duration * (index + 1)) / texts.length)
+    return {
+      ...entry,
+      start: msToTime(partStart),
+      end: msToTime(Math.max(partStart + 1, partEnd)),
+      text,
+    }
+  })
 }
 
 function subtitleTimeOverlapScore(left: SubtitleEntry, right: SubtitleEntry) {
