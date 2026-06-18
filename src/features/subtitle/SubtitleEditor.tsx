@@ -3,6 +3,7 @@
 // 交互重做：语言/字号/位置/主色 + 实时预览露出，字体/描边/阴影/一键策略收进高级折叠
 
 import { useEffect, useMemo, useState } from 'react'
+import { Check, ChevronDown, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { SubtitlePreset } from '@/types'
@@ -10,7 +11,9 @@ import { useTaskStore } from '@/stores/taskStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 import { TextField, SelectField, SegmentedField, SliderField, ColorField, SwitchField, PositionGrid, type FieldOption } from '@/components/fields'
 
@@ -21,7 +24,10 @@ type SubtitlePosition = SubtitlePreset['position']
 type SubtitlePresetForm = Omit<SubtitlePreset, 'id'>
 
 /** 字体授权类型 */
-type FontLicenseKind = 'free' | 'system' | 'paid'
+type FontLicenseKind = 'free' | 'commercial' | 'system'
+
+/** 字体筛选类型 */
+type FontFilterKind = 'all' | FontLicenseKind
 
 /** 字体库条目；这里只保存字体名，不内置或分发字体文件 */
 type FontPreset = {
@@ -29,6 +35,7 @@ type FontPreset = {
   family: string
   license: FontLicenseKind
   note: string
+  aliases?: string[]
 }
 
 /** 可选语言配置 */
@@ -40,8 +47,8 @@ const LANGUAGE_OPTIONS: FieldOption[] = [
 /** 字体授权标签样式 */
 const FONT_LICENSE_META: Record<FontLicenseKind, { label: string; className: string }> = {
   free: { label: '免费可商用', className: 'border-success/40 bg-success/10 text-success' },
+  commercial: { label: '商业字体', className: 'border-warning/50 bg-warning/10 text-warning' },
   system: { label: '随系统授权', className: 'border-info/40 bg-info/10 text-info' },
-  paid: { label: '需商用授权', className: 'border-warning/50 bg-warning/10 text-warning' },
 }
 
 /** 字体分组；实际渲染取决于本机是否安装对应字体 */
@@ -72,6 +79,24 @@ const FONT_GROUPS: Array<{ title: string; description: string; fonts: FontPreset
     ],
   },
   {
+    title: '商业字体 / 需授权',
+    description: '软件内可以直接选择；公开视频、商单或账号运营发布前请自行确认授权。',
+    fonts: [
+      { name: '方正兰亭黑', family: '方正兰亭黑', license: 'commercial', note: '方正系商业字体，常见安装名也可能是 FZLanTingHei', aliases: ['FZLanTingHei'] },
+      { name: '方正黑体', family: '方正黑体', license: 'commercial', note: '方正系商业字体，常见安装名也可能是 FZHei-B01', aliases: ['FZHei-B01'] },
+      { name: '方正综艺', family: '方正综艺', license: 'commercial', note: '方正标题字体，安装名可能带简体/繁体后缀', aliases: ['FZZongYi-M05'] },
+      { name: '汉仪旗黑', family: '汉仪旗黑', license: 'commercial', note: '汉仪系商业字体，安装名可能带 W 或版本后缀', aliases: ['HYQiHei'] },
+      { name: '汉仪中黑', family: '汉仪中黑', license: 'commercial', note: '汉仪系商业字体，安装名可能带 W 或版本后缀', aliases: ['HYZhongHei'] },
+      { name: '汉仪雅酷黑', family: '汉仪雅酷黑', license: 'commercial', note: '汉仪系商业字体，安装名可能带 W 或版本后缀', aliases: ['HYYaKuHei'] },
+      { name: '造字工房悦黑', family: '造字工房悦黑', license: 'commercial', note: '造字工房商业字体，按安装后的字体全名为准', aliases: ['ZaoZiGongFangYueHei'] },
+      { name: '造字工房朗倩', family: '造字工房朗倩', license: 'commercial', note: '造字工房商业字体，按安装后的字体全名为准', aliases: ['ZaoZiGongFangLangQian'] },
+      { name: '华康黑体', family: '华康黑体', license: 'commercial', note: '华康系商业字体，安装名可能是 DFHei 或 DFPHei', aliases: ['DFHei', 'DFPHei'] },
+      { name: '蒙纳黑体', family: '蒙纳黑体', license: 'commercial', note: '蒙纳系商业字体，按安装后的字体全名为准', aliases: ['MHei'] },
+      { name: '文鼎黑体', family: '文鼎黑体', license: 'commercial', note: '文鼎系商业字体，按安装后的字体全名为准', aliases: ['AR Hei'] },
+      { name: '字魂字体', family: '字魂字体', license: 'commercial', note: '字魂字体需按套餐授权，建议输入已安装字体的完整名称', aliases: ['ZiHun'] },
+    ],
+  },
+  {
     title: '系统自带 / 随系统授权',
     description: '通常不能复制分发字体文件；用来烧录本机视频前请确认系统或软件授权。',
     fonts: [
@@ -90,26 +115,91 @@ const FONT_GROUPS: Array<{ title: string; description: string; fonts: FontPreset
       { name: 'Malgun Gothic', family: 'Malgun Gothic', license: 'system', note: 'Windows 韩文字体' },
     ],
   },
-  {
-    title: '商业字体 / 需授权',
-    description: '只提供常见字体名入口；用于商单、账号运营或公开视频前应购买或确认授权。',
-    fonts: [
-      { name: '方正兰亭黑', family: 'FZLanTingHei', license: 'paid', note: '方正系商业字体' },
-      { name: '方正黑体', family: 'FZHei-B01', license: 'paid', note: '方正系商业字体' },
-      { name: '方正综艺', family: 'FZZongYi-M05', license: 'paid', note: '方正标题字体' },
-      { name: '汉仪旗黑', family: 'HYQiHei', license: 'paid', note: '汉仪系商业字体' },
-      { name: '汉仪中黑', family: 'HYZhongHei', license: 'paid', note: '汉仪系商业字体' },
-      { name: '汉仪雅酷黑', family: 'HYYaKuHei', license: 'paid', note: '汉仪系商业字体' },
-      { name: '造字工房悦黑', family: 'ZaoZiGongFangYueHei', license: 'paid', note: '造字工房商业字体' },
-      { name: '造字工房朗倩', family: 'ZaoZiGongFangLangQian', license: 'paid', note: '造字工房商业字体' },
-      { name: '华康黑体', family: 'DFHei', license: 'paid', note: '华康系商业字体' },
-      { name: '蒙纳黑体', family: 'MHei', license: 'paid', note: '蒙纳系商业字体' },
-      { name: '文鼎黑体', family: 'AR Hei', license: 'paid', note: '文鼎系商业字体' },
-      { name: '字魂字体', family: 'ZiHun', license: 'paid', note: '字魂字体需按套餐授权' },
-    ],
-  },
 ]
 const FONT_LIBRARY = FONT_GROUPS.flatMap((group) => group.fonts)
+
+/** 字体列表筛选 */
+const FONT_FILTER_OPTIONS: FieldOption[] = [['all', '全部'], ['free', '免费'], ['commercial', '商业'], ['system', '系统']]
+
+/** 预览备用字体，避免目标字体不存在时右侧预览空白或只显示方块 */
+const FONT_FALLBACKS = ['Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'Source Han Sans SC', 'SimHei', 'Arial', 'sans-serif']
+
+/** 通用 CSS 字体族，不需要加引号 */
+const GENERIC_FONT_FAMILIES = new Set(['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui'])
+
+/** 字体名称归一化，用于查找和检测缓存 */
+function fontKey(family: string) {
+  return family.trim().toLowerCase()
+}
+
+/** 为 CSS font-family 安全加引号，处理中文、空格和引号 */
+function cssFontName(family: string) {
+  const clean = family.trim()
+  if (!clean) return ''
+  if (GENERIC_FONT_FAMILIES.has(clean.toLowerCase())) return clean
+  return `"${clean.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+/** 生成带中文 fallback 的字体栈，避免预览因为目标字体缺失而不可读 */
+function buildCssFontFamily(family: string) {
+  const names = [family.trim(), ...FONT_FALLBACKS].filter(Boolean)
+  const uniqueNames = Array.from(new Set(names.map((name) => name.trim()))).filter(Boolean)
+  return uniqueNames.map(cssFontName).join(', ')
+}
+
+/** 查找字体库条目，兼容用户保存过旧别名的情况 */
+function findFontPreset(family: string) {
+  const key = fontKey(family)
+  if (!key) return undefined
+  return FONT_LIBRARY.find((font) => fontKey(font.family) === key || font.aliases?.some((alias) => fontKey(alias) === key))
+}
+
+/** 用 canvas 宽度差异粗略判断本机是否有该字体；检测不到也允许用户继续选择 */
+function detectLocalFont(family: string) {
+  const clean = family.trim()
+  if (!clean) return false
+  if (GENERIC_FONT_FAMILIES.has(clean.toLowerCase())) return true
+  if (typeof document === 'undefined') return false
+
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) return false
+
+  const sample = 'BESbswy 中文字幕预览 12345 テスト'
+  const baseFamilies = ['serif', 'sans-serif', 'monospace']
+  const measure = (fontFamily: string) => {
+    context.font = `72px ${fontFamily}`
+    return context.measureText(sample).width
+  }
+
+  return baseFamilies.some((baseFamily) => {
+    const baseWidth = measure(baseFamily)
+    const testWidth = measure(`${cssFontName(clean)}, ${baseFamily}`)
+    return Math.abs(testWidth - baseWidth) > 0.1
+  })
+}
+
+/** 检测字体列表中哪些在本机可用，辅助解释“选了但不生效”的情况 */
+function useFontAvailability(families: string[]) {
+  const familyKey = useMemo(() => Array.from(new Set(families.map(fontKey).filter(Boolean))).join('|'), [families])
+  const [availability, setAvailability] = useState<Record<string, boolean>>({})
+
+  useEffect(() => {
+    const uniqueFamilies = Array.from(new Set(families.map((family) => family.trim()).filter(Boolean)))
+    if (uniqueFamilies.length === 0) return
+    const next: Record<string, boolean> = {}
+    uniqueFamilies.forEach((family) => { next[fontKey(family)] = detectLocalFont(family) })
+    setAvailability(next)
+  }, [familyKey, families])
+
+  return availability
+}
+
+/** 读取字体检测结果，undefined 表示尚未检测 */
+function getFontAvailability(availability: Record<string, boolean>, family: string) {
+  const key = fontKey(family)
+  return key ? availability[key] : undefined
+}
 
 /** 九宫格字幕位置 */
 const POSITION_OPTIONS: Array<{ value: SubtitlePosition; label: string }> = [
@@ -172,10 +262,14 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
 
   const usesCustomLanguage = useMemo(() => !LANGUAGE_OPTIONS.some(([value]) => value === form.language), [form.language])
   const selectedLanguage = usesCustomLanguage ? 'custom' : form.language
-  const selectedFont = useMemo(
-    () => FONT_LIBRARY.find((font) => font.family.toLowerCase() === form.font_name.trim().toLowerCase()),
-    [form.font_name],
-  )
+  const selectedFont = useMemo(() => findFontPreset(form.font_name), [form.font_name])
+  const fontFamiliesToCheck = useMemo(() => {
+    const families = FONT_LIBRARY.flatMap((font) => [font.family, ...(font.aliases || [])])
+    const currentFamily = form.font_name.trim()
+    return currentFamily ? [...families, currentFamily] : families
+  }, [form.font_name])
+  const fontAvailability = useFontAvailability(fontFamiliesToCheck)
+  const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
 
   const loadPresets = async () => {
     try {
@@ -298,37 +392,21 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="font" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">字体</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
-                <div className="rounded-lg border bg-muted/20 p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm text-muted-foreground">当前字体</span>
-                    <span className="font-medium" style={{ fontFamily: form.font_name }}>{form.font_name}</span>
-                    {selectedFont ? <FontLicenseBadge license={selectedFont.license} /> : <Badge variant="outline">自定义</Badge>}
-                  </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    字体库只写入字体名称，不会安装或内置字体文件；最终渲染取决于本机是否安装该字体。
+                <FontPicker
+                  value={form.font_name}
+                  selectedFont={selectedFont}
+                  availability={fontAvailability}
+                  onChange={(fontName) => updateForm('font_name', fontName)}
+                />
+                <TextField label="手动输入字体名称" value={form.font_name} onChange={(v) => updateForm('font_name', v)} description="如果列表里的名称不匹配，请填写系统字体册或字体文件里显示的完整名称" />
+                {currentFontAvailable === false && (
+                  <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs leading-5 text-warning">
+                    当前电脑未检测到这个字体。软件仍会保存该名称；预览和导出时若系统或 ffmpeg 找不到字体，会自动回退到其他字体。
                   </p>
-                </div>
-                <TextField label="字体名称" value={form.font_name} onChange={(v) => updateForm('font_name', v)} description="可手动填写本机已安装字体名称" />
-                <div className="space-y-3">
-                  {FONT_GROUPS.map((group) => (
-                    <div key={group.title} className="space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-medium">{group.title}</p>
-                        <p className="text-xs text-muted-foreground">{group.description}</p>
-                      </div>
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                        {group.fonts.map((font) => (
-                          <FontOptionButton
-                            key={`${font.license}-${font.family}`}
-                            font={font}
-                            selected={form.font_name === font.family}
-                            onSelect={() => updateForm('font_name', font.family)}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                )}
+                <p className="text-xs leading-5 text-muted-foreground">
+                  字体库只写入字体名称，不会安装或内置字体文件。商业字体可以选择使用，但发布公开视频、商单或账号运营内容前需要自行确认授权。
+                </p>
               </AccordionContent>
             </AccordionItem>
 
@@ -371,7 +449,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
         <aside className="min-w-0">
           <div className="sticky top-2">
             <p className="mb-2 text-sm font-medium">实时预览</p>
-            <PreviewBox form={form} languageLabel={selectedLanguage === 'custom' ? customLanguage || '自定义' : selectedLanguage} />
+            <PreviewBox form={form} languageLabel={selectedLanguage === 'custom' ? customLanguage || '自定义' : selectedLanguage} fontAvailable={currentFontAvailable} />
           </div>
         </aside>
       </div>
@@ -385,13 +463,135 @@ function FontLicenseBadge({ license }: { license: FontLicenseKind }) {
   return <Badge variant="outline" className={meta.className}>{meta.label}</Badge>
 }
 
-/** 字体选择卡片 */
-function FontOptionButton({ font, selected, onSelect }: { font: FontPreset; selected: boolean; onSelect: () => void }) {
+/** 字体本机状态标签 */
+function FontAvailabilityBadge({ available }: { available?: boolean }) {
+  if (available === undefined) return null
+  return (
+    <Badge
+      variant="outline"
+      className={available ? 'border-success/40 bg-success/10 text-success' : 'border-muted-foreground/30 bg-muted text-muted-foreground'}
+    >
+      {available ? '本机可用' : '未检测到'}
+    </Badge>
+  )
+}
+
+/** 判断当前字体是否命中字体库条目 */
+function isSelectedFont(value: string, font: FontPreset) {
+  const key = fontKey(value)
+  return fontKey(font.family) === key || font.aliases?.some((alias) => fontKey(alias) === key) || false
+}
+
+/** 字体搜索匹配 */
+function matchesFontQuery(font: FontPreset, query: string) {
+  if (!query) return true
+  const haystack = [font.name, font.family, font.note, ...(font.aliases || [])].join(' ').toLowerCase()
+  return haystack.includes(query)
+}
+
+/** 字体弹出选择器 */
+function FontPicker({ value, selectedFont, availability, onChange }: {
+  value: string
+  selectedFont?: FontPreset
+  availability: Record<string, boolean>
+  onChange: (fontName: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<FontFilterKind>('all')
+  const normalizedQuery = query.trim().toLowerCase()
+  const selectedAvailability = getFontAvailability(availability, value)
+  const filteredFonts = useMemo(
+    () => FONT_LIBRARY.filter((font) => (filter === 'all' || font.license === filter) && matchesFontQuery(font, normalizedQuery)),
+    [filter, normalizedQuery],
+  )
+
+  const handleSelect = (font: FontPreset) => {
+    onChange(font.family)
+    setOpen(false)
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm text-muted-foreground">字体库</span>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {selectedFont ? <FontLicenseBadge license={selectedFont.license} /> : <Badge variant="outline">自定义</Badge>}
+          <FontAvailabilityBadge available={selectedAvailability} />
+        </div>
+      </div>
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button type="button" variant="outline" className="h-auto min-h-12 w-full justify-between px-3 py-2 text-left">
+            <span className="flex min-w-0 items-center gap-3">
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Type className="size-4" />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-medium" style={{ fontFamily: buildCssFontFamily(value) }}>
+                  {selectedFont?.name || value || '选择字体'}
+                </span>
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">{value || '未设置字体名称'}</span>
+              </span>
+            </span>
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-[620px] max-w-[calc(100vw-2rem)] p-0">
+          <div className="space-y-3 border-b p-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索字体名、别名或厂商"
+                className="pl-8"
+              />
+            </div>
+            <SegmentedField value={filter} options={FONT_FILTER_OPTIONS} onChange={(nextFilter) => setFilter(nextFilter as FontFilterKind)} />
+          </div>
+
+          <div className="max-h-[360px] overflow-y-auto p-2">
+            {filteredFonts.length > 0 ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {filteredFonts.map((font) => (
+                  <FontPickerOption
+                    key={`${font.license}-${font.family}`}
+                    font={font}
+                    selected={isSelectedFont(value, font)}
+                    available={getFontAvailability(availability, font.family)}
+                    onSelect={() => handleSelect(font)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">
+                没有匹配的字体，可以在下方手动输入字体名称。
+              </div>
+            )}
+          </div>
+
+          <div className="border-t px-3 py-2 text-xs leading-5 text-muted-foreground">
+            商业字体不会被禁用；这里保存的是字体名称，真正生效取决于本机是否安装以及导出环境是否能找到该字体。
+          </div>
+        </PopoverContent>
+      </Popover>
+    </div>
+  )
+}
+
+/** 字体选择弹层条目 */
+function FontPickerOption({ font, selected, available, onSelect }: {
+  font: FontPreset
+  selected: boolean
+  available?: boolean
+  onSelect: () => void
+}) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      style={{ fontFamily: font.family }}
+      style={{ fontFamily: buildCssFontFamily(font.family) }}
       className={cn(
         'min-h-24 rounded-lg border bg-card p-3 text-left text-xs transition-colors hover:border-primary/50 hover:bg-primary/5',
         selected ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground',
@@ -400,17 +600,20 @@ function FontOptionButton({ font, selected, onSelect }: { font: FontPreset; sele
       <span className="flex items-start justify-between gap-2">
         <span className="min-w-0">
           <span className="block truncate text-sm font-medium">{font.name}</span>
-          <span className="mt-0.5 block truncate font-mono text-[11px] opacity-75">{font.family}</span>
+          <span className="mt-0.5 block truncate font-mono text-[11px] opacity-75">
+            {font.family}{font.aliases?.length ? ` / ${font.aliases[0]}` : ''}
+          </span>
         </span>
-        <FontLicenseBadge license={font.license} />
+        {selected ? <Check className="size-4 shrink-0" /> : <FontLicenseBadge license={font.license} />}
       </span>
       <span className="mt-2 line-clamp-2 block leading-snug opacity-80">{font.note}</span>
+      <span className="mt-2 block"><FontAvailabilityBadge available={available} /></span>
     </button>
   )
 }
 
 /** 预览框 */
-function PreviewBox({ form, languageLabel }: { form: SubtitlePresetForm; languageLabel: string }) {
+function PreviewBox({ form, languageLabel, fontAvailable }: { form: SubtitlePresetForm; languageLabel: string; fontAvailable?: boolean }) {
   const previewFontSize = Math.max(14, Math.min(30, Number(form.font_size) * 0.44))
   const secondaryPreviewFontSize = Math.max(12, Math.min(28, Number(form.secondary_font_size || form.font_size) * 0.44))
   const backgroundAlpha = Math.max(0, Math.min(255, Number(form.background_alpha) || 0))
@@ -422,12 +625,17 @@ function PreviewBox({ form, languageLabel }: { form: SubtitlePresetForm; languag
     <div className="space-y-3">
       <div className="aspect-[9/16] max-h-[460px] overflow-hidden rounded-lg border border-border-bright bg-[linear-gradient(145deg,#0f172a_0%,#1d4ed8_45%,#7c2d12_100%)]">
         <div className={`flex h-full p-5 ${positionClass}`}>
-          <div className="max-w-full rounded px-3 py-2 text-center leading-tight" style={{ background: previewBackground, color: form.font_color, fontFamily: form.font_name, fontSize: `${previewFontSize}px`, textShadow: previewTextShadow, lineHeight: 1.18 }}>
+          <div className="max-w-full rounded px-3 py-2 text-center leading-tight" style={{ background: previewBackground, color: form.font_color, fontFamily: buildCssFontFamily(form.font_name), fontSize: `${previewFontSize}px`, textShadow: previewTextShadow, lineHeight: 1.18 }}>
             <div className="break-words">主字幕预览文本</div>
             {form.line_mode === 'double' && <div className="mt-1 break-words" style={{ color: form.secondary_color, fontSize: `${secondaryPreviewFontSize}px` }}>Second subtitle line</div>}
           </div>
         </div>
       </div>
+      {fontAvailable === false && (
+        <div className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs leading-5 text-warning">
+          未检测到当前字体，预览已使用备用字体显示；导出前请确认本机已安装该字体。
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
         <PreviewStat label="语言" value={languageLabel} />
         <PreviewStat label="位置" value={positionLabel(form.position)} />
