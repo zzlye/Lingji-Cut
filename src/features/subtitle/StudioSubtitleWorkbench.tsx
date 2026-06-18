@@ -135,9 +135,11 @@ export function StudioSubtitleWorkbench({
   const [isRecognizingSegment, setIsRecognizingSegment] = useState(false)
   const [pendingRecognizedSegment, setPendingRecognizedSegment] = useState<PendingRecognizedSegment | null>(null)
   const [restoredDraftKey, setRestoredDraftKey] = useState('')
+  const [pendingRestoreScrollTop, setPendingRestoreScrollTop] = useState<number | null>(null)
   const autoLoadKeyRef = useRef('')
   const listScrollFrameRef = useRef<number | null>(null)
   const subtitleListScrollRef = useRef<HTMLDivElement | null>(null)
+  const latestListScrollTopRef = useRef(0)
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const previewAutoplayTokenRef = useRef(0)
   const previewPlayedTokenRef = useRef(0)
@@ -236,7 +238,7 @@ export function StudioSubtitleWorkbench({
   latestDraftRef.current = draft
   latestSuggestedSubtitleFileRef.current = suggestedSubtitleFile
 
-  const saveCurrentDraft = useCallback((scrollTop = listScrollTop) => {
+  const saveCurrentDraft = useCallback((scrollTop = latestListScrollTopRef.current) => {
     if (!draftKey || restoredDraftKey !== draftKey) return
     const hasDraftContent = entries.length > 0
       || Boolean(entryKeyword)
@@ -265,7 +267,6 @@ export function StudioSubtitleWorkbench({
     selectedIndex,
     checkedEntryIndexes,
     entryKeyword,
-    listScrollTop,
     saveSubtitleDraft,
   ])
 
@@ -281,6 +282,8 @@ export function StudioSubtitleWorkbench({
       setCheckedEntryIndexes([])
       setEntryKeyword('')
       setListScrollTop(0)
+      latestListScrollTopRef.current = 0
+      setPendingRestoreScrollTop(0)
       setRestoredDraftKey(draftKey)
       return
     }
@@ -292,24 +295,31 @@ export function StudioSubtitleWorkbench({
     setCheckedEntryIndexes(currentDraft.checkedEntryIndexes.filter((index) => index >= 0 && index < currentDraft.entries.length))
     setEntryKeyword(currentDraft.entryKeyword)
     setListScrollTop(currentDraft.listScrollTop)
+    latestListScrollTopRef.current = currentDraft.listScrollTop
+    setPendingRestoreScrollTop(currentDraft.listScrollTop)
     setRestoredDraftKey(draftKey)
   // 只在任务草稿 key 变化时恢复，避免同一任务后端刷新路径后覆盖用户正在编辑的内容。
   }, [draftKey])
 
   useEffect(() => {
+    if (!draftKey || restoredDraftKey !== draftKey) return
     saveCurrentDraft()
   }, [saveCurrentDraft])
 
   useEffect(() => {
-    return () => saveCurrentDraft(subtitleListScrollRef.current?.scrollTop ?? listScrollTop)
-  }, [saveCurrentDraft, listScrollTop])
+    return () => saveCurrentDraft(subtitleListScrollRef.current?.scrollTop ?? latestListScrollTopRef.current)
+  }, [saveCurrentDraft])
 
   useEffect(() => {
-    if (restoredDraftKey !== draftKey) return
+    if (restoredDraftKey !== draftKey || pendingRestoreScrollTop === null) return
     const container = subtitleListScrollRef.current
-    if (!container || container.scrollTop === listScrollTop) return
-    container.scrollTop = listScrollTop
-  }, [draftKey, restoredDraftKey, listScrollTop, entries.length])
+    if (!container) return
+    if (container.scrollTop !== pendingRestoreScrollTop) {
+      container.scrollTop = pendingRestoreScrollTop
+    }
+    latestListScrollTopRef.current = pendingRestoreScrollTop
+    setPendingRestoreScrollTop(null)
+  }, [draftKey, restoredDraftKey, pendingRestoreScrollTop, entries.length])
 
   function createPreviewSegment(entry: SubtitleEntry, entryIndex: number): PreviewSegment {
     const sessionId = previewSessionIdRef.current + 1
@@ -778,6 +788,7 @@ export function StudioSubtitleWorkbench({
   const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
     const nextScrollTop = event.currentTarget.scrollTop
     subtitleListScrollRef.current = event.currentTarget
+    latestListScrollTopRef.current = nextScrollTop
     if (listScrollFrameRef.current !== null) {
       cancelAnimationFrame(listScrollFrameRef.current)
     }
