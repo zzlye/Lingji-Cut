@@ -17,13 +17,9 @@ APP_ROOT = DATA_ROOT
 CONFIG_DIR = os.path.join(DATA_ROOT, "data")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
 
-# 项目目录下自动创建的业务子目录
+# 项目目录下只自动创建 videos；每个视频自己的 downloads/output/exports 会建在 videos/<视频项目>/ 下。
 PROJECT_SUBDIRS = {
-    "data_dir": "data",
     "videos_dir": "videos",
-    "downloads_dir": "downloads",
-    "output_dir": "output",
-    "exports_dir": "exports",
 }
 
 WORKSPACE_STAGE_DIRS = {
@@ -81,7 +77,7 @@ def ensure_project_dirs(project_root: str | None = None) -> dict[str, str]:
     root = normalize_project_root(project_root) if project_root else load_project_root()
     os.makedirs(root, exist_ok=True)
 
-    paths = {"project_root": root, "default_project_root": APP_ROOT}
+    paths = _build_project_paths(root)
     for key, dirname in PROJECT_SUBDIRS.items():
         path = os.path.join(root, dirname)
         os.makedirs(path, exist_ok=True)
@@ -162,6 +158,12 @@ def _build_project_paths(project_root: str) -> dict[str, str]:
     paths = {"project_root": root, "default_project_root": APP_ROOT}
     for key, dirname in PROJECT_SUBDIRS.items():
         paths[key] = os.path.join(root, dirname)
+    videos_dir = paths["videos_dir"]
+    # 旧字段保留给少量兜底逻辑使用，但不再映射到项目根目录的公共子文件夹。
+    paths["downloads_dir"] = videos_dir
+    paths["output_dir"] = videos_dir
+    paths["exports_dir"] = videos_dir
+    paths["data_dir"] = CONFIG_DIR
     return paths
 
 

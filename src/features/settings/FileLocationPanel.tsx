@@ -1,12 +1,11 @@
 // src/features/settings/FileLocationPanel.tsx
-// 文件位置设置 - 项目目录、自动化工具状态、子目录预览（从 SettingsCenter 提取并 shadcn 化）
-import { useEffect, useMemo, useState } from 'react'
+// 文件位置设置 - 项目目录、自动化工具状态、视频目录预览（从 SettingsCenter 提取并 shadcn 化）
+import { useEffect, useState } from 'react'
 import { FolderOpen, RotateCcw, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
-import { cn } from '@/lib/utils'
 import { settingsApi } from '@/lib/api'
 import { useLogStore } from '@/stores/logStore'
 import type { ProjectPaths, ToolStatusMap } from '@/types'
@@ -18,16 +17,6 @@ export function FileLocationPanel() {
   const [isSaving, setIsSaving] = useState(false)
   const [isLoadingTools, setIsLoadingTools] = useState(false)
   const addLog = useLogStore((s) => s.addLog)
-
-  const subDirectories = useMemo(() => {
-    if (!paths) return []
-    return [
-      ['下载目录', paths.downloads_dir],
-      ['处理中间文件', paths.output_dir],
-      ['导出成品', paths.exports_dir],
-      ['数据目录', paths.data_dir],
-    ] as const
-  }, [paths])
 
   const loadPaths = async () => {
     try {
@@ -103,13 +92,13 @@ export function FileLocationPanel() {
     <div className="space-y-5 p-6">
       <div>
         <h2 className="text-base font-semibold">文件位置</h2>
-        <p className="text-sm text-muted-foreground">设置一键流程使用的项目目录，保存后自动创建业务子文件夹。</p>
+        <p className="text-sm text-muted-foreground">设置一键流程使用的项目目录，保存后只会自动创建 videos 文件夹。</p>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle className="text-sm">项目目录</CardTitle>
-          <CardDescription>下载、字幕、配音、中间文件和导出都会按此目录归档。</CardDescription>
+          <CardDescription>每个视频都会归档到 videos 里的独立文件夹。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap gap-2">
@@ -117,7 +106,7 @@ export function FileLocationPanel() {
             <Button variant="outline" className="h-10 gap-1.5" onClick={handleSelectDirectory}><FolderOpen className="size-4" /> 选择文件夹</Button>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button className="h-10" onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中…' : '保存并创建目录'}</Button>
+            <Button className="h-10" onClick={handleSave} disabled={isSaving}>{isSaving ? '保存中…' : '保存'}</Button>
             <Button variant="outline" className="h-10 gap-1.5" onClick={handleReset} disabled={isSaving}><RotateCcw className="size-4" /> 恢复默认</Button>
             <Button variant="ghost" className="h-10 gap-1.5" onClick={loadPaths}><RefreshCw className="size-4" /> 重新读取</Button>
           </div>
@@ -149,19 +138,19 @@ export function FileLocationPanel() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">自动子目录</CardTitle>
-            <CardDescription>保存时创建，后续任务直接使用。</CardDescription>
+            <CardTitle className="text-sm">视频目录</CardTitle>
+            <CardDescription>所有视频项目都会放在这里。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            {subDirectories.length > 0 ? subDirectories.map(([label, info]) => (
-              <div key={label} className="rounded-md border bg-card px-3 py-2">
+            {paths?.videos_dir ? (
+              <div className="rounded-md border bg-card px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium">{label}</span>
-                  <span className={cn('text-[11px]', info.exists ? 'text-success' : 'text-warning')}>{info.exists ? '已创建' : '保存后创建'}</span>
+                  <span className="text-xs font-medium">videos</span>
+                  <span className={paths.videos_dir.exists ? 'text-[11px] text-success' : 'text-[11px] text-warning'}>{paths.videos_dir.exists ? '已创建' : '保存后创建'}</span>
                 </div>
-                <p className="mt-1 break-all text-xs text-muted-foreground select-text">{info.path}</p>
+                <p className="mt-1 break-all text-xs text-muted-foreground select-text">{paths.videos_dir.path}</p>
               </div>
-            )) : <p className="text-xs text-muted-foreground">正在读取项目目录…</p>}
+            ) : <p className="text-xs text-muted-foreground">正在读取项目目录…</p>}
           </CardContent>
         </Card>
       </div>

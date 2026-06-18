@@ -109,6 +109,7 @@ export interface PathInfo {
 export interface ProjectPaths {
   project_root: PathInfo
   default_project_root: PathInfo
+  videos_dir: PathInfo
   data_dir: PathInfo
   downloads_dir: PathInfo
   output_dir: PathInfo

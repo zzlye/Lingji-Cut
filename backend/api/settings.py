@@ -1,5 +1,5 @@
 # backend/api/settings.py
-# 设置 API 路由 - 提供项目文件夹保存和子目录创建
+# 设置 API 路由 - 提供项目文件夹保存和 videos 目录创建
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -39,7 +39,7 @@ def _tool_status_to_response(status: ToolStatus) -> ToolStatusResponse:
 
 @router.get("/paths")
 async def get_paths():
-    """获取项目目录，并确保常用子文件夹自动创建"""
+    """获取项目目录，并确保 videos 文件夹自动创建"""
     return get_project_paths(create=True)
 
 
@@ -54,7 +54,7 @@ async def get_tools():
 
 @router.put("/paths")
 async def update_paths(request: ProjectPathUpdate):
-    """保存项目目录，并自动创建业务子文件夹"""
+    """保存项目目录，并自动创建 videos 文件夹"""
     try:
         save_project_root(request.project_root)
         return get_project_paths(create=True)
