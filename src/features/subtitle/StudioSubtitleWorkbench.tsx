@@ -2,7 +2,7 @@
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 翻译/润色，并保留时间轴
 
 import { startTransition, type UIEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronLeft, ChevronRight, FileText, Languages, Play, Search, Settings2, Wand2 } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, Expand, FileText, Languages, Play, Search, Settings2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { getActiveTextSystemPrompt, loadActiveTextPromptPreset } from '@/lib/textPromptPresets'
 import { useAutomationStore } from '@/stores/automationStore'
@@ -31,6 +31,9 @@ const AI_SCOPE_OPTIONS: FieldOption[] = [['checked', '已勾选'], ['current', '
 const SUBTITLE_LIST_ROW_HEIGHT = 64
 const SUBTITLE_LIST_OVERSCAN = 8
 const SUBTITLE_LIST_VISIBLE_COUNT = 20
+const SUBTITLE_MODAL_ROW_HEIGHT = 76
+const SUBTITLE_MODAL_OVERSCAN = 8
+const SUBTITLE_MODAL_VISIBLE_COUNT = 11
 type ManualAiOperation = Extract<SubtitleTextOperation, 'translate' | 'polish'> | 'merge' | 'split'
 
 const AI_OPERATION_LABEL: Record<ManualAiOperation, string> = {
@@ -129,7 +132,9 @@ export function StudioSubtitleWorkbench({
   const [resolvedJobSubtitlePaths, setResolvedJobSubtitlePaths] = useState<Record<string, string>>({})
   const [showPasteImport, setShowPasteImport] = useState(false)
   const [showAdvancedOutput, setShowAdvancedOutput] = useState(false)
+  const [isSubtitleListDialogOpen, setIsSubtitleListDialogOpen] = useState(false)
   const [listScrollTop, setListScrollTop] = useState(0)
+  const [dialogListScrollTop, setDialogListScrollTop] = useState(0)
   const [previewSegment, setPreviewSegment] = useState<PreviewSegment | null>(null)
   const [previewError, setPreviewError] = useState('')
   const [isRecognizingSegment, setIsRecognizingSegment] = useState(false)
@@ -147,6 +152,7 @@ export function StudioSubtitleWorkbench({
   const previewStopAtRef = useRef<number | null>(null)
   const previewFrameRef = useRef<number | null>(null)
   const previewSessionIdRef = useRef(0)
+  const subtitleDialogListScrollRef = useRef<HTMLDivElement | null>(null)
   const latestDraftRef = useRef<typeof draft>(null)
   const latestSuggestedSubtitleFileRef = useRef('')
   const deferredEntryKeyword = useDeferredValue(entryKeyword.trim())
@@ -154,6 +160,7 @@ export function StudioSubtitleWorkbench({
   const selectedEntry = entries[selectedIndex] || null
   const playingEntry = previewSegment?.entry || null
   const playingEntryIndex = previewSegment?.entryIndex ?? selectedIndex
+  const playingEntryParts = useMemo(() => splitSubtitleByLanguage(playingEntry?.text || ''), [playingEntry?.text])
   const selectedEntryParts = useMemo(() => splitSubtitleByLanguage(selectedEntry?.text || ''), [selectedEntry?.text])
   const selectedOriginalText = selectedEntryParts.original
   const selectedTranslationText = selectedEntryParts.translation
@@ -231,6 +238,18 @@ export function StudioSubtitleWorkbench({
   const visibleEntryIndexes = filteredEntryIndexes.slice(visibleListStart, visibleListEnd)
   const listTopSpacer = visibleListStart * SUBTITLE_LIST_ROW_HEIGHT
   const listBottomSpacer = Math.max(0, (filteredEntryIndexes.length - visibleListEnd) * SUBTITLE_LIST_ROW_HEIGHT)
+  const maxDialogListStart = Math.max(0, filteredEntryIndexes.length - SUBTITLE_MODAL_VISIBLE_COUNT)
+  const dialogListStart = Math.min(
+    maxDialogListStart,
+    Math.max(0, Math.floor(dialogListScrollTop / SUBTITLE_MODAL_ROW_HEIGHT) - SUBTITLE_MODAL_OVERSCAN),
+  )
+  const dialogListEnd = Math.min(
+    filteredEntryIndexes.length,
+    dialogListStart + SUBTITLE_MODAL_VISIBLE_COUNT + SUBTITLE_MODAL_OVERSCAN * 2,
+  )
+  const dialogEntryIndexes = filteredEntryIndexes.slice(dialogListStart, dialogListEnd)
+  const dialogTopSpacer = dialogListStart * SUBTITLE_MODAL_ROW_HEIGHT
+  const dialogBottomSpacer = Math.max(0, (filteredEntryIndexes.length - dialogListEnd) * SUBTITLE_MODAL_ROW_HEIGHT)
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
   const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || Boolean(selectedJobSourceVideo))
@@ -320,6 +339,17 @@ export function StudioSubtitleWorkbench({
     latestListScrollTopRef.current = pendingRestoreScrollTop
     setPendingRestoreScrollTop(null)
   }, [draftKey, restoredDraftKey, pendingRestoreScrollTop, entries.length])
+
+  useEffect(() => {
+    if (!isSubtitleListDialogOpen || selectedIndex < 0) return
+    const visiblePosition = filteredEntryIndexes.findIndex((index) => index === selectedIndex)
+    if (visiblePosition < 0) return
+    const nextScrollTop = Math.max(0, visiblePosition * SUBTITLE_MODAL_ROW_HEIGHT - SUBTITLE_MODAL_ROW_HEIGHT * 3)
+    setDialogListScrollTop(nextScrollTop)
+    if (subtitleDialogListScrollRef.current) {
+      subtitleDialogListScrollRef.current.scrollTop = nextScrollTop
+    }
+  }, [isSubtitleListDialogOpen, selectedIndex, filteredEntryIndexes])
 
   function createPreviewSegment(entry: SubtitleEntry, entryIndex: number): PreviewSegment {
     const sessionId = previewSessionIdRef.current + 1
@@ -451,11 +481,12 @@ export function StudioSubtitleWorkbench({
       previewSegment.entryIndex === selectedIndex
       && previewSegment.entry.start === selectedEntry.start
       && previewSegment.entry.end === selectedEntry.end
+      && previewSegment.entry.text === selectedEntry.text
     ) {
       return
     }
     setPreviewSegment(createPreviewSegment(selectedEntry, selectedIndex))
-  }, [previewSegment, selectedEntry?.end, selectedEntry?.start, selectedIndex])
+  }, [previewSegment, selectedEntry?.end, selectedEntry?.start, selectedEntry?.text, selectedIndex])
 
   useEffect(() => {
     if (!previewSegment || !previewVideoUrl) return
@@ -727,12 +758,29 @@ export function StudioSubtitleWorkbench({
     selectEntryForPreview(filteredEntryIndexes[nextPosition])
   }
 
+  const scrollSubtitleListToEntry = (index: number) => {
+    const visiblePosition = filteredEntryIndexes.findIndex((entryIndex) => entryIndex === index)
+    if (visiblePosition < 0) return
+    const nextScrollTop = Math.max(0, visiblePosition * SUBTITLE_LIST_ROW_HEIGHT - SUBTITLE_LIST_ROW_HEIGHT * 3)
+    latestListScrollTopRef.current = nextScrollTop
+    setListScrollTop(nextScrollTop)
+    if (subtitleListScrollRef.current) {
+      subtitleListScrollRef.current.scrollTop = nextScrollTop
+    }
+  }
+
   const selectEntryForPreview = (index: number) => {
     setSelectedIndex(index)
     const entry = entries[index]
     if (previewSegment && entry) {
       setPreviewSegment(createPreviewSegment(entry, index))
     }
+  }
+
+  const jumpToEntryFromDialog = (index: number) => {
+    selectEntryForPreview(index)
+    scrollSubtitleListToEntry(index)
+    setIsSubtitleListDialogOpen(false)
   }
 
   const previewSubtitleEntry = (entry?: SubtitleEntry | null, entryIndex = selectedIndex) => {
@@ -797,6 +845,10 @@ export function StudioSubtitleWorkbench({
       startTransition(() => setListScrollTop(nextScrollTop))
       listScrollFrameRef.current = null
     })
+  }
+
+  const handleDialogListScroll = (event: UIEvent<HTMLDivElement>) => {
+    setDialogListScrollTop(event.currentTarget.scrollTop)
   }
 
   const toggleEntryChecked = (index: number, checked?: boolean) => {
@@ -1390,9 +1442,15 @@ export function StudioSubtitleWorkbench({
                   <h3 className="text-sm font-medium">字幕列表</h3>
                   <p className="mt-1 text-xs text-muted-foreground">可单条选择，也可勾选后批量 AI 处理。</p>
                 </div>
-                <Button variant="outline" size="sm" onClick={toggleVisibleChecked} disabled={!filteredEntryIndexes.length}>
-                  {allVisibleChecked ? '取消全选' : '全选'}
-                </Button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <Button variant="outline" size="sm" onClick={() => setIsSubtitleListDialogOpen(true)} disabled={!entries.length}>
+                    <Expand className="mr-1 size-3.5" />
+                    放大
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={toggleVisibleChecked} disabled={!filteredEntryIndexes.length}>
+                    {allVisibleChecked ? '取消全选' : '全选'}
+                  </Button>
+                </div>
               </div>
               <div className="relative mt-3">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -1605,23 +1663,35 @@ export function StudioSubtitleWorkbench({
               </DialogDescription>
             </DialogHeader>
             {playingEntry && previewVideoUrl && (
-              <video
-                key={`${previewVideoUrl}-${previewSegment?.sessionId || 0}-${playingEntryIndex}-${playingEntry.start}-${playingEntry.end}`}
-                ref={bindPreviewVideo}
-                src={previewVideoUrl}
-                className="max-h-[70vh] w-full rounded-lg bg-black"
-                controls
-                preload="metadata"
-                onPlay={handlePreviewPlay}
-                onTimeUpdate={handlePreviewTimeUpdate}
-                onEnded={() => {
-                  previewStartAtRef.current = null
-                  previewStopAtRef.current = null
-                  cancelPreviewFrame()
-                }}
-              >
-                <track kind="captions" />
-              </video>
+              <div className="relative overflow-hidden rounded-lg bg-black">
+                <video
+                  key={`${previewVideoUrl}-${previewSegment?.sessionId || 0}-${playingEntryIndex}-${playingEntry.start}-${playingEntry.end}`}
+                  ref={bindPreviewVideo}
+                  src={previewVideoUrl}
+                  className="max-h-[70vh] w-full bg-black"
+                  controls
+                  preload="metadata"
+                  onPlay={handlePreviewPlay}
+                  onTimeUpdate={handlePreviewTimeUpdate}
+                  onEnded={() => {
+                    previewStartAtRef.current = null
+                    previewStopAtRef.current = null
+                    cancelPreviewFrame()
+                  }}
+                >
+                  <track kind="captions" />
+                </video>
+                <div className="pointer-events-none absolute inset-x-4 bottom-14 flex justify-center">
+                  <div className="max-w-[92%] rounded-lg bg-black/70 px-4 py-2 text-center text-white shadow-lg ring-1 ring-white/10">
+                    <p className="text-base font-semibold leading-snug text-amber-300">
+                      {playingEntryParts.translation || subtitleEntryPlainText(playingEntry)}
+                    </p>
+                    {playingEntryParts.original && (
+                      <p className="mt-1 text-sm leading-snug text-white/90">{playingEntryParts.original}</p>
+                    )}
+                  </div>
+                </div>
+              </div>
             )}
             {pendingRecognizedSegment && (
               <div className="rounded-lg border bg-background/80 p-3">
@@ -1650,6 +1720,105 @@ export function StudioSubtitleWorkbench({
                 <Button onClick={applyRecognizedSegment}>确认应用</Button>
               </DialogFooter>
             )}
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={isSubtitleListDialogOpen} onOpenChange={setIsSubtitleListDialogOpen}>
+          <DialogContent className="grid max-h-[88vh] grid-rows-[auto_auto_minmax(0,1fr)] gap-3 sm:max-w-5xl">
+            <DialogHeader>
+              <DialogTitle>放大字幕列表</DialogTitle>
+              <DialogDescription>
+                快速搜索、勾选和定位字幕；点“播放”会直接预览对应时间段。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto]">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={entryKeyword}
+                  onChange={(event) => setEntryKeyword(event.target.value)}
+                  placeholder="搜索字幕内容、序号或时间"
+                  className="h-10 pl-9"
+                />
+              </div>
+              <Button variant="outline" onClick={toggleVisibleChecked} disabled={!filteredEntryIndexes.length}>
+                {allVisibleChecked ? '取消全选' : '全选当前结果'}
+              </Button>
+              <Button variant="outline" onClick={() => previewSubtitleEntry(selectedEntry, selectedIndex)} disabled={!selectedEntry || !previewVideoUrl}>
+                <Play className="mr-1.5 size-4" />
+                播放选中
+              </Button>
+            </div>
+            <div className="min-h-0 overflow-hidden rounded-xl border bg-muted/10">
+              <div className="flex items-center justify-between border-b px-3 py-2 text-xs text-muted-foreground">
+                <span>显示 {filteredEntryIndexes.length} / {entries.length}</span>
+                <span>已勾选 {validCheckedEntryIndexes.length}</span>
+              </div>
+              {filteredEntryIndexes.length ? (
+                <div
+                  ref={subtitleDialogListScrollRef}
+                  className="max-h-[58vh] min-h-[360px] overflow-auto p-3"
+                  onScroll={handleDialogListScroll}
+                  style={{ scrollBehavior: 'auto' }}
+                >
+                  <div style={{ height: dialogTopSpacer }} />
+                  <div className="space-y-2">
+                    {dialogEntryIndexes.map((index) => {
+                      const entry = entries[index]
+                      const lines = splitSubtitleByLanguage(entry.text)
+                      const isInvalid = timeToMs(entry.end) <= timeToMs(entry.start)
+                      const checked = validCheckedEntryIndexSet.has(index)
+                      const isSelected = selectedIndex === index
+                      return (
+                        <div
+                          key={`dialog-${entry.index}-${index}`}
+                          style={{ minHeight: SUBTITLE_MODAL_ROW_HEIGHT }}
+                          onDoubleClick={() => jumpToEntryFromDialog(index)}
+                          className={isSelected
+                            ? 'grid gap-3 rounded-xl border border-primary bg-primary/10 p-3 text-primary md:grid-cols-[auto_92px_minmax(0,1fr)_auto]'
+                            : isInvalid
+                              ? 'grid gap-3 rounded-xl border border-destructive/40 bg-background p-3 text-destructive md:grid-cols-[auto_92px_minmax(0,1fr)_auto]'
+                              : 'grid gap-3 rounded-xl border bg-background p-3 text-foreground transition-colors hover:border-primary/40 md:grid-cols-[auto_92px_minmax(0,1fr)_auto]'}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => toggleEntryChecked(index, event.target.checked)}
+                            className="mt-1 size-4 rounded border-border"
+                            aria-label={`勾选第 ${index + 1} 条字幕`}
+                          />
+                          <button type="button" className="text-left" onClick={() => selectEntryForPreview(index)} onDoubleClick={() => jumpToEntryFromDialog(index)}>
+                            <p className="text-sm font-semibold">#{index + 1}</p>
+                            <p className="mt-1 font-mono text-[11px] opacity-75">{entry.start}</p>
+                          </button>
+                          <button type="button" className="min-w-0 text-left" onClick={() => selectEntryForPreview(index)} onDoubleClick={() => jumpToEntryFromDialog(index)}>
+                            <p className="line-clamp-1 text-sm font-medium">{lines.translation || '无译文'}</p>
+                            <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{lines.original || subtitleEntryPlainText(entry) || '空字幕'}</p>
+                          </button>
+                          <Button
+                            variant={isSelected ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => {
+                              selectEntryForPreview(index)
+                              previewSubtitleEntry(entry, index)
+                            }}
+                            disabled={!previewVideoUrl}
+                          >
+                            <Play className="mr-1 size-3.5" />
+                            播放
+                          </Button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div style={{ height: dialogBottomSpacer }} />
+                </div>
+              ) : (
+                <div className="grid min-h-[360px] place-items-center p-6 text-center text-sm text-muted-foreground">
+                  没有匹配到字幕条目。
+                </div>
+              )}
+            </div>
           </DialogContent>
         </Dialog>
 
