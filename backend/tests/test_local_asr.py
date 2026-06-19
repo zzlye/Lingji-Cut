@@ -351,6 +351,46 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(merged_shield["end"], "00:01:14,400")
         self.assertEqual(merged_density["start"], "00:01:54,860")
 
+    def test_word_timestamps_keep_object_word_before_duration_break(self):
+        """时长断点前的宾语词应收进上一条，避免翻译后出现名词被甩到下一条开头"""
+        fake_module = types.ModuleType("faster_whisper")
+
+        class ObjectBoundaryWhisperModel(FakeWhisperModel):
+            def transcribe(self, video_path, **kwargs):
+                self.transcribe_calls.append({"video_path": video_path, **kwargs})
+                return [
+                    FakeSegment(0.0, 8.5, "ignored", words=[
+                        FakeWord(0.0, 0.8, " I"),
+                        FakeWord(0.8, 1.6, " need"),
+                        FakeWord(1.6, 2.4, " a"),
+                        FakeWord(2.4, 3.2, " bunch"),
+                        FakeWord(3.2, 4.0, " of"),
+                        FakeWord(4.0, 4.8, " furnaces"),
+                        FakeWord(4.8, 5.5, " to"),
+                        FakeWord(5.5, 6.6, " smelt"),
+                        FakeWord(6.6, 6.9, " cobblestone"),
+                        FakeWord(6.9, 7.2, " and"),
+                        FakeWord(7.2, 7.5, " turn"),
+                        FakeWord(7.5, 7.8, " it"),
+                        FakeWord(7.8, 8.1, " into"),
+                        FakeWord(8.1, 8.5, " stone."),
+                    ]),
+                ], FakeInfo()
+
+        fake_module.WhisperModel = ObjectBoundaryWhisperModel
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, _ = recognizer.transcribe_video(self.video_path)
+
+        texts = [entry["text"] for entry in entries]
+        self.assertEqual(texts[0], "I need a bunch of furnaces to smelt cobblestone")
+        self.assertEqual(texts[1], "and turn it into stone.")
+        self.assertEqual(entries[0]["end"], "00:00:06,900")
+        self.assertEqual(entries[1]["start"], "00:00:06,900")
+
 
     def test_word_timestamps_cap_overlong_single_word(self):
         """背景音乐导致单词时间被拉长时，按字数封顶避免字幕滞留"""

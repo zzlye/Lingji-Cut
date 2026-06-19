@@ -652,9 +652,34 @@ class LocalSpeechRecognizer:
             return True
         if len(text) < max_chars and duration < max_duration:
             return False
+        if self._should_defer_break_for_next_content_word(text, next_text, hard_limit):
+            return False
         if len(text) >= hard_limit:
             return not self._is_short_japanese_tail(next_text)
         return duration >= max_duration and not self._is_short_japanese_tail(next_text)
+
+    def _should_defer_break_for_next_content_word(self, current_text: str, next_text: str, hard_limit: int) -> bool:
+        """时长硬断前把紧邻内容词收进上一条，减少“烧制/圆石”这类割裂断句"""
+        current = " ".join(str(current_text or "").split()).strip()
+        core = self._boundary_word_core(next_text)
+        if not current or not core:
+            return False
+        if current[-1] in TERMINAL_PUNCTUATION:
+            return False
+        lowered = core.lower()
+        if lowered in LEADING_FRAGMENT_WORDS:
+            return False
+        combined_length = len(current) + 1 + len(core)
+        if combined_length > hard_limit + 16:
+            return False
+        if re.fullmatch(r"[A-Za-z][A-Za-z'-]{1,17}", core):
+            return True
+        # 中日韩短内容词也允许收入上一条，避免短名词被甩到下一条开头。
+        return bool(re.fullmatch(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{1,4}", core))
+
+    def _boundary_word_core(self, text: str) -> str:
+        """取出用于判断断句边界的词芯，忽略 Whisper 常带的前导空格和外层标点"""
+        return str(text or "").strip().strip(TERMINAL_PUNCTUATION + "\"'()[]{}“”‘’")
 
     def _is_short_japanese_tail(self, text: str) -> bool:
         """识别日语短词尾，硬断时尽量和前一句保持在同一条字幕里"""
