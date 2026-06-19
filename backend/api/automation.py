@@ -857,6 +857,7 @@ def _store_job_workspace_params(
     paths: dict[str, str],
     source_video_path: Optional[str] = None,
     cover_asset_path: Optional[str] = None,
+    source_url_asset_path: Optional[str] = None,
 ) -> None:
     """把视频工作目录写回任务参数，后续重导出和字幕页都直接按目录找资源"""
     if not job:
@@ -873,6 +874,8 @@ def _store_job_workspace_params(
         params["source_video_path"] = source_video_path
     if cover_asset_path:
         params["cover_asset_path"] = cover_asset_path
+    if source_url_asset_path:
+        params["source_url_asset_path"] = source_url_asset_path
     _set_job_params(job, params)
 
 
@@ -889,6 +892,21 @@ def _safe_cover_base_name(value: str) -> str:
     safe_name = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in str(value or "").strip())
     safe_name = safe_name.strip("._") or "thumbnail"
     return os.path.splitext(safe_name)[0]
+
+
+def _write_source_url_asset(url: str, paths: dict[str, str]) -> Optional[str]:
+    """在视频项目根目录保存原始 YouTube 链接，方便用户后续追溯素材来源"""
+    normalized = str(url or "").strip()
+    if not normalized or _is_local_video_source(normalized):
+        return None
+    workspace_dir = paths.get("workspace_dir") or paths.get("downloads_dir")
+    if not workspace_dir:
+        return None
+    os.makedirs(workspace_dir, exist_ok=True)
+    output_path = os.path.join(workspace_dir, "youtube_link.txt")
+    with open(output_path, "w", encoding="utf-8") as file:
+        file.write(f"{normalized}\n")
+    return output_path
 
 
 def _download_cover_asset(video: VideoSource, downloader: Downloader, paths: dict[str, str], output_dir: Optional[str]) -> Optional[str]:
@@ -1829,6 +1847,12 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         raise
     cover_asset_path: Optional[str] = None
     cover_warning_message: Optional[str] = None
+    source_url_asset_path: Optional[str] = None
+    source_url_warning_message: Optional[str] = None
+    try:
+        source_url_asset_path = _write_source_url_asset(video.url or request.url, paths)
+    except Exception as link_exc:
+        source_url_warning_message = f"YouTube 链接保存失败: {link_exc}"
     try:
         cover_asset_path = _download_cover_asset(video, downloader, paths, request.cover_output_dir)
     except Exception as cover_exc:
@@ -1839,8 +1863,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         job.video_id = video.id
         job.title = video.title or "一键自动流程"
         job.status = "running"
-        _store_job_workspace_params(job, paths, cover_asset_path=cover_asset_path)
-        _update_job_stage(db, job, "parse", "completed", error_message=cover_warning_message)
+        _store_job_workspace_params(job, paths, cover_asset_path=cover_asset_path, source_url_asset_path=source_url_asset_path)
+        parse_warning_message = "；".join(message for message in (source_url_warning_message, cover_warning_message) if message) or None
+        _update_job_stage(db, job, "parse", "completed", error_message=parse_warning_message)
 
     reusable_download_path = _stage_output_if_reusable(job, "download") if resume_from_checkpoint else None
     if reusable_download_path:

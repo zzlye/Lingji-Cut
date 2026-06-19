@@ -686,7 +686,14 @@ class AutomationJobTests(unittest.TestCase):
             fake_downloader = FakeAutomationDownloader(downloaded_path)
             fake_processor = FakeAutomationProcessor(temp_dir)
             fake_recognizer = FakeAutomationRecognizer()
-            video = VideoSource(id=1, platform="youtube", video_id="local-asr", url="https://example.test/video", title="测试视频")
+            video = VideoSource(id=1, platform="youtube", video_id="local-asr", url="https://youtu.be/local-asr?feature=share", title="测试视频")
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "local-asr",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
             task_ids = iter(range(1, 10))
 
             def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
@@ -704,7 +711,7 @@ class AutomationJobTests(unittest.TestCase):
                 patch("backend.api.automation._create_task", side_effect=fake_create_task),
                 patch("backend.api.automation._pick_subtitle_preset", return_value=None),
                 patch("backend.api.automation._pick_text_profile", return_value=None),
-                patch("backend.api.automation.ensure_project_dirs", return_value={"output_dir": temp_dir, "exports_dir": temp_dir}),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
             ):
                 response = _run_automation_sync(
                     AutomationRunRequest(
@@ -725,14 +732,18 @@ class AutomationJobTests(unittest.TestCase):
                     FakeDb([]),
                 )
 
-        stage_by_key = {stage.key: stage for stage in response.stages}
-        self.assertEqual(fake_downloader.subtitle_download_calls, 0)
-        self.assertEqual(fake_recognizer.video_paths, [downloaded_path])
-        self.assertIn("本地识别字幕", response.subtitle_text)
-        self.assertEqual(stage_by_key["subtitle"].status, "completed")
-        self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
-        self.assertEqual(fake_processor.burn_calls[0]["preset"]["bitrate"]["fixed_kbps"]["value"], 2200)
-        self.assertEqual(fake_processor.burn_calls[0]["preset"]["acceleration"]["quality"], "size")
+            stage_by_key = {stage.key: stage for stage in response.stages}
+            self.assertEqual(fake_downloader.subtitle_download_calls, 0)
+            self.assertEqual(fake_recognizer.video_paths, [downloaded_path])
+            self.assertIn("本地识别字幕", response.subtitle_text)
+            self.assertEqual(stage_by_key["subtitle"].status, "completed")
+            self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
+            self.assertEqual(fake_processor.burn_calls[0]["preset"]["bitrate"]["fixed_kbps"]["value"], 2200)
+            self.assertEqual(fake_processor.burn_calls[0]["preset"]["acceleration"]["quality"], "size")
+            link_files = [name for name in os.listdir(temp_dir) if name.endswith(".txt")]
+            self.assertEqual(link_files, ["youtube_link.txt"])
+            with open(os.path.join(temp_dir, "youtube_link.txt"), "r", encoding="utf-8") as file:
+                self.assertEqual(file.read().strip(), video.url)
 
     def test_automation_translation_saves_comparison_subtitle_for_review(self):
         """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""
@@ -1764,6 +1775,7 @@ Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文译文
             self.assertEqual(stage_by_key["download"].output_path, copied_path)
             self.assertEqual(fake_recognizer.video_paths, [copied_path])
             self.assertEqual(stage_by_key["subtitle"].status, "completed")
+            self.assertFalse([name for name in os.listdir(workspace_dir) if name.endswith(".txt")])
             self.assertEqual(stage_by_key["export"].status, "completed")
 
     def test_run_automation_marks_parse_stage_failed_when_parse_raises(self):
