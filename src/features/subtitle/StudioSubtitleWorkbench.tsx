@@ -2,7 +2,7 @@
 // 工作台字幕调整区 - 支持读取字幕文件、逐条手动校对、AI 翻译/润色，并保留时间轴
 
 import { startTransition, type UIEvent, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronLeft, ChevronRight, Expand, FileText, Languages, Play, Search, Settings2, Wand2 } from 'lucide-react'
+import { Bot, ChevronLeft, ChevronRight, Expand, FileText, Languages, Play, Search, Settings2, Trash2, Wand2 } from 'lucide-react'
 import { subtitleApi, profileApi, automationApi } from '@/lib/api'
 import { getActiveTextSystemPrompt, loadActiveTextPromptPreset } from '@/lib/textPromptPresets'
 import { useAutomationStore } from '@/stores/automationStore'
@@ -35,6 +35,7 @@ const SUBTITLE_LIST_VISIBLE_COUNT = 20
 const SUBTITLE_MODAL_ROW_HEIGHT = 76
 const SUBTITLE_MODAL_OVERSCAN = 8
 const SUBTITLE_MODAL_VISIBLE_COUNT = 11
+type AiScope = 'checked' | 'current' | 'all'
 type ManualAiOperation = Extract<SubtitleTextOperation, 'translate' | 'polish'> | 'merge' | 'split'
 
 const AI_OPERATION_LABEL: Record<ManualAiOperation, string> = {
@@ -85,6 +86,10 @@ type PendingRecognizedSegment = {
   message: string
   language: string
 }
+type DeleteSubtitleRequest = {
+  mode: 'single' | 'checked'
+  indexes: number[]
+}
 
 interface StudioSubtitleWorkbenchProps {
   suggestedSubtitlePath?: string | null
@@ -122,7 +127,7 @@ export function StudioSubtitleWorkbench({
   const [textProfiles, setTextProfiles] = useState<ApiProfile[]>([])
   const [selectedProfileId, setSelectedProfileId] = useState<number | null>(preferences.text_profile_id)
   const [targetLanguage, setTargetLanguage] = useState('zh-CN')
-  const [aiScope, setAiScope] = useState<'checked' | 'current' | 'all'>('checked')
+  const [aiScope, setAiScope] = useState<AiScope>('checked')
   const [isAiProcessing, setIsAiProcessing] = useState(false)
   const [activeAiLabel, setActiveAiLabel] = useState('')
   const [aiDialogOperation, setAiDialogOperation] = useState<ManualAiOperation | null>(null)
@@ -142,6 +147,7 @@ export function StudioSubtitleWorkbench({
   const [previewError, setPreviewError] = useState('')
   const [isRecognizingSegment, setIsRecognizingSegment] = useState(false)
   const [pendingRecognizedSegment, setPendingRecognizedSegment] = useState<PendingRecognizedSegment | null>(null)
+  const [deleteRequest, setDeleteRequest] = useState<DeleteSubtitleRequest | null>(null)
   const [restoredDraftKey, setRestoredDraftKey] = useState('')
   const [pendingRestoreScrollTop, setPendingRestoreScrollTop] = useState<number | null>(null)
   const autoLoadKeyRef = useRef('')
@@ -258,6 +264,10 @@ export function StudioSubtitleWorkbench({
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
   const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || (Boolean(selectedJobSourceVideo) && Boolean(selectedJobExportVideo)))
+  const deleteRequestIndexes = deleteRequest
+    ? Array.from(new Set(deleteRequest.indexes)).filter((index) => index >= 0 && index < entries.length)
+    : []
+  const deleteRequestEntry = deleteRequest?.mode === 'single' ? entries[deleteRequestIndexes[0]] : null
 
   latestDraftRef.current = draft
   latestSuggestedSubtitleFileRef.current = suggestedSubtitleFile
@@ -736,14 +746,53 @@ export function StudioSubtitleWorkbench({
   }
 
   const removeEntry = (index: number) => {
-    const nextEntries = normalizeEntries(entries.filter((_, itemIndex) => itemIndex !== index))
+    if (index < 0 || index >= entries.length) return
+    setDeleteRequest({ mode: 'single', indexes: [index] })
+  }
+
+  const removeCheckedEntries = () => {
+    if (!validCheckedEntryIndexes.length) {
+      setNotice({ type: 'warning', message: '请先勾选要删除的字幕。' })
+      return
+    }
+    setDeleteRequest({ mode: 'checked', indexes: validCheckedEntryIndexes })
+  }
+
+  const handleDeleteSubtitleAction = () => {
+    if (validCheckedEntryIndexes.length) {
+      removeCheckedEntries()
+      return
+    }
+    removeEntry(selectedIndex)
+  }
+
+  const confirmRemoveEntries = () => {
+    if (!deleteRequest) return
+    const targetIndexes = Array.from(new Set(deleteRequest.indexes))
+      .filter((index) => index >= 0 && index < entries.length)
+      .sort((left, right) => left - right)
+    if (!targetIndexes.length) {
+      setDeleteRequest(null)
+      return
+    }
+
+    const targetSet = new Set(targetIndexes)
+    const nextEntries = normalizeEntries(entries.filter((_, itemIndex) => !targetSet.has(itemIndex)))
+    const removedBeforeSelected = targetIndexes.filter((index) => index < selectedIndex).length
+    const nextSelectedIndex = targetSet.has(selectedIndex)
+      ? Math.min(targetIndexes[0], Math.max(0, nextEntries.length - 1))
+      : Math.max(0, Math.min(selectedIndex - removedBeforeSelected, nextEntries.length - 1))
+    const nextCheckedIndexes = validCheckedEntryIndexes
+      .filter((index) => !targetSet.has(index))
+      .map((index) => index - targetIndexes.filter((removedIndex) => removedIndex < index).length)
+      .filter((index) => index >= 0 && index < nextEntries.length)
+
     setEntries(nextEntries)
-    setSelectedIndex(Math.max(0, Math.min(index, nextEntries.length - 1)))
-    setCheckedEntryIndexes((current) => (
-      current
-        .filter((itemIndex) => itemIndex !== index)
-        .map((itemIndex) => (itemIndex > index ? itemIndex - 1 : itemIndex))
-    ))
+    setSelectedIndex(nextEntries.length ? nextSelectedIndex : 0)
+    setCheckedEntryIndexes(nextCheckedIndexes)
+    setDeleteRequest(null)
+    setNotice({ type: 'success', message: `已删除 ${targetIndexes.length} 条字幕，剩余 ${nextEntries.length} 条。` })
+    addLog('info', `字幕调整已删除 ${targetIndexes.length} 条字幕`)
   }
 
   const cleanupEntries = () => {
@@ -883,15 +932,17 @@ export function StudioSubtitleWorkbench({
     })
   }
 
-  const resolveAiTargetIndexes = () => {
+  const resolveScopedEntryIndexes = () => {
     if (aiScope === 'checked') {
-      return validCheckedEntryIndexes
+      return Array.from(new Set(validCheckedEntryIndexes)).sort((left, right) => left - right)
     }
     if (aiScope === 'current') {
       return selectedEntry ? [selectedIndex] : []
     }
     return entries.map((_, index) => index)
   }
+
+  const resolveAiTargetIndexes = () => resolveScopedEntryIndexes()
 
   const handleSelectProfile = (value: string) => {
     const id = Number(value) || null
@@ -945,26 +996,19 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'warning', message: '当前任务没有可用源视频，不能重新识别。' })
       return
     }
-    if (!validCheckedEntryIndexes.length) {
-      setNotice({ type: 'warning', message: '请先勾选要重新识别的字幕时间轴。' })
-      return
-    }
-    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
-      setNotice({ type: 'warning', message: '重新识别需要勾选连续字幕，请先调整勾选范围。' })
-      return
-    }
-
-    const targetIndexes = validCheckedEntryIndexes
+    const targetIndexes = validateRecognizeTargetIndexes()
+    if (!targetIndexes.length) return
     const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
     const firstEntry = targetEntries[0]
     const lastEntry = targetEntries[targetEntries.length - 1]
     if (!firstEntry || !lastEntry) {
-      setNotice({ type: 'warning', message: '当前勾选的字幕无法重新识别。' })
+      setNotice({ type: 'warning', message: '当前处理范围的字幕无法重新识别。' })
       return
     }
 
+    const scopeLabel = aiScopeLabel(null)
     setIsRecognizingSegment(true)
-    setNotice({ type: 'info', message: '正在重新识别勾选的时间段...' })
+    setNotice({ type: 'info', message: `正在按${scopeLabel}重新识别视频片段...` })
     try {
       const result = await subtitleApi.recognizeSegment({
         video_path: selectedJobSourceVideo,
@@ -981,7 +1025,7 @@ export function StudioSubtitleWorkbench({
         language: result.language,
       })
       previewSubtitleEntry(previewEntry, targetIndexes[0])
-      setNotice({ type: 'success', message: '重新识别已完成，先预览确认后再应用。' })
+      setNotice({ type: 'success', message: `重新识别已完成，范围：${scopeLabel}，先预览确认后再应用。` })
     } catch (error) {
       const message = `重新识别失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
@@ -1009,17 +1053,66 @@ export function StudioSubtitleWorkbench({
     closeSegmentPlayer()
   }
 
+  const aiScopeLabel = (operation: ManualAiOperation | null) => {
+    const targetCount = resolveScopedEntryIndexes().length
+    if (aiScope === 'checked') {
+      return targetCount ? `已勾选字幕（${targetCount} 条）` : '已勾选字幕'
+    }
+    if (aiScope === 'all') {
+      return `全部字幕（${entries.length} 条）`
+    }
+    if (operation === 'merge' && targetCount === 1) {
+      return '当前条字幕（合并至少需要 2 条）'
+    }
+    return selectedEntry ? `当前条字幕（第 ${selectedIndex + 1} 条）` : '当前条字幕'
+  }
+
+  const emptyScopeMessage = (actionLabel: string) => {
+    if (aiScope === 'checked') return `请先勾选要${actionLabel}的字幕。`
+    if (aiScope === 'current') return `请先选择一条要${actionLabel}的字幕。`
+    return `当前没有可${actionLabel}的字幕。`
+  }
+
+  const validateMergeTargetIndexes = (actionLabel: string) => {
+    const targetIndexes = resolveScopedEntryIndexes()
+    if (targetIndexes.length < 2) {
+      const message = aiScope === 'current'
+        ? `${actionLabel}至少需要 2 条字幕，请切换到“已勾选”或“全部”。`
+        : aiScope === 'checked'
+          ? '请先勾选至少 2 条要合并的字幕。'
+          : '全部范围内至少需要 2 条字幕才能合并。'
+      setNotice({
+        type: 'warning',
+        message,
+      })
+      return []
+    }
+    if (!areContinuousEntryIndexes(targetIndexes)) {
+      setNotice({ type: 'warning', message: `${actionLabel}需要连续字幕，请先调整处理范围。` })
+      return []
+    }
+    return targetIndexes
+  }
+
+  const validateRecognizeTargetIndexes = () => {
+    const targetIndexes = resolveScopedEntryIndexes()
+    if (!targetIndexes.length) {
+      setNotice({ type: 'warning', message: emptyScopeMessage('重新识别') })
+      return []
+    }
+    if (!areContinuousEntryIndexes(targetIndexes)) {
+      setNotice({ type: 'warning', message: '重新识别需要连续字幕，请先调整处理范围。' })
+      return []
+    }
+    return targetIndexes
+  }
+
   const openAiInstructionDialog = (operation: ManualAiOperation) => {
-    if (operation === 'merge' && validCheckedEntryIndexes.length < 2) {
-      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
+    if (operation === 'merge' && !validateMergeTargetIndexes('AI 合并').length) {
       return
     }
-    if (operation === 'merge' && !areContinuousEntryIndexes(validCheckedEntryIndexes)) {
-      setNotice({ type: 'warning', message: '合并字幕需要勾选连续的字幕条目，请先调整勾选范围。' })
-      return
-    }
-    if (operation === 'split' && !selectedEntry) {
-      setNotice({ type: 'warning', message: '请先在左侧选择一条要拆分的字幕。' })
+    if (operation === 'split' && !resolveScopedEntryIndexes().length) {
+      setNotice({ type: 'warning', message: emptyScopeMessage('拆分') })
       return
     }
     setAiDialogOperation(operation)
@@ -1036,23 +1129,15 @@ export function StudioSubtitleWorkbench({
       return
     }
     if (operation === 'split') {
-      await handleAiSplitEntry(customInstruction)
+      await handleAiSplitEntries(customInstruction)
       return
     }
     await handleAiProcess(operation, customInstruction)
   }
 
   const handleDirectMergeEntries = () => {
-    if (validCheckedEntryIndexes.length < 2) {
-      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
-      return
-    }
-    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
-      setNotice({ type: 'warning', message: '合并字幕需要勾选连续的字幕条目，请先调整勾选范围。' })
-      return
-    }
-
-    const targetIndexes = validCheckedEntryIndexes
+    const targetIndexes = validateMergeTargetIndexes('直接合并')
+    if (!targetIndexes.length) return
     const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
     const mergedEntry = buildMergedSubtitleEntry(targetEntries)
     const nextEntries = replaceEntriesAtIndexes(entries, targetIndexes, [mergedEntry])
@@ -1069,21 +1154,13 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
       return
     }
-    if (validCheckedEntryIndexes.length < 2) {
-      setNotice({ type: 'warning', message: '请先在左侧至少勾选 2 条字幕再合并。' })
-      return
-    }
-    if (!areContinuousEntryIndexes(validCheckedEntryIndexes)) {
-      setNotice({ type: 'warning', message: 'AI 合并需要勾选连续的字幕条目，请先调整勾选范围。' })
-      return
-    }
-
-    const targetIndexes = validCheckedEntryIndexes
+    const targetIndexes = validateMergeTargetIndexes('AI 合并')
+    if (!targetIndexes.length) return
     const targetEntries = targetIndexes.map((index) => entries[index]).filter(Boolean)
     const actionLabel = AI_OPERATION_LABEL.merge
     setIsAiProcessing(true)
     setActiveAiLabel(actionLabel)
-    setNotice({ type: 'info', message: `${actionLabel}处理中...` })
+    setNotice({ type: 'info', message: `${actionLabel}处理中，范围：${aiScopeLabel('merge')}。这是文本处理，不会重新识别音频。` })
     try {
       const result = await subtitleApi.processText({
         text: buildAiStructureSourceText(targetEntries),
@@ -1114,40 +1191,47 @@ export function StudioSubtitleWorkbench({
     }
   }
 
-  const handleAiSplitEntry = async (customInstruction = '') => {
+  const handleAiSplitEntries = async (customInstruction = '') => {
     if (!selectedProfileId) {
       setNotice({ type: 'warning', message: '请先选择一个可用的文本 API 配置。' })
       return
     }
-    if (!selectedEntry) {
-      setNotice({ type: 'warning', message: '请先在左侧选择一条要拆分的字幕。' })
+    const targetIndexes = resolveScopedEntryIndexes()
+    if (!targetIndexes.length) {
+      setNotice({ type: 'warning', message: emptyScopeMessage('拆分') })
       return
     }
 
     const actionLabel = AI_OPERATION_LABEL.split
     setIsAiProcessing(true)
     setActiveAiLabel(actionLabel)
-    setNotice({ type: 'info', message: `${actionLabel}处理中...` })
+    setNotice({ type: 'info', message: `${actionLabel}处理中，将按${aiScopeLabel('split')}逐条拆分。这是文本处理，不会重新识别音频。` })
     try {
-      const result = await subtitleApi.processText({
-        text: buildAiStructureSourceText([selectedEntry]),
-        profile_id: selectedProfileId,
-        operation: 'polish',
-        custom_instruction: buildAiSplitInstruction(customInstruction),
-        system_prompt: getActiveTextSystemPrompt(),
-      })
-      const splitTexts = parseAiSubtitleParts(result.text)
-      if (splitTexts.length < 2) {
-        throw new Error('文本 API 没有返回可用的拆分字幕')
+      const replacements = new Map<number, SubtitleEntry[]>()
+      for (const targetIndex of targetIndexes) {
+        const targetEntry = entries[targetIndex]
+        if (!targetEntry) continue
+        const result = await subtitleApi.processText({
+          text: buildAiStructureSourceText([targetEntry]),
+          profile_id: selectedProfileId,
+          operation: 'polish',
+          custom_instruction: buildAiSplitInstruction(customInstruction),
+          system_prompt: getActiveTextSystemPrompt(),
+        })
+        const splitTexts = parseAiSubtitleParts(result.text)
+        if (splitTexts.length < 2) {
+          throw new Error(`第 ${targetIndex + 1} 条没有返回可用的拆分字幕`)
+        }
+        replacements.set(targetIndex, splitSubtitleEntryByTexts(targetEntry, splitTexts))
       }
-      const nextSplitEntries = splitSubtitleEntryByTexts(selectedEntry, splitTexts)
-      const nextEntries = replaceEntriesAtIndexes(entries, [selectedIndex], nextSplitEntries)
-      const checkedIndexes = nextSplitEntries.map((_, index) => selectedIndex + index).filter((index) => index < nextEntries.length)
+      const nextEntries = replaceEntriesByIndexMap(entries, replacements)
+      const firstTargetIndex = targetIndexes[0]
+      const checkedIndexes = replacementIndexesAfterApply(entries, targetIndexes, replacements)
       setEntries(nextEntries)
-      setSelectedIndex(Math.min(selectedIndex, Math.max(0, nextEntries.length - 1)))
+      setSelectedIndex(Math.min(firstTargetIndex, Math.max(0, nextEntries.length - 1)))
       setCheckedEntryIndexes(checkedIndexes)
-      setNotice({ type: 'success', message: `${actionLabel}完成，已拆分为 ${nextSplitEntries.length} 条字幕。` })
-      addLog('info', `${actionLabel}完成，已拆分为 ${nextSplitEntries.length} 条字幕`)
+      setNotice({ type: 'success', message: `${actionLabel}完成，已处理 ${targetIndexes.length} 条字幕，生成 ${checkedIndexes.length} 条。` })
+      addLog('info', `${actionLabel}完成，范围：${aiScopeLabel('split')}`)
     } catch (error) {
       const message = `${actionLabel}失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message })
@@ -1669,7 +1753,7 @@ export function StudioSubtitleWorkbench({
                   onChange={handleSelectProfile}
                   description={selectedProfile ? `${selectedProfile.name} · ${selectedProfile.model || '未设置模型'}` : undefined}
                 />
-                <SegmentedField label="处理范围" value={aiScope} options={AI_SCOPE_OPTIONS} onChange={(value) => setAiScope(value as 'checked' | 'current' | 'all')} />
+                <SegmentedField label="处理范围" value={aiScope} options={AI_SCOPE_OPTIONS} onChange={(value) => setAiScope(value as AiScope)} />
                 <SelectField label="翻译目标语言" value={targetLanguage} options={TARGET_LANG_OPTIONS} onChange={handleTargetLanguageChange} />
                 <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                   当前提示词：<span className="text-foreground">{activePromptPreset?.name || '默认提示词'}</span>
@@ -1683,21 +1767,25 @@ export function StudioSubtitleWorkbench({
                     <Wand2 className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.polish ? 'AI 润色中…' : 'AI 润色'}
                   </Button>
-                  <Button variant="outline" onClick={handleDirectMergeEntries} disabled={isAiProcessing || validCheckedEntryIndexes.length < 2}>
+                  <Button variant="outline" onClick={handleDirectMergeEntries} disabled={isAiProcessing || !entries.length}>
                     <FileText className="mr-2 size-4" />
                     直接合并
                   </Button>
-                  <Button variant="outline" onClick={() => openAiInstructionDialog('merge')} disabled={isAiProcessing || validCheckedEntryIndexes.length < 2 || !selectedProfileId}>
+                  <Button variant="outline" onClick={() => openAiInstructionDialog('merge')} disabled={isAiProcessing || !entries.length || !selectedProfileId}>
                     <Bot className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.merge ? 'AI 合并中…' : 'AI 合并'}
                   </Button>
-                  <Button variant="outline" onClick={() => openAiInstructionDialog('split')} disabled={isAiProcessing || !selectedEntry || !selectedProfileId}>
+                  <Button variant="outline" onClick={() => openAiInstructionDialog('split')} disabled={isAiProcessing || !resolveScopedEntryIndexes().length || !selectedProfileId}>
                     <FileText className="mr-2 size-4" />
                     {isAiProcessing && activeAiLabel === AI_OPERATION_LABEL.split ? 'AI 拆分中…' : 'AI 拆分'}
                   </Button>
-                  <Button variant="outline" onClick={handleRecognizeSegment} disabled={isRecognizingSegment || isAiProcessing || !validCheckedEntryIndexes.length || !selectedJobSourceVideo}>
+                  <Button variant="outline" onClick={handleRecognizeSegment} disabled={isRecognizingSegment || isAiProcessing || !resolveScopedEntryIndexes().length || !selectedJobSourceVideo}>
                     <Bot className="mr-2 size-4" />
                     {isRecognizingSegment ? '识别中…' : '重新识别'}
+                  </Button>
+                  <Button variant="outline" className="text-destructive hover:text-destructive" onClick={handleDeleteSubtitleAction} disabled={!selectedEntry && !validCheckedEntryIndexes.length}>
+                    <Trash2 className="mr-2 size-4" />
+                    {validCheckedEntryIndexes.length ? '删除选中' : '删除当前'}
                   </Button>
                 </div>
                 {!textProfiles.length && (
@@ -1717,7 +1805,7 @@ export function StudioSubtitleWorkbench({
               <DialogTitle>{pendingRecognizedSegment ? '预览重新识别结果' : selectedJob?.title || '播放字幕片段'}</DialogTitle>
               <DialogDescription className="break-all">
                 {pendingRecognizedSegment
-                  ? `将替换已勾选的 ${pendingRecognizedSegment.targetIndexes.length} 条字幕，先看这段视频再确认。`
+                  ? `将替换当前处理范围内的 ${pendingRecognizedSegment.targetIndexes.length} 条字幕，先看这段视频再确认。`
                   : playingEntry
                     ? `第 ${playingEntryIndex + 1} 条 · ${playingEntry.start} - ${playingEntry.end}`
                     : selectedJobPreviewVideo}
@@ -1883,6 +1971,32 @@ export function StudioSubtitleWorkbench({
           </DialogContent>
         </Dialog>
 
+        <Dialog open={Boolean(deleteRequest)} onOpenChange={(open) => !open && setDeleteRequest(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>确认删除字幕</DialogTitle>
+              <DialogDescription>
+                {deleteRequest?.mode === 'single' && deleteRequestEntry
+                  ? `将删除第 ${deleteRequestIndexes[0] + 1} 条字幕：${deleteRequestEntry.start} - ${deleteRequestEntry.end}。`
+                  : `将删除已勾选的 ${deleteRequestIndexes.length} 条字幕。`}
+                删除后需要点击“{primaryOutputLabel}”才会写回文件和视频。
+              </DialogDescription>
+            </DialogHeader>
+            {deleteRequestEntry && (
+              <div className="rounded-lg border bg-muted/30 px-3 py-2 text-sm">
+                <p className="font-mono text-xs text-muted-foreground">{deleteRequestEntry.start} - {deleteRequestEntry.end}</p>
+                <p className="mt-1 line-clamp-3">{subtitleEntryPlainText(deleteRequestEntry) || '空字幕'}</p>
+              </div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setDeleteRequest(null)}>取消</Button>
+              <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={confirmRemoveEntries} disabled={!deleteRequestIndexes.length}>
+                确认删除
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={Boolean(aiDialogOperation)} onOpenChange={(open) => !open && setAiDialogOperation(null)}>
           <DialogContent>
             <DialogHeader>
@@ -1891,15 +2005,15 @@ export function StudioSubtitleWorkbench({
                 {aiDialogOperation === 'translate'
                   ? '按当前范围翻译已有字幕，并保留原文对照和时间轴。'
                   : aiDialogOperation === 'merge'
-                    ? '把勾选的多条字幕合成一条，合并后只保留一条时间轴。'
+                    ? '按当前处理范围把多条字幕合成一条，合并后只保留一条时间轴；这是文本处理，不会重新识别音频。'
                     : aiDialogOperation === 'split'
-                      ? '把当前字幕拆成多条，拆分后按原时间轴范围重新分配。'
+                      ? '按当前处理范围把字幕拆成多条，拆分后按原时间轴范围重新分配；这是文本处理，不会重新识别音频。'
                       : '按当前范围润色已有字幕，只优化表达，不生成新内容。'}
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-2">
               <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                处理范围：{aiDialogOperation === 'split' ? '当前条字幕' : aiDialogOperation === 'merge' ? '已勾选字幕' : aiScope === 'checked' ? '已勾选字幕' : aiScope === 'current' ? '当前条字幕' : '全部字幕'}
+                处理范围：{aiScopeLabel(aiDialogOperation)}
                 {aiDialogOperation === 'translate' ? ` · 目标语言：${TARGET_LANG_OPTIONS.find(([value]) => value === targetLanguage)?.[1] || targetLanguage}` : ''}
               </div>
               <div className="space-y-1.5">
@@ -2164,6 +2278,41 @@ function replaceEntriesAtIndexes(entries: SubtitleEntry[], targetIndexes: number
     }
   })
   return normalizeEntries(nextEntries)
+}
+
+// 按原索引逐条替换，适合 AI 拆分这种一次处理多条且每条数量不同的场景。
+function replaceEntriesByIndexMap(entries: SubtitleEntry[], replacements: Map<number, SubtitleEntry[]>) {
+  const replacementIndexes = new Set(replacements.keys())
+  if (!replacementIndexes.size) return normalizeEntries(entries)
+  const nextEntries: SubtitleEntry[] = []
+  entries.forEach((entry, index) => {
+    if (replacementIndexes.has(index)) {
+      nextEntries.push(...(replacements.get(index) || []))
+      return
+    }
+    nextEntries.push(entry)
+  })
+  return normalizeEntries(nextEntries)
+}
+
+// 计算替换后新生成字幕所在的位置，用来保持勾选和预览落在刚处理的字幕上。
+function replacementIndexesAfterApply(entries: SubtitleEntry[], targetIndexes: number[], replacements: Map<number, SubtitleEntry[]>) {
+  const targetSet = new Set(targetIndexes)
+  const replacementIndexes = new Set(replacements.keys())
+  const nextCheckedIndexes: number[] = []
+  let nextIndex = 0
+  entries.forEach((_, index) => {
+    const replacementEntries = replacements.get(index) || []
+    if (replacementIndexes.has(index)) {
+      replacementEntries.forEach((__, offset) => {
+        if (targetSet.has(index)) nextCheckedIndexes.push(nextIndex + offset)
+      })
+      nextIndex += replacementEntries.length
+      return
+    }
+    nextIndex += 1
+  })
+  return nextCheckedIndexes
 }
 
 // 给 AI 的结构化输入带上序号，便于模型理解多条字幕边界，但返回时不要求保留编号。
