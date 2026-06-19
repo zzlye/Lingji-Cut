@@ -1729,6 +1729,35 @@ def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _final_export_changes_resolution(export_settings: dict[str, Any]) -> bool:
+    """判断最终导出是否需要改变分辨率；只有码率变化时可并入字幕烧录避免二次重编码"""
+    if not isinstance(export_settings, dict):
+        return False
+    resolution = str(export_settings.get("resolution") or "original")
+    if resolution in {"720p", "1080p"}:
+        return True
+    return resolution == "custom" and int(export_settings.get("width") or 0) > 0 and int(export_settings.get("height") or 0) > 0
+
+
+def _processing_preset_from_job_params(job_params: dict[str, Any]) -> dict[str, Any]:
+    """从任务参数里取出原一键流程的画面/码率预设，旧任务缺失时返回空配置"""
+    preset = job_params.get("processing_preset") if isinstance(job_params, dict) else {}
+    return preset if isinstance(preset, dict) else {}
+
+
+def _reexport_subtitle_burn_preset(
+    subtitle_preset: dict[str, Any],
+    job_params: dict[str, Any],
+    export_with_settings: bool,
+    export_settings: dict[str, Any],
+) -> dict[str, Any]:
+    """重新导出烧字幕时合并样式、原编码策略和码率-only 最终导出设置"""
+    merged = merge_subtitle_burn_preset(subtitle_preset, _processing_preset_from_job_params(job_params))
+    if should_apply_final_export_settings(export_with_settings, export_settings) and not _final_export_changes_resolution(export_settings):
+        merged = merge_subtitle_burn_preset(merged, build_final_export_preset(export_settings))
+    return merged
+
+
 def should_apply_final_export_settings(export_with_settings: bool, export_settings: dict[str, Any]) -> bool:
     """判断是否需要在导出末尾再按导出设置统一输出一次"""
     if not export_with_settings or not isinstance(export_settings, dict):
@@ -3436,6 +3465,9 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
     export_settings = request.export_settings or (job_params.get("export_settings") if isinstance(job_params.get("export_settings"), dict) else {})
     final_export_preset = build_final_export_preset(export_settings)
     subtitle_preset_dict = _subtitle_preset_dict_for_export(db, job_params)
+    final_export_required = should_apply_final_export_settings(export_with_settings, export_settings)
+    final_export_needs_render = final_export_required and (not subtitle_path or _final_export_changes_resolution(export_settings))
+    subtitle_burn_preset = _reexport_subtitle_burn_preset(subtitle_preset_dict, job_params, export_with_settings, export_settings)
     overwrite_output_path = _normalize_reexport_output_path(request.output_path)
     if overwrite_output_path:
         output_format = os.path.splitext(overwrite_output_path)[1].lower().lstrip(".") or output_format
@@ -3481,6 +3513,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
             working_video = processor.burn_subtitles(
                 video_path=working_video,
                 subtitle_path=subtitle_for_burn,
+                preset=subtitle_burn_preset,
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 10.0 + progress * 0.45)),
             )
@@ -3503,7 +3536,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
             db.commit()
             _update_job_stage(db, job, "export", "running", progress=70, task_id=export_task.id)
 
-        if should_apply_final_export_settings(export_with_settings, export_settings):
+        if final_export_needs_render:
             render_start = max(15.0, float(export_task.progress or 15.0))
             working_video = processor.apply_effects(
                 video_path=working_video,

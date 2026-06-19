@@ -907,11 +907,11 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertEqual(job.status, "running")
         self.assertEqual(job.current_step, "字幕调整重新导出")
-        self.assertIsNone(job.output_path)
+        self.assertEqual(job.output_path, "D:/old.mp4")
         self.assertEqual(stages["download"]["status"], "completed")
         self.assertEqual(stages["subtitle"]["status"], "completed")
         self.assertEqual(stages["export"]["status"], "pending")
-        self.assertIsNone(stages["export"]["output_path"])
+        self.assertEqual(stages["export"]["output_path"], "D:/old.mp4")
 
     def test_pause_and_cancel_job_update_controls_and_stages(self):
         """单任务暂停/取消会影响自动化任务状态和阶段状态"""
@@ -1508,6 +1508,56 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,手动字幕
         self.assertEqual(job.output_path, response.output_path)
         self.assertEqual(job.status, "completed")
 
+    def test_reexport_automation_job_applies_bitrate_during_subtitle_burn(self):
+        """覆盖导出只有码率设置时，字幕烧录阶段直接控体积，避免烧完后再次慢速重编码"""
+        with tempfile.TemporaryDirectory(prefix="automation_reexport_bitrate_") as temp_dir:
+            source_video_path = os.path.join(temp_dir, "source.mp4")
+            subtitle_path = os.path.join(temp_dir, "manual.srt")
+            with open(source_video_path, "wb") as file:
+                file.write(b"video")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("1\n00:00:00,000 --> 00:00:01,000\n中文译文\n")
+
+            job = AutomationJobRecord(
+                id="auto-reexport-bitrate",
+                video_id=8,
+                source_url="https://youtube.com/watch?v=bitrate",
+                status="completed",
+                params=json.dumps({
+                    "output_format": "mp4",
+                    "export_with_settings": True,
+                    "export_settings": {
+                        "resolution": "original",
+                        "bitrate_enabled": True,
+                        "bitrate_kbps": 1800,
+                    },
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": source_video_path, "error_message": None},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 2, "output_path": os.path.join(temp_dir, "old.mp4"), "error_message": None},
+                ], ensure_ascii=False),
+            )
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(45, 50))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+            ):
+                reexport_automation_job("auto-reexport-bitrate", AutomationReExportRequest(subtitle_path=subtitle_path), db)
+
+            burn_preset = fake_processor.burn_calls[0]["preset"]
+            self.assertEqual(burn_preset["bitrate"]["fixed_kbps"]["value"], 1800)
+            self.assertEqual(burn_preset["acceleration"]["quality"], "size")
+            self.assertEqual(fake_processor.effects_calls, [])
+
     def test_reexport_automation_job_cleans_subtitle_punctuation_before_burn(self):
         """重新导出旧字幕时会先清理逗号、句号、省略号和顿号再烧录"""
         with tempfile.TemporaryDirectory(prefix="automation_reexport_clean_") as temp_dir:
@@ -1574,7 +1624,13 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,我已经度过了前100天，
             with open(output_path, "wb") as file:
                 file.write(b"old")
             with open(subtitle_path, "w", encoding="utf-8") as file:
-                file.write("[Script Info]\nScriptType: v4.00+\n")
+                file.write("""[Script Info]
+ScriptType: v4.00+
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文译文
+""")
 
             job = AutomationJobRecord(
                 id="auto-reexport-overwrite",

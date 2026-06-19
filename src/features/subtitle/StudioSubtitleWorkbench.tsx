@@ -912,7 +912,8 @@ export function StudioSubtitleWorkbench({
 
   const applyReExportProgressFromJob = (job: AutomationJob) => {
     const exportStep = job.steps.find((step) => step.key === 'export')
-    const progress = Math.max(0, Math.min(100, Math.round(exportStep?.progress ?? job.progress ?? 0)))
+    const rawProgress = Math.round(exportStep?.progress ?? job.progress ?? 0)
+    const progress = exportStep?.status === 'completed' ? 100 : Math.max(5, Math.min(99, rawProgress))
     setReExportProgress(progress)
     setReExportProgressText(exportStep?.status === 'completed' ? '覆盖导出完成' : `覆盖导出中 ${progress}%`)
     syncBackendJob(job)
@@ -922,13 +923,15 @@ export function StudioSubtitleWorkbench({
     stopReExportProgressPolling()
     setReExportProgress(5)
     setReExportProgressText('正在准备覆盖导出...')
-    reExportProgressTimerRef.current = window.setInterval(() => {
+    const pollProgress = () => {
       void automationApi.getJob(jobId)
         .then(applyReExportProgressFromJob)
         .catch(() => {
           setReExportProgressText('正在等待后端导出进度...')
         })
-    }, 1000)
+    }
+    pollProgress()
+    reExportProgressTimerRef.current = window.setInterval(pollProgress, 1000)
   }
 
   const handlePrimaryOutput = async () => {
@@ -1312,7 +1315,7 @@ export function StudioSubtitleWorkbench({
       lastSavedPath,
     )
     const result = await subtitleApi.saveAss({
-      entries,
+      entries: buildBurnSubtitleEntries(entries),
       output_path: buildAssOutputPath(outputPath.trim()),
       file_name: normalizeAssFileName(fileName.trim() || 'manual_subtitle.ass'),
       preset_id: preferences.subtitle_preset_id,
@@ -1883,6 +1886,13 @@ function normalizeEntries(entries: SubtitleEntry[]) {
       start: entry.start || '00:00:00,000',
       end: entry.end || entry.start || '00:00:00,000',
     }))
+}
+
+function buildBurnSubtitleEntries(entries: SubtitleEntry[]) {
+  return normalizeEntries(entries.map((entry) => ({
+    ...entry,
+    text: subtitleEntryTranslatedText(entry),
+  })))
 }
 
 function normalizeEntry(entry: SubtitleEntry, index: number, cleanText: boolean) {
