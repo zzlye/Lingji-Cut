@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
+import json
 import os
 import ctypes
 import platform
@@ -16,7 +17,7 @@ import urllib.request
 import zipfile
 from urllib.parse import unquote, urlparse
 
-from ..core import Downloader, FFmpegProcessor, LocalSpeechRecognizer, SubtitleEngine, TextEngine
+from ..core import Downloader, FFmpegProcessor, GeminiAudioTranscriber, LocalSpeechRecognizer, SubtitleEngine, TextEngine
 from ..core.paths import detect_video_workspace, ensure_project_dirs, ensure_video_workspace
 from ..core.process_control import TaskControlRequested
 from ..models import DownloadTask, SubtitlePreset, TextProviderProfile, VideoSource, get_db
@@ -161,6 +162,27 @@ class SubtitleSegmentRecognizeRequest(BaseModel):
     start: str
     end: str
     language: Optional[str] = None
+
+
+class SubtitleSegmentOrganizeRequest(BaseModel):
+    """用 API 多模态模型直接听音频并整理字幕"""
+    video_path: str
+    start: str
+    end: str
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    profile_id: int
+    custom_instruction: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+
+class SubtitleSegmentOrganizeResponse(BaseModel):
+    """AI 整理字幕响应"""
+    message: str
+    entries: list[SubtitleEntryPayload] = Field(default_factory=list)
+    plain_text: str = ""
+    video_path: str
+    start: str
+    end: str
 
 
 class SubtitleCorrectionSaveRequest(BaseModel):
@@ -429,6 +451,44 @@ def entries_to_plain_text(entries: list[dict], max_chars: int = 6000) -> str:
             break
 
     return "\n".join(lines)[:max_chars]
+
+
+def _build_ai_organize_segment_prompt(
+    entries: list[dict],
+    start_seconds: float,
+    end_seconds: float,
+    custom_instruction: str,
+    system_prompt: str,
+) -> str:
+    """构造 AI 整理提示词，让 API 模型直接听音频并返回最终字幕时间轴"""
+    reference_items = []
+    for index, entry in enumerate(entries, 1):
+        item_start = max(0.0, _srt_time_to_seconds(str(entry.get("start") or "00:00:00,000")) - start_seconds)
+        item_end = max(item_start + 0.2, _srt_time_to_seconds(str(entry.get("end") or entry.get("start") or "00:00:00,000")) - start_seconds)
+        reference_items.append({
+            "id": index,
+            "start": round(item_start, 3),
+            "end": round(min(max(0.0, end_seconds - start_seconds), item_end), 3),
+            "text": str(entry.get("text") or "").replace("\\N", "\n"),
+        })
+
+    instruction = str(custom_instruction or "").strip() or "请根据音频重新整理为自然、准确、适合硬字幕的字幕。"
+    preset = str(system_prompt or "").strip() or "你是专业视频字幕整理助手，必须严格根据音频内容和用户要求处理字幕。"
+    return "\n".join([
+        preset,
+        "",
+        "你会收到一段从原视频截取的音频。请直接听音频，全权判断字幕应该如何合并、拆分、移动词语或保持不动。",
+        "当前字幕只作为参考，不要把参考字幕当成事实；如果参考字幕和音频冲突，以音频为准。",
+        "用户要求必须优先执行。例如用户要求把某个词移动到前一段，就只移动对应内容，其余尽量保持不变。",
+        "输出语言和格式尽量沿用参考字幕；如果参考字幕是双语，每条 text 可以用换行保留双语。",
+        "start/end 必须是这段音频内的相对秒数，从 0 开始，必须贴合真实发声位置。",
+        "只输出 JSON 数组，不要 Markdown，不要解释，不要 SRT 编号。",
+        "JSON 格式：[{\"start\":0.12,\"end\":1.85,\"text\":\"字幕文本\"}]",
+        "",
+        f"片段时长：{max(0.0, end_seconds - start_seconds):.3f} 秒",
+        f"用户要求：{instruction}",
+        f"当前字幕参考 JSON：{json.dumps(reference_items, ensure_ascii=False)}",
+    ])
 
 
 def _srt_time_to_seconds(value: str) -> float:
@@ -856,6 +916,63 @@ async def recognize_subtitle_segment(request: SubtitleSegmentRecognizeRequest):
         start=_seconds_to_srt_time(start_seconds),
         end=_seconds_to_srt_time(end_seconds),
         language=detected_language,
+    )
+
+
+@router.post("/organize-segment", response_model=SubtitleSegmentOrganizeResponse)
+async def organize_subtitle_segment(request: SubtitleSegmentOrganizeRequest, db: Session = Depends(get_db)):
+    """用文本 API 的多模态模型直接听视频片段，并按用户要求输出最终字幕"""
+    video_path = os.path.abspath(os.path.expanduser(request.video_path.strip()))
+    if not video_path or not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail=f"视频文件不存在: {request.video_path}")
+
+    profile = db.query(TextProviderProfile).filter(TextProviderProfile.id == request.profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="文本 API 配置不存在")
+
+    start_seconds = _srt_time_to_seconds(request.start)
+    end_seconds = _srt_time_to_seconds(request.end)
+    if end_seconds <= start_seconds:
+        raise HTTPException(status_code=400, detail="AI 整理结束时间必须晚于开始时间")
+
+    engine = SubtitleEngine()
+    current_entries = _normalize_correction_entries(engine, request.entries)
+    prompt = _build_ai_organize_segment_prompt(
+        current_entries,
+        start_seconds,
+        end_seconds,
+        request.custom_instruction or "",
+        request.system_prompt or "",
+    )
+    segment_path = _export_video_segment(video_path, start_seconds, end_seconds)
+    try:
+        settings = _text_settings_with_prompt(profile, request.system_prompt)
+        organized_entries = await GeminiAudioTranscriber(
+            provider_type=profile.provider_type,
+            api_key=decrypt_api_key(profile.api_key_encrypted),
+            base_url=profile.base_url,
+            model=profile.model or "",
+            settings=settings,
+        ).organize_audio_file(
+            segment_path,
+            prompt=prompt,
+            start_offset=start_seconds,
+            max_end_seconds=end_seconds,
+        )
+        if not organized_entries:
+            raise RuntimeError("AI 模型没有返回可用字幕")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI 整理失败: {exc}") from exc
+    finally:
+        _safe_remove_file(segment_path)
+
+    return SubtitleSegmentOrganizeResponse(
+        message=f"AI 整理完成，生成 {len(organized_entries)} 条字幕",
+        entries=_entry_payloads(organized_entries),
+        plain_text=entries_to_plain_text(organized_entries),
+        video_path=video_path,
+        start=_seconds_to_srt_time(start_seconds),
+        end=_seconds_to_srt_time(end_seconds),
     )
 
 

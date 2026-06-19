@@ -268,6 +268,21 @@ export const subtitleApi = {
       body: JSON.stringify(params),
     }),
 
+  /** 用文本 API 多模态模型直接听视频片段并整理字幕 */
+  organizeSegment: (params: {
+    video_path: string
+    start: string
+    end: string
+    entries: import('@/types').SubtitleEntry[]
+    profile_id: number
+    custom_instruction?: string
+    system_prompt?: string
+  }) =>
+    request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; video_path: string; start: string; end: string }>('/subtitles/organize-segment', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
   /** 读取本地字幕文件并转换成可编辑条目，支持 SRT/VTT/ASS */
   parseFile: (subtitlePath: string) =>
     request<{ message: string; entries: import('@/types').SubtitleEntry[]; plain_text: string; output_path?: string; format?: string }>('/subtitles/parse-file', {

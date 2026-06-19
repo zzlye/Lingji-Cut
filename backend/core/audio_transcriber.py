@@ -202,9 +202,55 @@ class GeminiAudioTranscriber:
         prompt = _TRANSCRIBE_PROMPT
         if language:
             prompt = f"音频语言是 {language}。{prompt}"
+        return await self._call_audio_prompt(client, audio_b64, prompt)
+
+    async def _call_audio_prompt(self, client: Any, audio_b64: str, prompt: str) -> str:
+        """用指定提示词调用音频多模态模型，供字幕整理等非固定转写任务复用"""
         if self.provider_type in {"gemini", "gemini_compatible"}:
             return await self._call_gemini_native(client, audio_b64, prompt)
         return await self._call_openai_audio(client, audio_b64, prompt)
+
+    async def organize_audio_file(
+        self,
+        audio_or_video_path: str,
+        prompt: str,
+        start_offset: float = 0.0,
+        max_end_seconds: Optional[float] = None,
+    ) -> list[dict]:
+        """把一段音频交给 API 模型全权整理字幕，返回已平移到原视频时间轴的条目"""
+        if not os.path.exists(audio_or_video_path):
+            raise FileNotFoundError(f"AI 整理音频不存在: {audio_or_video_path}")
+        audio_path, temp_audio = self._asr._prepare_audio(audio_or_video_path)
+        seg_files: list[tuple[int, float, str]] = []
+        try:
+            audio = self._asr._decode_audio_array(audio_path)
+            if audio is None:
+                raise RuntimeError("AI 整理无法解码音频")
+            duration = len(audio) / 16000.0
+            seg_files = self._export_segment_files(audio_path, [(0.0, duration)])
+            if not seg_files:
+                raise RuntimeError("AI 整理音频分段失败")
+            _, _, mp3_path = seg_files[0]
+            with open(mp3_path, "rb") as audio_file:
+                audio_b64 = base64.b64encode(audio_file.read()).decode("ascii")
+            import httpx
+
+            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                response_text = await self._call_audio_prompt(client, audio_b64, prompt)
+            entries = self._parse_segment_response(response_text, start_offset)
+            if max_end_seconds is not None:
+                entries = self._clamp_entries(entries, max_end_seconds)
+            if not entries:
+                raise RuntimeError("AI 模型没有返回可用字幕")
+            entries.sort(key=lambda item: self._asr._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
+            for index, entry in enumerate(entries, 1):
+                entry["index"] = index
+            return entries
+        finally:
+            for _, _, path in seg_files:
+                self._safe_remove(path)
+            if temp_audio:
+                self._safe_remove(temp_audio)
 
     async def _call_openai_audio(self, client: Any, audio_b64: str, prompt: str) -> str:
         """OpenAI 兼容 chat/completions 多模态音频请求（中转转发 Gemini 走这条）"""
@@ -273,7 +319,7 @@ class GeminiAudioTranscriber:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            sentence = " ".join(str(item.get("text") or "").split())
+            sentence = self._normalize_subtitle_text(item.get("text"))
             if not sentence:
                 continue
             rel_start = self._float(item.get("start"), 0.0)
@@ -287,6 +333,28 @@ class GeminiAudioTranscriber:
                 "text": sentence,
             })
         return entries
+
+    def _normalize_subtitle_text(self, value: Any) -> str:
+        """清理模型返回字幕文本，保留双语字幕可能需要的换行"""
+        lines = [line.strip() for line in str(value or "").replace("\\N", "\n").splitlines() if line.strip()]
+        if lines:
+            return "\n".join(lines)
+        return " ".join(str(value or "").split())
+
+    def _clamp_entries(self, entries: list[dict], max_end_seconds: float) -> list[dict]:
+        """把模型时间轴限制在当前片段内，避免模型输出越界时间码"""
+        clamped: list[dict] = []
+        for entry in entries:
+            start = self._asr._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
+            end = self._asr._srt_time_to_seconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+            if start >= max_end_seconds:
+                continue
+            next_end = min(max_end_seconds, max(start + 0.2, end))
+            next_entry = dict(entry)
+            next_entry["start"] = self._asr._seconds_to_srt_time(start)
+            next_entry["end"] = self._asr._seconds_to_srt_time(next_end)
+            clamped.append(next_entry)
+        return clamped
 
     def _extract_json_items(self, text: str) -> list[Any]:
         """从模型输出里抽出 JSON 数组，容忍 markdown 代码块和前后多余文字"""
