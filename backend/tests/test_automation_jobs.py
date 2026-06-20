@@ -192,6 +192,10 @@ class FakeAutomationProcessor:
             file.write(b"exported")
         return output_path
 
+    def media_video_size(self, *_args, **_kwargs):
+        """返回固定视频尺寸，避免测试里真正调用 ffprobe"""
+        return (1920, 1080)
+
 
 class FakeAutomationRecognizer:
     """测试用本地识别器，返回固定字幕"""
@@ -223,6 +227,30 @@ class FakeVoiceEngine:
         with open(output_path, "wb") as file:
             file.write(b"voice")
         return output_path
+
+
+class FailingTextEngine:
+    """测试用文本引擎，模拟字幕翻译重试耗尽"""
+
+    async def process_subtitle_entries(self, *_args, **_kwargs):
+        """模拟按条目翻译失败"""
+        raise RuntimeError("文本 API 重试次数已用完")
+
+    async def process_text(self, *_args, **_kwargs):
+        """模拟整段兜底翻译也失败"""
+        raise RuntimeError("文本 API 重试次数已用完")
+
+
+class FailingVoiceEngine:
+    """测试用配音引擎，模拟分段和整段配音都失败"""
+
+    async def generate_timed_voice_track(self, *_args, **_kwargs):
+        """模拟分段配音失败"""
+        raise RuntimeError("配音 API 重试次数已用完")
+
+    async def generate_voice(self, *_args, **_kwargs):
+        """模拟整段配音失败"""
+        raise RuntimeError("配音 API 重试次数已用完")
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -923,6 +951,83 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIn("你好世界", comparison_content)
         self.assertIn("hello world", comparison_content)
 
+    def test_automation_translation_failure_stops_for_resume(self):
+        """字幕翻译重试耗尽后停在字幕阶段，不应静默跳过并继续导出"""
+        with tempfile.TemporaryDirectory(prefix="automation_translate_fail_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="translate-fail", url="https://example.test/video", title="Translate Fail")
+            text_profile = TextProviderProfile(
+                id=12,
+                name="失败文本",
+                provider_type="openai_compatible",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                model="test-model",
+            )
+            job = AutomationJobRecord(
+                id="auto-translate-fail",
+                source_url=video.url,
+                title=video.title,
+                status="running",
+                stages=json.dumps(_default_stages(), ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(30, 40))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "translate-fail",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FakeAutomationRecognizer()),
+                patch("backend.api.automation.TextEngine", return_value=FailingTextEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=text_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    _run_automation_sync(
+                        AutomationRunRequest(
+                            url=video.url,
+                            enable_effects=False,
+                            processing_preset={},
+                            enable_voice=False,
+                            burn_subtitles=True,
+                            subtitle_operation="translate",
+                            subtitle_target_language="zh-CN",
+                            text_profile_id=12,
+                            output_format="mp4",
+                        ),
+                        db,
+                        job,
+                    )
+
+            stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+            self.assertIn("继续完成", str(context.exception))
+            self.assertEqual(stages["subtitle"]["status"], "failed")
+            self.assertIn("字幕翻译失败", stages["subtitle"]["error_message"])
+            self.assertEqual(stages["export"]["status"], "pending")
+            self.assertEqual(fake_processor.convert_calls, [])
+
     def test_retry_reset_clears_previous_runtime_state(self):
         job = AutomationJobRecord(
             id="auto-retry",
@@ -1609,6 +1714,82 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_processor.convert_calls[0]["output_path"], response.subtitle_only_video_path)
             self.assertNotIn("output_path", fake_processor.convert_calls[1])
             self.assertEqual(fake_processor.merge_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
+
+    def test_automation_voice_failure_stops_for_resume(self):
+        """配音重试耗尽后停在配音阶段，不应导出无配音视频"""
+        with tempfile.TemporaryDirectory(prefix="automation_voice_fail_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="voice-fail", url="https://example.test/video", title="配音失败")
+            voice_profile = VoiceProviderProfile(
+                id=3,
+                name="失败配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            job = AutomationJobRecord(
+                id="auto-voice-fail",
+                source_url=video.url,
+                title=video.title,
+                status="running",
+                stages=json.dumps(_default_stages(), ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [])
+            task_ids = iter(range(50, 60))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-fail",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FakeAutomationRecognizer()),
+                patch("backend.api.automation.VoiceEngine", return_value=FailingVoiceEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    _run_automation_sync(
+                        AutomationRunRequest(
+                            url=video.url,
+                            enable_effects=False,
+                            processing_preset={},
+                            enable_voice=True,
+                            burn_subtitles=True,
+                            output_format="mp4",
+                        ),
+                        db,
+                        job,
+                    )
+
+            stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+            self.assertIn("继续完成", str(context.exception))
+            self.assertEqual(stages["voice"]["status"], "failed")
+            self.assertIn("配音生成失败", stages["voice"]["error_message"])
+            self.assertEqual(stages["export"]["status"], "pending")
+            self.assertEqual(fake_processor.convert_calls, [])
+            self.assertEqual(fake_processor.merge_calls, [])
 
     def test_reexport_automation_job_uses_new_subtitle_and_updates_job_output(self):
         """字幕调整页重新导出会使用新 ASS 并覆盖任务的最新导出路径"""

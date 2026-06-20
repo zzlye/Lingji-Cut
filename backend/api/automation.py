@@ -74,6 +74,16 @@ class BannedWordsDetected(RuntimeError):
     """禁词命中异常，用于区分普通字幕失败和策略拦截"""
 
 
+class ResumableStageFailed(RuntimeError):
+    """可断点续跑的阶段失败，前端会提示用户修正配置后继续完成"""
+
+
+def _resumable_stage_error(stage_label: str, error: Exception) -> ResumableStageFailed:
+    """统一生成可继续任务的错误文案，避免后台静默跳过关键阶段"""
+    detail = str(error or "").strip() or "未知错误"
+    return ResumableStageFailed(f"{stage_label}失败，已停在当前阶段；修正配置或稍后重试后，可点击「继续完成」从断点继续。原因：{detail}")
+
+
 def _job_control_key(job_id: str) -> str:
     """生成自动化任务控制 key"""
     return f"job:{job_id}"
@@ -2100,9 +2110,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 except TaskControlRequested:
                     raise
                 except Exception as text_exc:
-                    # 文本 API 是增强能力，失败时继续使用本地识别字幕完成主流程。
-                    warning_messages.append(f"文本 API 处理失败，已使用本地识别字幕: {text_exc}")
-                    pass
+                    operation_label = SUBTITLE_API_OPERATION_LABELS.get(request.subtitle_operation, "处理")
+                    raise _resumable_stage_error(f"字幕{operation_label}", text_exc) from text_exc
             entries = _apply_glossary_terms(entries, request.glossary_terms)
             subtitle_text = entries_to_plain_text(entries)
             if subtitle_was_translated:
@@ -2175,13 +2184,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 if job:
                     _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(exc))
                 raise
-            skip_message = f"{str(exc) or '本地字幕识别失败'}，已跳过字幕并继续导出"
-            _complete_task(db, subtitle_task, None)
-            subtitle_task.error_message = skip_message
-            db.commit()
-            stages.append(AutomationStageResult(key="subtitle", status="skipped", task_id=subtitle_task.id, error_message=skip_message))
+            resumable_error = exc if isinstance(exc, ResumableStageFailed) else _resumable_stage_error("字幕处理", exc)
+            _fail_task(db, subtitle_task, resumable_error)
             if job:
-                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, error_message=skip_message)
+                _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(resumable_error))
+            raise resumable_error from exc
 
     voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice else None
     reusable_audio_path = _stage_output_if_reusable(job, "voice") if resume_from_checkpoint else None
@@ -2270,15 +2277,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             _handle_task_control(db, voice_task, exc)
             raise
         except Exception as exc:
-            _fail_task(db, voice_task, exc)
             if isinstance(exc, BannedWordsDetected):
+                _fail_task(db, voice_task, exc)
                 if job:
                     _update_job_stage(db, job, "voice", "failed", task_id=voice_task.id, error_message=str(exc))
                 raise
-            audio_path = None
-            stages.append(AutomationStageResult(key="voice", status="skipped", task_id=voice_task.id, error_message=str(exc)))
+            resumable_error = exc if isinstance(exc, ResumableStageFailed) else _resumable_stage_error("配音生成", exc)
+            _fail_task(db, voice_task, resumable_error)
             if job:
-                _update_job_stage(db, job, "voice", "skipped", task_id=voice_task.id, error_message=str(exc))
+                _update_job_stage(db, job, "voice", "failed", task_id=voice_task.id, error_message=str(resumable_error))
+            raise resumable_error from exc
     else:
         stages.append(AutomationStageResult(key="voice", status="skipped", error_message="没有启用或没有已保存配音配置"))
         if job:
