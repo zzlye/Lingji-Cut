@@ -1053,7 +1053,8 @@ async def save_corrected_ass(request: SubtitleCorrectionSaveAssRequest, db: Sess
     preset_dict = _preset_to_dict(preset)
     display_entries = engine.normalize_entries_for_display(entries, preset_dict)
     output_path = _safe_subtitle_output_path(request.output_path, request.file_name, "ass", request.source_path)
-    engine.generate_ass(display_entries, output_path, preset_dict)
+    video_size = FFmpegProcessor().media_video_size(request.source_path) if request.source_path and os.path.exists(request.source_path) else None
+    engine.generate_ass(display_entries, output_path, preset_dict, video_size=video_size)
 
     return SubtitleCorrectionResponse(
         message=f"已生成 ASS 字幕 {len(display_entries)} 条",
@@ -1111,7 +1112,8 @@ def render_subtitles(request: SubtitleRenderRequest, db: Session = Depends(get_d
         base_name = os.path.splitext(os.path.basename(request.video_path))[0]
         ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
         display_entries = engine.normalize_entries_for_display(entries, preset_dict)
-        engine.generate_ass(display_entries, ass_path, preset_dict)
+        video_size = FFmpegProcessor().media_video_size(request.video_path)
+        engine.generate_ass(display_entries, ass_path, preset_dict, video_size=video_size)
 
         output_path = None
         if request.burn_in:

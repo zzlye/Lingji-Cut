@@ -252,6 +252,23 @@ Language: ja
             self.assertNotIn("\\N", content)
             self.assertIn("WrapStyle: 2", content)
 
+    def test_generate_ass_uses_actual_video_resolution_for_position(self):
+        """ASS 画布跟随实际视频分辨率，避免字幕位置按固定 1080p 偏移"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "position.ass")
+
+            SubtitleEngine().generate_ass(
+                [{"index": 1, "start": "00:00:01,000", "end": "00:00:05,000", "text": "测试字幕"}],
+                output_path,
+                {"font_size": 48, "line_mode": "single"},
+                video_size=(320, 180),
+            )
+
+            with open(output_path, "r", encoding="utf-8") as file:
+                content = file.read()
+            self.assertIn("PlayResX: 320", content)
+            self.assertIn("PlayResY: 180", content)
+
     def test_parse_ass_file_restores_editable_entries(self):
         """ASS 字幕可重新解析成可编辑条目，方便主界面继续校对"""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -330,30 +347,70 @@ Language: ja
         self.assertEqual(entries[0]["end"], "00:00:05,000")
         self.assertEqual(entries[0]["text"], "原文第一行\nTranslated second line")
 
-    def test_normalize_entries_for_display_splits_long_single_line_text(self):
-        """长字幕会按时间比例拆成多条短字幕，改善硬字幕时间轴"""
+    def test_normalize_entries_for_display_keeps_regular_single_line_text(self):
+        """普通短字幕不应因为字号较大被硬拆成多条"""
         entries = SubtitleEngine().normalize_entries_for_display(
-            [{"index": 1, "start": "00:00:01,000", "end": "00:00:05,000", "text": "结合这些情况，我们来看一下未来三小时的整体模拟过程，首先是凌晨三点的降雨情况。"}],
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,360", "text": "在 Strength SMP 上"}],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], "在 Strength SMP 上")
+        self.assertEqual(entries[0]["start"], "00:00:00,000")
+        self.assertEqual(entries[0]["end"], "00:00:01,360")
+
+    def test_normalize_entries_for_display_keeps_extremely_long_single_line_timing(self):
+        """单行模式不再按字数二次切时间轴，避免内容被机械断开"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [{"index": 1, "start": "00:00:01,000", "end": "00:00:07,000", "text": "结合这些情况，我们来看一下未来三小时的整体模拟过程，首先是凌晨三点的降雨情况，随后雨带会继续向东移动并逐渐减弱。"}],
             {"font_size": 48, "line_mode": "single"},
         )
 
-        self.assertGreater(len(entries), 1)
+        self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["start"], "00:00:01,000")
-        self.assertEqual(entries[-1]["end"], "00:00:05,000")
+        self.assertEqual(entries[0]["end"], "00:00:07,000")
         self.assertTrue(all("\\N" not in entry["text"] for entry in entries))
         self.assertFalse(any(entry["text"].startswith(("，", "。")) for entry in entries))
 
-    def test_normalize_entries_for_display_uses_text_weighted_timing(self):
-        """拆分字幕按文字长度分配时长，避免短句和长句被平均切分导致时间轴偏移"""
+    def test_normalize_entries_for_display_preserves_ai_or_asr_timing(self):
+        """字幕显示清理不再重新分配时间，时间轴交给 ASR 或 AI 整理结果负责"""
         entries = SubtitleEngine().normalize_entries_for_display(
-            [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "这是一个非常长的字幕前半段内容需要完整保留；短句还需要继续补充说明"}],
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:06,000", "text": "这是一个非常长的字幕前半段内容需要完整保留；短句还需要继续补充说明并且不能过早消失"}],
             {"font_size": 48, "line_mode": "single"},
         )
 
-        self.assertEqual(len(entries), 2)
-        self.assertTrue(entries[0]["text"].endswith("；"))
-        self.assertGreater(entries[0]["end"], "00:00:02,500")
-        self.assertEqual(entries[-1]["end"], "00:00:04,000")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["start"], "00:00:00,000")
+        self.assertEqual(entries[0]["end"], "00:00:06,000")
+        self.assertIn("短句还需要继续补充说明", entries[0]["text"])
+
+    def test_normalize_entries_for_display_pulls_short_leading_phrase_to_previous_entry(self):
+        """相邻字幕被切成“最好的 / 基地”时，把短词并回上一条并同步移动时间边界"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [
+                {"index": 11, "start": "00:00:19,100", "end": "00:00:22,380", "text": "我带着一个计划加入其中 那就是建造一个最好的"},
+                {"index": 12, "start": "00:00:22,380", "end": "00:00:25,300", "text": "基地 同时还要让它对服务器上的其他人"},
+                {"index": 13, "start": "00:00:25,300", "end": "00:00:26,640", "text": "完全隐蔽"},
+            ],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual(entries[0]["text"], "我带着一个计划加入其中 那就是建造一个最好的基地")
+        self.assertEqual(entries[1]["text"], "同时还要让它对服务器上的其他人")
+        self.assertGreater(entries[0]["end"], "00:00:22,380")
+        self.assertEqual(entries[0]["end"], entries[1]["start"])
+
+    def test_normalize_entries_for_display_does_not_merge_new_subject_clause(self):
+        """下一条是新主语句时不能为了凑完整把两句硬合并"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [
+                {"index": 4, "start": "00:00:06,020", "end": "00:00:07,560", "text": "但只要我建好一个"},
+                {"index": 5, "start": "00:00:07,720", "end": "00:00:08,580", "text": "它就会被抄家"},
+            ],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual([entry["text"] for entry in entries], ["但只要我建好一个", "它就会被抄家"])
 
     def test_normalize_entries_for_display_caps_short_single_line_duration(self):
         """短字幕不会因为识别段过长而在画面上挂很多秒"""

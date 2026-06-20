@@ -1693,6 +1693,7 @@ def _prepare_subtitle_for_burn(
     subtitle_path: str,
     output_dir: str,
     preset: dict[str, Any],
+    video_path: Optional[str] = None,
     suffix: str = "clean",
 ) -> str:
     """烧录前统一清理字幕文件，避免旧 ASS/SRT 绕过标点过滤"""
@@ -1703,7 +1704,8 @@ def _prepare_subtitle_for_burn(
     display_entries = engine.normalize_entries_for_display(entries, preset)
     base_name = os.path.splitext(os.path.basename(subtitle_path))[0]
     output_path = os.path.join(output_dir, f"{base_name}_{suffix}.ass")
-    engine.generate_ass(display_entries, output_path, preset)
+    video_size = FFmpegProcessor().media_video_size(video_path) if video_path else None
+    engine.generate_ass(display_entries, output_path, preset, video_size=video_size)
     return output_path
 
 
@@ -2136,7 +2138,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 # 校对页永远读取这份中英对照 SRT，不再受烧录预设单行/双行影响。
                 engine.save_srt(comparison_entries, comparison_subtitle_path)
             subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
-            engine.generate_ass(display_entries, subtitle_ass_path, preset_dict)
+            video_size = processor.media_video_size(effects_path)
+            engine.generate_ass(display_entries, subtitle_ass_path, preset_dict, video_size=video_size)
             if request.burn_subtitles:
                 video_for_export = processor.burn_subtitles(
                     video_path=effects_path,
@@ -3558,6 +3561,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
                 subtitle_path=subtitle_path,
                 output_dir=workspace_paths["output_dir"],
                 preset=subtitle_preset_dict,
+                video_path=working_video,
                 suffix="manual_clean",
             )
             working_video = processor.burn_subtitles(

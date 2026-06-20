@@ -850,6 +850,62 @@ class FFmpegProcessor:
                 pass
         return self._media_duration_from_ffmpeg(media_path)
 
+    def media_video_size(self, media_path: str) -> Optional[tuple[int, int]]:
+        """读取视频实际宽高，用于让 ASS 字幕坐标和烧录画布保持一致"""
+        ffprobe_cmd = self._ffprobe_command()
+        if ffprobe_cmd:
+            try:
+                result = subprocess.run(
+                    [
+                        ffprobe_cmd,
+                        "-v", "error",
+                        "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height",
+                        "-of", "csv=p=0:s=x",
+                        media_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    parsed = self._parse_video_size(result.stdout)
+                    if parsed:
+                        return parsed
+            except Exception:
+                pass
+        return self._media_video_size_from_ffmpeg(media_path)
+
+    def _media_video_size_from_ffmpeg(self, media_path: str) -> Optional[tuple[int, int]]:
+        """没有 ffprobe 时，从 ffmpeg 探测输出里解析视频分辨率"""
+        try:
+            result = subprocess.run(
+                [self.ffmpeg_cmd, "-hide_banner", "-i", media_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except Exception:
+            return None
+        return self._parse_video_size(f"{result.stdout}\n{result.stderr}")
+
+    def _parse_video_size(self, output: str) -> Optional[tuple[int, int]]:
+        """从 ffprobe/ffmpeg 输出里提取第一路视频宽高"""
+        match = re.search(r"(?P<w>\d{2,5})x(?P<h>\d{2,5})(?:\s|,|\[)", str(output or ""))
+        if not match:
+            return None
+        width = int(match.group("w"))
+        height = int(match.group("h"))
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+
     def _ffprobe_command(self) -> Optional[str]:
         """优先使用 D:\\tools\\ffmpeg 同目录里的 ffprobe"""
         ffmpeg_dir = os.path.dirname(self.ffmpeg_cmd) if os.path.isabs(self.ffmpeg_cmd) else ""

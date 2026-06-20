@@ -22,6 +22,8 @@ MEANINGFUL_CHAR_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff\u3040-\u30ff\uac00-\ud
 DISALLOWED_SUBTITLE_SEPARATOR_RE = re.compile(r"\.{3,}|…+|[，。、,.]")
 CJK_DIGIT_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])\s+(?=[0-9０-９])|(?<=[0-9０-９])\s+(?=[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af])")
 CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+LEADING_CJK_PHRASE_RE = re.compile(r"^([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]{1,4})\s+(.{2,})$")
+NEW_CJK_CLAUSE_PREFIXES = ("我", "你", "他", "她", "它", "我们", "你们", "他们", "她们", "它们", "有人", "这", "那")
 CJK_UNSAFE_SPLIT_PAIRS = {
     "产生", "发生", "反应", "生成", "无法", "别的", "女人", "男人",
     "字幕", "翻译", "原文", "识别", "视频", "导出", "保存", "下载",
@@ -363,7 +365,8 @@ class SubtitleEngine:
         self,
         entries: List[dict],
         output_path: str,
-        preset: Optional[dict] = None
+        preset: Optional[dict] = None,
+        video_size: Optional[tuple[int, int]] = None,
     ) -> str:
         """
         生成 ASS 字幕文件
@@ -384,6 +387,7 @@ class SubtitleEngine:
         shadow_color = self._color_to_ass(preset.get("shadow_color", "&H80000000"), default_alpha="80")
         position = preset.get("position", "bottom")
         margin_v = preset.get("margin_v", 30)
+        play_res_x, play_res_y = self._ass_play_resolution(preset, video_size)
 
         # 位置映射，ASS 对齐值按数字键盘方向定义
         alignment_map = {
@@ -407,8 +411,8 @@ ScriptType: v4.00+
 WrapStyle: {wrap_style}
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.601
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
@@ -435,44 +439,36 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return output_path
 
     def normalize_entries_for_display(self, entries: List[dict], preset: Optional[dict] = None) -> List[dict]:
-        """把长字幕拆成短字幕条目，避免单条字幕显示两行并改善时间轴贴合度"""
+        """清理字幕显示条目，避免烧录阶段二次硬切正常字幕"""
         preset = preset or {}
         if str(preset.get("line_mode") or "single").lower() == "double":
             return self._normalize_double_line_entries(entries)
 
-        max_chars = self._max_display_chars(preset)
         normalized_entries: list[dict] = []
-        for entry in entries:
+        for entry in self._merge_adjacent_display_fragments(entries):
             text = self.clean_subtitle_text_for_output(str(entry.get("text") or ""))
             text = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
             if not text or self.is_meaningless_subtitle_text(text):
-                continue
-            parts = self._split_subtitle_text(text, max_chars)
-            if not parts:
                 continue
             start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
             end_ms = self._time_to_milliseconds(str(entry.get("end") or "00:00:00,000"))
             if end_ms <= start_ms:
                 end_ms = start_ms + 1000
-            if len(parts) == 1:
-                end_ms = self._cap_short_display_end_ms(start_ms, end_ms, parts[0])
-            duration = max(1, end_ms - start_ms)
-            weights = [max(1, len(part)) for part in parts]
-            total_weight = max(1, sum(weights))
-            elapsed_weight = 0
-            for index, part in enumerate(parts):
-                next_weight = elapsed_weight + weights[index]
-                part_start = start_ms + int(duration * elapsed_weight / total_weight)
-                part_end = start_ms + int(duration * next_weight / total_weight)
-                elapsed_weight = next_weight
-                normalized_entries.append({
-                    **entry,
-                    "index": len(normalized_entries) + 1,
-                    "start": self._milliseconds_to_srt_time(part_start),
-                    "end": self._milliseconds_to_srt_time(max(part_start + 1, part_end)),
-                    "text": part,
-                })
+            end_ms = self._cap_short_display_end_ms(start_ms, end_ms, text)
+            normalized_entries.append({
+                **entry,
+                "index": len(normalized_entries) + 1,
+                "start": self._milliseconds_to_srt_time(start_ms),
+                "end": self._milliseconds_to_srt_time(max(start_ms + 1, end_ms)),
+                "text": text,
+            })
         return normalized_entries
+
+    def _ass_play_resolution(self, preset: dict, video_size: Optional[tuple[int, int]]) -> tuple[int, int]:
+        """确定 ASS 渲染画布，优先跟随实际视频分辨率，避免字幕位置在不同视频上漂移"""
+        width = int(video_size[0]) if video_size and video_size[0] else int(preset.get("play_res_x") or preset.get("video_width") or 1920)
+        height = int(video_size[1]) if video_size and video_size[1] else int(preset.get("play_res_y") or preset.get("video_height") or 1080)
+        return max(320, width), max(180, height)
 
     def _normalize_double_line_entries(self, entries: List[dict]) -> List[dict]:
         """双行模式保留原时间段，只清理每行空白，避免被单行拆分逻辑打散"""
@@ -487,6 +483,92 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "text": "\n".join(lines),
             })
         return normalized_entries
+
+    def _merge_adjacent_display_fragments(self, entries: List[dict]) -> List[dict]:
+        """合并相邻字幕里的明显断词，避免“最好的 / 基地”这种机械切分进入硬字幕"""
+        merged_entries: list[dict] = []
+        for raw_entry in entries:
+            entry = dict(raw_entry)
+            text = self.clean_subtitle_text_for_output(str(entry.get("text") or ""))
+            text = WHITESPACE_RE.sub(" ", text.replace("\\N", " ").replace("\n", " ")).strip()
+            if not text or self.is_meaningless_subtitle_text(text):
+                continue
+            entry["text"] = text
+
+            if merged_entries and self._should_merge_whole_entry(merged_entries[-1], entry):
+                merged_entries[-1]["text"] = self._join_subtitle_fragments(str(merged_entries[-1].get("text") or ""), text)
+                merged_entries[-1]["end"] = entry.get("end") or merged_entries[-1].get("end")
+                continue
+
+            if merged_entries:
+                adjusted = self._pull_leading_phrase_to_previous(merged_entries[-1], entry)
+                if adjusted is None:
+                    continue
+                entry = adjusted
+
+            merged_entries.append(entry)
+
+        for index, entry in enumerate(merged_entries, 1):
+            entry["index"] = index
+        return merged_entries
+
+    def _should_merge_whole_entry(self, previous: dict, current: dict) -> bool:
+        """短字幕整体承接上一条时直接并回上一条"""
+        previous_text = str(previous.get("text") or "").strip()
+        current_text = str(current.get("text") or "").strip()
+        if not previous_text or not current_text:
+            return False
+        if current_text.startswith(NEW_CJK_CLAUSE_PREFIXES):
+            return False
+        if not self._previous_text_looks_incomplete(previous_text):
+            return False
+        if self._meaningful_char_count(current_text) > 4:
+            return False
+        previous_start = self._time_to_milliseconds(str(previous.get("start") or "00:00:00,000"))
+        current_end = self._time_to_milliseconds(str(current.get("end") or "00:00:00,000"))
+        return 0 < current_end - previous_start <= 6000
+
+    def _pull_leading_phrase_to_previous(self, previous: dict, current: dict) -> Optional[dict]:
+        """把当前条开头的短中文词并回上一条，并按比例移动时间边界"""
+        previous_text = str(previous.get("text") or "").strip()
+        current_text = str(current.get("text") or "").strip()
+        match = LEADING_CJK_PHRASE_RE.match(current_text)
+        if not previous_text or not match:
+            return current
+        leading, remainder = match.group(1).strip(), match.group(2).strip()
+        if not leading or not remainder or not self._previous_text_looks_incomplete(previous_text):
+            return current
+
+        start_ms = self._time_to_milliseconds(str(current.get("start") or "00:00:00,000"))
+        end_ms = self._time_to_milliseconds(str(current.get("end") or "00:00:00,000"))
+        duration = end_ms - start_ms
+        if duration <= 300:
+            return current
+
+        leading_weight = max(1, self._meaningful_char_count(leading))
+        total_weight = leading_weight + max(1, self._meaningful_char_count(remainder))
+        split_ms = start_ms + max(180, min(duration - 120, int(duration * leading_weight / total_weight)))
+        if split_ms <= start_ms or split_ms >= end_ms:
+            return current
+
+        previous["text"] = self._join_subtitle_fragments(previous_text, leading)
+        previous["end"] = self._milliseconds_to_srt_time(split_ms)
+        next_entry = dict(current)
+        next_entry["start"] = self._milliseconds_to_srt_time(split_ms)
+        next_entry["text"] = remainder
+        return next_entry
+
+    def _previous_text_looks_incomplete(self, text: str) -> bool:
+        """判断上一条字幕是否像未说完整，主要用于合并被 ASR 切开的中文短词"""
+        value = str(text or "").strip()
+        if not value:
+            return False
+        incomplete_suffixes = (
+            "的", "被", "把", "让", "将", "对", "从", "给", "为", "用", "在",
+            "一个", "这个", "那个", "这些", "那些", "一种", "一些", "一座", "一栋",
+            "最好的", "最快的", "最重要的", "精美的", "高效的", "需要的", "想要的",
+        )
+        return value.endswith(incomplete_suffixes)
 
     def _format_ass_dialogue_text(self, text: str, preset: dict) -> str:
         """格式化 ASS 单条字幕，单行模式不再写入换行符"""
@@ -563,6 +645,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         duration = max(1, end_ms - start_ms)
         meaningful_count = self._meaningful_char_count(text)
         if meaningful_count <= 0:
+            return end_ms
+        if meaningful_count > 18:
             return end_ms
         cap_ms = max(1200, min(4200, 900 + meaningful_count * 150))
         if duration <= cap_ms + 500:

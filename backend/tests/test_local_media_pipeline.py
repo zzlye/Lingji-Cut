@@ -306,6 +306,12 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn("force_style=", subtitle_filter)
         self.assertIn("PrimaryColour=&H00FFFFFF", subtitle_filter)
 
+    def test_parse_video_size_from_ffmpeg_output(self):
+        """没有 ffprobe 时也能从 ffmpeg 输出解析视频分辨率"""
+        output = "Stream #0:0: Video: h264, yuv420p(tv, bt709), 1920x1080, 60 fps"
+
+        self.assertEqual(self.processor._parse_video_size(output), (1920, 1080))
+
     def test_subtitle_cpu_encoder_uses_smaller_default_crf(self):
         """字幕烧录默认 CPU 编码略偏体积优先，避免没做画面处理时成品暴涨"""
         args = self.processor._video_encoder_args({}, for_subtitles=True, encoder="libx264")

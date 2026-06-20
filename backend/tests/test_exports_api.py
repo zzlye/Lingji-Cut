@@ -49,6 +49,10 @@ class FakeExportProcessor:
             file.write(b"subtitled")
         return output_path
 
+    def media_video_size(self, _media_path):
+        """返回固定测试分辨率，避免测试启动真实 ffprobe"""
+        return 320, 180
+
     def convert_format(self, input_path, output_format, control_keys=None, progress_callback=None):
         """记录最终导出并返回假成品路径"""
         if progress_callback:
