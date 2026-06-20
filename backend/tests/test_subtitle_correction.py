@@ -388,6 +388,17 @@ Language: ja
         self.assertFalse(any(part.endswith("产") for part in parts[:-1]))
         self.assertTrue(any(part.startswith("产生") or "产生" in part for part in parts))
 
+    def test_split_subtitle_text_keeps_short_keyword_with_previous_line(self):
+        """自然断点就在后面几个字时，短核心词不要被挤到下一行开头"""
+        parts = SubtitleEngine()._split_subtitle_text(
+            "计划建一个最好的基地 同时还要让它完全隐蔽",
+            9,
+        )
+
+        self.assertGreater(len(parts), 1)
+        self.assertEqual(parts[0], "计划建一个最好的基地")
+        self.assertFalse(parts[1].startswith("基地"))
+
     def test_normalize_entries_for_display_drops_punctuation_only_entries(self):
         """显示字幕会丢弃只有逗号、句号或省略号的无意义条目"""
         entries = SubtitleEngine().normalize_entries_for_display(

@@ -63,6 +63,51 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(result[1]["text"], "第二句")
         self.assertEqual(result[1]["end"], "00:00:03,000")
 
+    def test_process_subtitle_entries_parses_loose_json_without_commas(self):
+        """模型漏掉 JSON 逗号时尽量按 id/text 修复，避免直接进入整段粗切"""
+        engine = FakeTextEngine([
+            '[{"id":1 "text":"第一条"} {"id":2 "text":"第二条"}]',
+        ])
+        entries = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "first"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "second"},
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="中文",
+        ))
+
+        self.assertEqual([entry["text"] for entry in result], ["第一条", "第二条"])
+
+    def test_translate_bad_structured_json_does_not_pollute_subtitles(self):
+        """坏 JSON 不能当普通文本分配回字幕，否则会把 id/text 残片烧进画面"""
+        engine = FakeTextEngine([
+            '[{"id":1 "text":"第一条"',
+        ])
+        entries = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "first"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "second"},
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "兜底"):
+            asyncio.run(engine.process_subtitle_entries(
+                entries=entries,
+                provider_type="openai",
+                api_key="test",
+                base_url="https://example.com/v1",
+                model="model",
+                settings={"subtitle_batch_size": 10, "retry_count": 0},
+                operation="translate",
+                target_language="中文",
+            ))
+
     def test_translate_prompt_defaults_to_simplified_chinese(self):
         """翻译未选择输出语言时默认翻译成简体中文"""
         engine = TextEngine()

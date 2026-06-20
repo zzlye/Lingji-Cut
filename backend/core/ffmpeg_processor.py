@@ -5,6 +5,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -322,43 +323,47 @@ class FFmpegProcessor:
             output_root = workspace_paths["output_dir"] if workspace_paths else ensure_project_dirs()["output_dir"]
             output_path = os.path.join(output_root, f"{base_name}_subtitled.mp4")
 
-        # 构建字幕滤镜
-        subtitle_filter = self._build_subtitle_filter(subtitle_path, preset)
+        filter_subtitle_path = self._prepare_subtitle_filter_file(subtitle_path)
+        try:
+            # 构建字幕滤镜
+            subtitle_filter = self._build_subtitle_filter(filter_subtitle_path, preset)
 
-        # 构建 ffmpeg 命令
-        preset_dict = preset or {}
-        bitrate = self._resolve_bitrate(preset_dict)
-        # 字幕滤镜会把画面重新合成，这里仍优先 GPU，但编码参数会走字幕专用保守配置。
-        encoder = self._resolve_video_encoder(preset_dict)
-        cmd = [
-            self.ffmpeg_cmd,
-            "-i", video_path,           # 输入视频
-            "-vf", subtitle_filter,     # 字幕滤镜
-            "-c:a", "copy",             # 音频直接复制
-        ]
-        cmd.extend(self._video_encoder_args(preset_dict, for_subtitles=True, encoder=encoder))
-        if bitrate:
-            cmd.extend(["-b:v", bitrate])
-        cmd.extend(["-y", output_path])
+            # 构建 ffmpeg 命令
+            preset_dict = preset or {}
+            bitrate = self._resolve_bitrate(preset_dict)
+            # 字幕滤镜会把画面重新合成，这里仍优先 GPU，但编码参数会走字幕专用保守配置。
+            encoder = self._resolve_video_encoder(preset_dict)
+            cmd = [
+                self.ffmpeg_cmd,
+                "-i", video_path,           # 输入视频
+                "-vf", subtitle_filter,     # 字幕滤镜
+                "-c:a", "copy",             # 音频直接复制
+            ]
+            cmd.extend(self._video_encoder_args(preset_dict, for_subtitles=True, encoder=encoder))
+            if bitrate:
+                cmd.extend(["-b:v", bitrate])
+            cmd.extend(["-y", output_path])
 
-        logger.info(f"烧录字幕: {video_path} -> {output_path}")
-        logger.info(f"字幕烧录视频编码器: {encoder}")
+            logger.info(f"烧录字幕: {video_path} -> {output_path}")
+            logger.info(f"字幕烧录视频编码器: {encoder}")
 
-        return self._run_ffmpeg_with_cpu_fallback(
-            cmd,
-            "字幕烧录",
-            timeout=21600,
-            encoder=encoder,
-            preset=preset_dict,
-            for_subtitles=True,
-            control_keys=control_keys,
-            progress_callback=progress_callback,
-            progress_total_seconds=self._media_duration_seconds(video_path),
-        )
+            return self._run_ffmpeg_with_cpu_fallback(
+                cmd,
+                "字幕烧录",
+                timeout=21600,
+                encoder=encoder,
+                preset=preset_dict,
+                for_subtitles=True,
+                control_keys=control_keys,
+                progress_callback=progress_callback,
+                progress_total_seconds=self._media_duration_seconds(video_path),
+            )
+        finally:
+            self._cleanup_subtitle_filter_file(filter_subtitle_path, subtitle_path)
 
     def _build_subtitle_filter(self, subtitle_path: str, preset: Optional[dict] = None) -> str:
         """构建字幕滤镜字符串"""
-        # 转义路径中的特殊字符
+        # subtitles 滤镜要转义 Windows 盘符；复杂文件名已在调用前复制成安全临时文件。
         escaped_path = subtitle_path.replace("\\", "/").replace(":", "\\:")
         subtitle_ext = os.path.splitext(subtitle_path)[1].lower()
 
@@ -417,6 +422,25 @@ class FFmpegProcessor:
 
         style_str = ",".join(style_parts) if style_parts else ""
         return f"subtitles='{escaped_path}':force_style='{style_str}'"
+
+    def _prepare_subtitle_filter_file(self, subtitle_path: str) -> str:
+        """复制字幕到安全临时文件名，绕开 FFmpeg 对单引号和特殊字符路径的解析问题"""
+        subtitle_ext = os.path.splitext(subtitle_path)[1] or ".ass"
+        temp_file = tempfile.NamedTemporaryFile(delete=False, prefix="ff_subtitle_", suffix=subtitle_ext)
+        temp_path = temp_file.name
+        temp_file.close()
+        shutil.copyfile(subtitle_path, temp_path)
+        return temp_path
+
+    def _cleanup_subtitle_filter_file(self, filter_subtitle_path: str, original_subtitle_path: str) -> None:
+        """清理字幕滤镜临时文件，失败不影响主流程错误上抛"""
+        if os.path.abspath(filter_subtitle_path) == os.path.abspath(original_subtitle_path):
+            return
+        try:
+            if os.path.exists(filter_subtitle_path):
+                os.remove(filter_subtitle_path)
+        except OSError:
+            pass
 
     def merge_audio_video(
         self,

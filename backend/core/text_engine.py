@@ -220,12 +220,16 @@ class TextEngine:
         """将模型返回内容按 id 合并回原字幕时间轴"""
         processed_map = self._parse_processed_subtitle_response(response_text)
         if not processed_map:
+            if self._looks_like_structured_subtitle_response(response_text):
+                if require_all:
+                    raise RuntimeError("文本 API 返回字幕 JSON 格式错误，已触发整段翻译兜底")
+                return [dict(entry) for entry in original_entries]
             lines = [line.strip() for line in response_text.splitlines() if line.strip()]
             if len(lines) == len(original_entries):
                 processed_map = {index + 1: line for index, line in enumerate(lines)}
 
         if require_all and len(processed_map) < len(original_entries):
-            if processed_map:
+            if processed_map or self._looks_like_structured_subtitle_response(response_text):
                 raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
             fallback_lines = self._fallback_response_lines(response_text)
             distributed_lines = self._distribute_fallback_lines(fallback_lines, original_entries)
@@ -333,6 +337,10 @@ class TextEngine:
         except json.JSONDecodeError:
             pass
 
+        loose_json = self._parse_loose_processed_subtitle_response(cleaned)
+        if loose_json:
+            return loose_json
+
         parsed: dict[int, str] = {}
         pattern = re.compile(r"^\s*(?:\[?(\d+)\]?[\.:：、\)\-]\s*)(.+?)\s*$")
         for line in cleaned.splitlines():
@@ -340,6 +348,30 @@ class TextEngine:
             if match:
                 parsed[int(match.group(1))] = match.group(2).strip()
         return parsed
+
+    def _parse_loose_processed_subtitle_response(self, text: str) -> dict[int, str]:
+        """兼容模型漏掉逗号的 JSON 数组，能修则修，不能修就交给兜底重试"""
+        parsed: dict[int, str] = {}
+        pattern = re.compile(
+            r"['\"]?id['\"]?\s*[:=]\s*(\d+)\s*,?\s*['\"]?text['\"]?\s*[:=]\s*(['\"])(.*?)\2",
+            re.DOTALL,
+        )
+        for match in pattern.finditer(text or ""):
+            subtitle_id = self._int(match.group(1), 0)
+            subtitle_text = " ".join(str(match.group(3) or "").split())
+            if subtitle_id > 0 and subtitle_text:
+                parsed[subtitle_id] = subtitle_text
+        return parsed
+
+    def _looks_like_structured_subtitle_response(self, response_text: str) -> bool:
+        """识别模型返回的坏 JSON，避免把结构化残片写进字幕正文"""
+        cleaned = self._strip_markdown_fence(str(response_text or "").strip())
+        if not cleaned:
+            return False
+        lowered = cleaned.lower()
+        if cleaned.startswith(("[", "{")) and "id" in lowered and "text" in lowered:
+            return True
+        return bool(re.search(r"['\"]?id['\"]?\s*[:=]\s*\d+.*?['\"]?text['\"]?\s*[:=]", cleaned, re.DOTALL | re.IGNORECASE))
 
     def _strip_markdown_fence(self, text: str) -> str:
         """去掉模型可能包裹的 Markdown 代码块"""

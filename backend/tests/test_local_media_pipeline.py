@@ -269,6 +269,28 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(subtitle_filter, f"subtitles='{self.temp_dir.replace('\\', '/').replace(':', '\\:')}/double_line.ass'")
         self.assertNotIn("force_style", subtitle_filter)
 
+    def test_burn_subtitles_handles_single_quote_in_ass_path(self):
+        """ASS 文件名带单引号时也能烧录，避免 Minecraft's 这类标题导致滤镜路径截断"""
+        self._create_test_video()
+        quoted_ass_path = os.path.join(self.temp_dir, "Minecraft's Secret.ass")
+        SubtitleEngine().generate_ass(
+            [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "测试字幕"}],
+            quoted_ass_path,
+            {"font_name": "Microsoft YaHei", "font_size": 24, "position": "bottom"},
+        )
+        output_path = os.path.join(self.temp_dir, "quoted_subtitled.mp4")
+
+        result = self.processor.burn_subtitles(
+            video_path=self.input_video,
+            subtitle_path=quoted_ass_path,
+            output_path=output_path,
+            preset={"acceleration": {"enabled": False}},
+        )
+
+        self.assertEqual(result, output_path)
+        self.assertTrue(os.path.exists(output_path))
+        self.assertGreater(os.path.getsize(output_path), 0)
+
     def test_srt_subtitle_filter_still_uses_force_style(self):
         """普通字幕文件仍通过 force_style 注入基础样式"""
         subtitle_filter = self.processor._build_subtitle_filter(

@@ -567,7 +567,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if char not in break_chars:
                 continue
             return index - 1 if char == " " else index
+        forward_split = self._nearby_forward_subtitle_split_at(text, max_chars, break_chars)
+        if forward_split:
+            return forward_split
         return adjust_cjk_split_boundary(text, max_chars, min_index=search_start, max_index=max_chars)
+
+    def _nearby_forward_subtitle_split_at(self, text: str, max_chars: int, break_chars: str) -> Optional[int]:
+        """向后少量寻找自然断点，避免把“基地”这类短核心词顶到下一行开头"""
+        upper_bound = min(len(text), max_chars + max(2, min(6, max_chars // 3)))
+        for index in range(max_chars + 1, upper_bound + 1):
+            char = text[index - 1]
+            if char not in break_chars:
+                continue
+            return index - 1 if char == " " else index
+        return None
 
     def _merge_invalid_subtitle_parts(self, parts: list[str]) -> list[str]:
         """合并纯标点碎片和单字尾巴，避免生成无意义字幕条目"""
