@@ -1672,9 +1672,20 @@ def combine_original_and_translated_entries(original_entries: list[dict], transl
     if not original_entries or not translated_entries:
         return translated_entries
 
+    original_by_index = {
+        int(entry.get("index") or index): entry
+        for index, entry in enumerate(original_entries, 1)
+    }
     combined: list[dict] = []
     for index, translated in enumerate(translated_entries):
-        original = original_entries[min(index, len(original_entries) - 1)]
+        source_index = translated.get("source_index")
+        try:
+            source_index = int(source_index) if source_index is not None else None
+        except (TypeError, ValueError):
+            source_index = None
+        original = original_by_index.get(source_index) if source_index else None
+        if original is None:
+            original = original_entries[min(index, len(original_entries) - 1)]
         original_text = " ".join(str(original.get("text") or "").replace("\\N", " ").split())
         translated_text = " ".join(str(translated.get("text") or "").replace("\\N", " ").split())
         next_entry = dict(translated)

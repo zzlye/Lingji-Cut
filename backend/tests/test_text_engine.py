@@ -135,7 +135,56 @@ class TextEngineTests(unittest.TestCase):
         )
 
         self.assertIn("用户额外要求：保留 Minecraft 术语，不要扩写", prompt)
-        self.assertIn("必须保持条目数量和 id 不变", prompt)
+        self.assertIn("同一个 id 可以返回多条", prompt)
+        self.assertNotIn("必须保持条目数量和 id 不变", prompt)
+
+    def test_system_prompt_length_rule_is_not_overridden_by_count_lock(self):
+        """一键完成的提示词要求控制长度时，后端不能再强制一条进一条出"""
+        engine = TextEngine()
+
+        prompt = engine._build_subtitle_entries_prompt(
+            [{"index": 1, "start": "00:00:19,100", "end": "00:00:22,380", "text": "I joined in with a plan to make the best possible base all while keeping it completely hidden from the rest of the server"}],
+            operation="translate",
+            target_language="zh-CN",
+            settings={"system_prompt": "每条建议 8 到 18 个汉字，最多不要超过 22 个汉字，不要把词组拆开。"},
+        )
+
+        self.assertIn("每条建议 8 到 18 个汉字", prompt)
+        self.assertIn("优先遵守上面的长度、语义断句和词组保护要求", prompt)
+        self.assertIn("\"id\":1", prompt)
+        self.assertIn("同一个 id 可以返回多条", prompt)
+
+    def test_translate_can_split_one_source_entry_into_multiple_timed_entries(self):
+        """模型按提示词把一条长字幕拆成多条时，后端要保留拆分而不是覆盖成一条"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"我加入并制定了一个计划"},{"id":1,"text":"要建造一个最好的基地"}]',
+        ])
+        entries = [
+            {
+                "index": 11,
+                "start": "00:00:19,100",
+                "end": "00:00:22,380",
+                "text": "I joined in with a plan to make the best possible base all while keeping it completely hidden from the rest of the server",
+            },
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="zh-CN",
+        ))
+
+        self.assertEqual([entry["text"] for entry in result], ["我加入并制定了一个计划", "要建造一个最好的基地"])
+        self.assertEqual(result[0]["start"], "00:00:19,100")
+        self.assertEqual(result[-1]["end"], "00:00:22,380")
+        self.assertEqual(result[0]["source_index"], 11)
+        self.assertEqual(result[1]["source_index"], 11)
+        self.assertLess(result[0]["end"], result[1]["end"])
 
     def test_translate_requires_all_entries_to_avoid_untranslated_leftovers(self):
         """翻译批次返回不完整时抛错，避免部分原文混入结果"""

@@ -1542,6 +1542,24 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(combined[0]["text"], "你好\nhello")
         self.assertEqual(combined[1]["text"], "世界\nworld")
 
+    def test_combine_original_and_translated_entries_uses_source_index_after_split(self):
+        """一条原文拆成多条译文时，双语对照仍应指向同一条原文"""
+        original = [
+            {"index": 11, "start": "00:00:19,100", "end": "00:00:22,380", "text": "I joined in with a plan to make the best possible base all while keeping it completely hidden from the rest of the server"},
+            {"index": 12, "start": "00:00:22,380", "end": "00:00:25,300", "text": "And then I needed to move villagers"},
+        ]
+        translated = [
+            {"index": 1, "source_index": 11, "start": "00:00:19,100", "end": "00:00:20,690", "text": "我加入并制定了一个计划"},
+            {"index": 2, "source_index": 11, "start": "00:00:20,690", "end": "00:00:22,380", "text": "要建造一个最好的基地"},
+        ]
+
+        combined = combine_original_and_translated_entries(original, translated)
+
+        self.assertEqual(len(combined), 2)
+        self.assertEqual(combined[0]["text"], f"{translated[0]['text']}\n{original[0]['text']}")
+        self.assertEqual(combined[1]["text"], f"{translated[1]['text']}\n{original[0]['text']}")
+        self.assertNotIn("villagers", combined[1]["text"])
+
     def test_merge_subtitle_burn_preset_keeps_style_and_output_quality(self):
         """字幕烧录应同时保留字幕样式和一键流程的输出码率策略"""
         merged = merge_subtitle_burn_preset(

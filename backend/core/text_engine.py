@@ -103,6 +103,8 @@ class TextEngine:
         processed: list[dict[str, Any]] = []
         for index, chunk in enumerate(chunks):
             processed.extend(results[index] or [dict(entry) for entry in chunk])
+        for index, entry in enumerate(processed, 1):
+            entry["index"] = index
         return processed
 
     async def _call_prompt_with_retry(
@@ -206,8 +208,10 @@ class TextEngine:
         ]
         return (
             f"{system_prompt}\n\n{instruction}{custom_block}\n\n"
-            "必须保持条目数量和 id 不变。只返回 JSON 数组，不要 Markdown，不要解释。\n"
-            "JSON 格式示例：[{\"id\":1,\"text\":\"处理后的字幕\"}]\n\n"
+            "优先遵守上面的长度、语义断句和词组保护要求；不要把长字幕硬塞进同一条。\n"
+            "必须覆盖每个输入 id，不能漏翻；同一个 id 可以返回多条，用来把过长字幕按语义拆短。\n"
+            "不要新增输入里不存在的 id，不要把单个字或单个词单独成条。只返回 JSON 数组，不要 Markdown，不要解释。\n"
+            "JSON 格式示例：[{\"id\":1,\"text\":\"处理后的字幕\"},{\"id\":1,\"text\":\"同一条原字幕拆出的第二段\"}]\n\n"
             f"原字幕 JSON：\n{json.dumps(payload, ensure_ascii=False)}"
         )
 
@@ -226,7 +230,7 @@ class TextEngine:
                 return [dict(entry) for entry in original_entries]
             lines = [line.strip() for line in response_text.splitlines() if line.strip()]
             if len(lines) == len(original_entries):
-                processed_map = {index + 1: line for index, line in enumerate(lines)}
+                processed_map = {index + 1: [line] for index, line in enumerate(lines)}
 
         if require_all and len(processed_map) < len(original_entries):
             if processed_map or self._looks_like_structured_subtitle_response(response_text):
@@ -234,18 +238,52 @@ class TextEngine:
             fallback_lines = self._fallback_response_lines(response_text)
             distributed_lines = self._distribute_fallback_lines(fallback_lines, original_entries)
             if distributed_lines:
-                processed_map = {index + 1: line for index, line in enumerate(distributed_lines) if line}
+                processed_map = {index + 1: [line] for index, line in enumerate(distributed_lines) if line}
             if len(processed_map) < len(original_entries):
                 raise RuntimeError("文本 API 返回字幕条数不完整，已触发整段翻译兜底")
 
         merged: list[dict[str, Any]] = []
         for index, entry in enumerate(original_entries, 1):
-            next_entry = dict(entry)
-            text = processed_map.get(index)
-            if text:
-                next_entry["text"] = text
-            merged.append(next_entry)
+            texts = processed_map.get(index) or []
+            if not texts:
+                merged.append(dict(entry))
+                continue
+            merged.extend(self._split_entry_by_processed_texts(entry, texts))
         return merged
+
+    def _split_entry_by_processed_texts(self, entry: dict[str, Any], texts: list[str]) -> list[dict[str, Any]]:
+        """把同一原字幕返回的多段译文分配到原时间段内"""
+        cleaned_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+        if not cleaned_texts:
+            return [dict(entry)]
+        if len(cleaned_texts) == 1:
+            next_entry = dict(entry)
+            next_entry["text"] = cleaned_texts[0]
+            next_entry["source_index"] = entry.get("index")
+            return [next_entry]
+
+        start_ms = self._srt_time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+        end_ms = self._srt_time_to_milliseconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+        if end_ms <= start_ms:
+            end_ms = start_ms + max(1000, len(cleaned_texts) * 500)
+        total_duration = max(1, end_ms - start_ms)
+        weights = [max(1, len(text)) for text in cleaned_texts]
+        total_weight = max(1, sum(weights))
+        elapsed_weight = 0
+        result: list[dict[str, Any]] = []
+        segment_start = start_ms
+        for index, text in enumerate(cleaned_texts):
+            elapsed_weight += weights[index]
+            segment_end = end_ms if index == len(cleaned_texts) - 1 else start_ms + int(total_duration * elapsed_weight / total_weight)
+            segment_end = max(segment_start + 1, min(end_ms, segment_end))
+            next_entry = dict(entry)
+            next_entry["text"] = text
+            next_entry["source_index"] = entry.get("index")
+            next_entry["start"] = self._milliseconds_to_srt_time(segment_start)
+            next_entry["end"] = self._milliseconds_to_srt_time(segment_end)
+            result.append(next_entry)
+            segment_start = segment_end
+        return result
 
     def _fallback_response_lines(self, response_text: str) -> list[str]:
         """把非结构化模型返回转成可回填的文本行"""
@@ -315,7 +353,7 @@ class TextEngine:
             text = f"{text}{separator}{unit}"
         return text.strip()
 
-    def _parse_processed_subtitle_response(self, response_text: str) -> dict[int, str]:
+    def _parse_processed_subtitle_response(self, response_text: str) -> dict[int, list[str]]:
         """解析模型返回的 JSON 或编号列表"""
         cleaned = self._strip_markdown_fence(response_text.strip())
         try:
@@ -323,7 +361,7 @@ class TextEngine:
             if isinstance(data, dict) and isinstance(data.get("items"), list):
                 data = data["items"]
             if isinstance(data, list):
-                parsed: dict[int, str] = {}
+                parsed: dict[int, list[str]] = {}
                 for index, item in enumerate(data, 1):
                     if isinstance(item, dict):
                         item_id = self._int(item.get("id"), index)
@@ -332,7 +370,7 @@ class TextEngine:
                         item_id = index
                         text = str(item).strip()
                     if text:
-                        parsed[item_id] = text
+                        parsed.setdefault(item_id, []).append(text)
                 return parsed
         except json.JSONDecodeError:
             pass
@@ -341,17 +379,17 @@ class TextEngine:
         if loose_json:
             return loose_json
 
-        parsed: dict[int, str] = {}
+        parsed: dict[int, list[str]] = {}
         pattern = re.compile(r"^\s*(?:\[?(\d+)\]?[\.:：、\)\-]\s*)(.+?)\s*$")
         for line in cleaned.splitlines():
             match = pattern.match(line)
             if match:
-                parsed[int(match.group(1))] = match.group(2).strip()
+                parsed.setdefault(int(match.group(1)), []).append(match.group(2).strip())
         return parsed
 
-    def _parse_loose_processed_subtitle_response(self, text: str) -> dict[int, str]:
+    def _parse_loose_processed_subtitle_response(self, text: str) -> dict[int, list[str]]:
         """兼容模型漏掉逗号的 JSON 数组，能修则修，不能修就交给兜底重试"""
-        parsed: dict[int, str] = {}
+        parsed: dict[int, list[str]] = {}
         pattern = re.compile(
             r"['\"]?id['\"]?\s*[:=]\s*(\d+)\s*,?\s*['\"]?text['\"]?\s*[:=]\s*(['\"])(.*?)\2",
             re.DOTALL,
@@ -360,8 +398,31 @@ class TextEngine:
             subtitle_id = self._int(match.group(1), 0)
             subtitle_text = " ".join(str(match.group(3) or "").split())
             if subtitle_id > 0 and subtitle_text:
-                parsed[subtitle_id] = subtitle_text
+                parsed.setdefault(subtitle_id, []).append(subtitle_text)
         return parsed
+
+    def _srt_time_to_milliseconds(self, value: str) -> int:
+        """把 SRT 时间码转成毫秒，用于拆分同一原字幕的时间段"""
+        text = str(value or "").strip().replace(",", ".")
+        parts = text.split(":")
+        if len(parts) != 3:
+            return 0
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds = float(parts[2])
+        except ValueError:
+            return 0
+        return max(0, int(round((hours * 3600 + minutes * 60 + seconds) * 1000)))
+
+    def _milliseconds_to_srt_time(self, value: int) -> str:
+        """把毫秒转成标准 SRT 时间码"""
+        total_ms = max(0, int(value))
+        hours = total_ms // 3600000
+        minutes = (total_ms % 3600000) // 60000
+        seconds = (total_ms % 60000) // 1000
+        millis = total_ms % 1000
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
     def _looks_like_structured_subtitle_response(self, response_text: str) -> bool:
         """识别模型返回的坏 JSON，避免把结构化残片写进字幕正文"""
