@@ -71,6 +71,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isTesting, setIsTesting] = useState(false)
   const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [isLocalSpeaking, setIsLocalSpeaking] = useState(false)
   const [isLoadingVoices, setIsLoadingVoices] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [notice, setNotice] = useState<PanelNotice>(null)
@@ -135,7 +136,15 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   useEffect(() => { loadProfiles() }, [])
-  useEffect(() => { loadVoices(activeProvider) }, [activeProvider])
+  useEffect(() => { loadVoices(activeProvider, activeModel) }, [activeProvider, activeModel])
+
+  useEffect(() => {
+    return () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel()
+      }
+    }
+  }, [])
 
   const createNewProfile = () => {
     profileRequestRef.current += 1
@@ -183,10 +192,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     } finally { setIsLoadingModels(false) }
   }
 
-  const loadVoices = async (providerType: string) => {
+  const loadVoices = async (providerType: string, model?: string) => {
     setIsLoadingVoices(true)
     try {
-      const result = await voiceApi.voices(providerType)
+      const result = await voiceApi.voices(providerType, model)
       setVoices(result.voices)
       if (result.voices.length > 0) setVoice(result.voices[0].id)
       setNotice({ type: 'success', message: `已获取 ${result.voices.length} 个音色` })
@@ -244,6 +253,39 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       const message = `试听失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message }); addLog('error', message)
     } finally { setIsGenerating(false) }
+  }
+
+  const handleLocalPreview = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      setNotice({ type: 'warning', message: '当前环境不支持浏览器内置试听' })
+      return
+    }
+    if (isLocalSpeaking) {
+      window.speechSynthesis.cancel()
+      setIsLocalSpeaking(false)
+      setNotice({ type: 'info', message: '已停止本地试听' })
+      return
+    }
+    if (!previewText.trim()) {
+      setNotice({ type: 'warning', message: '请输入试听文本' })
+      return
+    }
+
+    const utterance = new SpeechSynthesisUtterance(previewText.trim())
+    // 本地试听只用于快速听文本节奏，不消耗任何 TTS API 额度。
+    utterance.rate = Math.max(0.5, Math.min(2, Number(settings.speed) || 1))
+    utterance.volume = Math.max(0, Math.min(1, Number(settings.volume) > 1 ? 1 : Number(settings.volume) || 1))
+    utterance.pitch = 1
+    utterance.lang = /[\u3040-\u30ff]/.test(previewText) ? 'ja-JP' : /[A-Za-z]/.test(previewText) && !/[\u4e00-\u9fff]/.test(previewText) ? 'en-US' : 'zh-CN'
+    utterance.onend = () => setIsLocalSpeaking(false)
+    utterance.onerror = () => {
+      setIsLocalSpeaking(false)
+      setNotice({ type: 'error', message: '本地试听播放失败，请检查系统语音组件' })
+    }
+    window.speechSynthesis.cancel()
+    setIsLocalSpeaking(true)
+    setNotice({ type: 'info', message: '正在使用系统内置语音试听，不会调用配音 API' })
+    window.speechSynthesis.speak(utterance)
   }
 
   const handleSpeakerPreview = async (speaker: VoiceSpeakerProfile) => {
@@ -331,7 +373,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <Button onClick={handleSaveProfile} disabled={isSaving}>{isSaving ? '保存中…' : '保存配置'}</Button>
             <Button variant="outline" onClick={handleLoadModels} disabled={isLoadingModels}>{isLoadingModels ? '获取中…' : '获取模型'}</Button>
             <Button variant="outline" onClick={handleTestProfile} disabled={isTesting}>{isTesting ? '测试中…' : '测试连接'}</Button>
-            <Button variant="outline" onClick={() => loadVoices(activeProvider)}>{isLoadingVoices ? '获取中…' : '获取音色'}</Button>
+            <Button variant="outline" onClick={() => loadVoices(activeProvider, activeModel)}>{isLoadingVoices ? '获取中…' : '获取音色'}</Button>
             <span className="text-xs text-muted-foreground">当前模型：{activeModel || '未选择'}</span>
           </div>
         </CardContent>
@@ -356,6 +398,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <TextField label="自定义 voice id" value={customVoice} placeholder={voice} onChange={setCustomVoice} />
           <TextareaField label="试听文本" value={previewText} rows={3} onChange={setPreviewText} />
           <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" onClick={handleLocalPreview} disabled={!previewText.trim()}>{isLocalSpeaking ? '停止本地试听' : '本地试听'}</Button>
             <Button onClick={handlePreview} disabled={isGenerating || !previewText.trim()}>{isGenerating ? '生成中…' : '生成试听'}</Button>
             <span className="text-xs text-muted-foreground">当前音色：{selectedVoiceLabel}</span>
           </div>

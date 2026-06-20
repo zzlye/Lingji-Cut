@@ -44,6 +44,7 @@ class VoicePreviewRequest(BaseModel):
 class VoiceCatalogRequest(BaseModel):
     """获取音色目录请求"""
     provider_type: str
+    model: Optional[str] = None
 
 
 VOICE_CATALOGS = {
@@ -68,6 +69,28 @@ VOICE_CATALOGS = {
         {"id": "Leda", "name": "Leda", "language": "多语言", "style": "明亮"},
         {"id": "Orus", "name": "Orus", "language": "多语言", "style": "正式"},
         {"id": "Zephyr", "name": "Zephyr", "language": "多语言", "style": "轻快"},
+        {"id": "Achernar", "name": "Achernar", "language": "多语言", "style": "柔和"},
+        {"id": "Achird", "name": "Achird", "language": "多语言", "style": "亲切"},
+        {"id": "Algenib", "name": "Algenib", "language": "多语言", "style": "沙哑"},
+        {"id": "Algieba", "name": "Algieba", "language": "多语言", "style": "平滑"},
+        {"id": "Alnilam", "name": "Alnilam", "language": "多语言", "style": "坚定"},
+        {"id": "Autonoe", "name": "Autonoe", "language": "多语言", "style": "明亮"},
+        {"id": "Callirrhoe", "name": "Callirrhoe", "language": "多语言", "style": "轻松"},
+        {"id": "Despina", "name": "Despina", "language": "多语言", "style": "平滑"},
+        {"id": "Enceladus", "name": "Enceladus", "language": "多语言", "style": "气息感"},
+        {"id": "Erinome", "name": "Erinome", "language": "多语言", "style": "清亮"},
+        {"id": "Gacrux", "name": "Gacrux", "language": "多语言", "style": "成熟"},
+        {"id": "Iapetus", "name": "Iapetus", "language": "多语言", "style": "清澈"},
+        {"id": "Laomedeia", "name": "Laomedeia", "language": "多语言", "style": "轻快"},
+        {"id": "Pulcherrima", "name": "Pulcherrima", "language": "多语言", "style": "向前感"},
+        {"id": "Rasalgethi", "name": "Rasalgethi", "language": "多语言", "style": "信息感"},
+        {"id": "Sadachbia", "name": "Sadachbia", "language": "多语言", "style": "活泼"},
+        {"id": "Sadaltager", "name": "Sadaltager", "language": "多语言", "style": "知识感"},
+        {"id": "Schedar", "name": "Schedar", "language": "多语言", "style": "均衡"},
+        {"id": "Sulafat", "name": "Sulafat", "language": "多语言", "style": "温暖"},
+        {"id": "Umbriel", "name": "Umbriel", "language": "多语言", "style": "轻松"},
+        {"id": "Vindemiatrix", "name": "Vindemiatrix", "language": "多语言", "style": "温和"},
+        {"id": "Zubenelgenubi", "name": "Zubenelgenubi", "language": "多语言", "style": "随性"},
     ],
     "minimax_tts": [
         {"id": "Chinese_Professional_Male", "name": "中文专业男声", "language": "中文", "style": "商业解说"},
@@ -147,7 +170,8 @@ def _resolve_preview_api_key(request_key: Optional[str], profile: Optional[Voice
 @router.post("/voices")
 async def get_voice_catalog(request: VoiceCatalogRequest):
     """获取内置音色目录"""
-    return {"voices": VOICE_CATALOGS.get(request.provider_type, VOICE_CATALOGS["custom_tts"])}
+    effective_provider_type = VoiceEngine.resolve_provider_type(request.provider_type, request.model or "")
+    return {"voices": VOICE_CATALOGS.get(effective_provider_type, VOICE_CATALOGS["custom_tts"])}
 
 
 @router.post("/generate")

@@ -14,7 +14,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from backend.api.profiles import _fetch_voice_models, _test_voice_profile, TextModelOption, VoiceProfileTestRequest, _transient_voice_profile  # noqa: E402
-from backend.api.voice import VoicePreviewRequest, _audio_format_for_preview, preview_voice  # noqa: E402
+from backend.api.voice import VoiceCatalogRequest, VoicePreviewRequest, _audio_format_for_preview, get_voice_catalog, preview_voice  # noqa: E402
 from backend.core.voice_engine import VoiceEngine  # noqa: E402
 from backend.models import VoiceProviderProfile  # noqa: E402
 
@@ -139,6 +139,20 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "mimo-v2.5-tts"), "xiaomi_mimo_tts")
         self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "mimo-v2-tts"), "xiaomi_mimo_tts")
         self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "gpt-4o-mini-tts"), "openai_tts")
+
+    def test_gemini_tts_model_uses_gemini_voice_catalog_in_custom_channel(self):
+        """NewAPI 自定义渠道里选择 Gemini TTS 模型时应返回 Gemini 内置音色"""
+        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "gemini-3.1-flash-tts-preview"), "gemini_tts")
+
+        result = asyncio.run(get_voice_catalog(VoiceCatalogRequest(
+            provider_type="custom_tts",
+            model="gemini-3.1-flash-tts-preview",
+        )))
+
+        voice_ids = [voice["id"] for voice in result["voices"]]
+        self.assertIn("Kore", voice_ids)
+        self.assertIn("Puck", voice_ids)
+        self.assertNotIn("custom", voice_ids)
 
 
 if __name__ == "__main__":

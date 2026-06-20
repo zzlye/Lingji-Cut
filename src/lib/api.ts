@@ -406,10 +406,10 @@ export const profileApi = {
 /** 配音 API */
 export const voiceApi = {
   /** 获取音色目录 */
-  voices: (providerType: string) =>
+  voices: (providerType: string, model?: string) =>
     request<{ voices: import('@/types').VoiceOption[] }>('/voice/voices', {
       method: 'POST',
-      body: JSON.stringify({ provider_type: providerType }),
+      body: JSON.stringify({ provider_type: providerType, model }),
     }),
 
   /** 生成配音 */

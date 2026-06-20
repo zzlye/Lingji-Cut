@@ -68,11 +68,13 @@ class VoiceEngine:
 
     @staticmethod
     def resolve_provider_type(provider_type: str, model: str = "") -> str:
-        """按模型修正真实调用协议，NewAPI 里的 MiMo 模型不能走 OpenAI audio/speech"""
+        """按模型修正真实调用协议，NewAPI 里的特殊 TTS 模型不能走 OpenAI audio/speech"""
         normalized_provider = str(provider_type or "").strip()
         normalized_model = str(model or "").strip().lower()
         if normalized_provider in {"openai_tts", "custom_tts"} and normalized_model.startswith("mimo-"):
             return "xiaomi_mimo_tts"
+        if normalized_provider in {"openai_tts", "custom_tts"} and "gemini" in normalized_model and "tts" in normalized_model:
+            return "gemini_tts"
         return normalized_provider
 
     async def generate_timed_voice_track(
