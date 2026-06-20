@@ -614,4 +614,15 @@ export const settingsApi = {
   /** 获取自动化依赖工具状态 */
   tools: () =>
     request<import('@/types').ToolStatusMap>('/settings/tools'),
+
+  /** 获取 YouTube 登录 Cookies 设置 */
+  ytdlpCookies: () =>
+    request<import('@/types').YtdlpCookieSettings>('/settings/ytdlp-cookies'),
+
+  /** 保存 YouTube 登录 Cookies 设置 */
+  updateYtdlpCookies: (settings: { cookies_file?: string; cookies_browser?: string }) =>
+    request<import('@/types').YtdlpCookieSettings>('/settings/ytdlp-cookies', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }),
 }

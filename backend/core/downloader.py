@@ -12,7 +12,7 @@ import urllib.request
 from urllib.parse import urlparse
 from typing import Optional, Callable
 from ..utils import get_logger
-from .paths import ensure_project_dirs
+from .paths import ensure_project_dirs, load_ytdlp_cookie_settings
 from .process_control import TaskControlRequested, normalize_control_keys, raise_if_control_requested, register_process, subprocess_creation_flags, terminate_process, unregister_process
 from .tooling import get_ffmpeg_command, get_yt_dlp_command
 
@@ -127,17 +127,23 @@ class Downloader:
             return list(self._active_cookie_args)
 
         cookie_file = str(os.environ.get("YTV_YTDLP_COOKIES_FILE") or "").strip()
-        if cookie_file:
+        cookie_settings = load_ytdlp_cookie_settings()
+        if not cookie_file:
+            cookie_file = str(cookie_settings.get("cookies_file") or "").strip()
+        if cookie_file and os.path.isfile(os.path.expanduser(cookie_file)):
             return ["--cookies", os.path.expanduser(cookie_file)]
+        if cookie_file:
+            logger.warning(f"已配置的 cookies.txt 不存在，跳过文件读取: {cookie_file}")
 
-        browsers = self._configured_cookie_browsers()
+        browsers = self._configured_cookie_browsers(cookie_settings)
         if browsers:
             return ["--cookies-from-browser", browsers[0]]
         return []
 
-    def _configured_cookie_browsers(self) -> list[str]:
+    def _configured_cookie_browsers(self, cookie_settings: Optional[dict] = None) -> list[str]:
         """读取用户指定的浏览器 cookies 来源，支持逗号分隔多个候选"""
-        raw_value = str(os.environ.get("YTV_YTDLP_COOKIES_BROWSER") or "").strip()
+        settings = cookie_settings if cookie_settings is not None else load_ytdlp_cookie_settings()
+        raw_value = str(os.environ.get("YTV_YTDLP_COOKIES_BROWSER") or settings.get("cookies_browser") or "").strip()
         if not raw_value:
             return []
         browsers: list[str] = []
@@ -183,14 +189,29 @@ class Downloader:
     def _cookie_retry_failure_message(self, action: str, last_error: str, retry_errors: list[str]) -> str:
         """生成 cookies 重试失败提示，不输出任何 cookies 内容"""
         browser_names = ", ".join(self._configured_cookie_browsers() or self._default_cookie_browsers())
-        details = str(last_error or "").strip()
-        if retry_errors:
-            details = str(retry_errors[-1] or details).strip()
+        details = self._summarize_cookie_retry_errors(last_error, retry_errors)
         hint = (
             f"{action}遇到 YouTube 登录验证，已尝试读取本机浏览器 cookies（{browser_names}）但仍失败。"
-            "请先用对应浏览器登录 YouTube，或设置 YTV_YTDLP_COOKIES_FILE 指向导出的 cookies.txt。"
+            "请在设置里的「YouTube 登录 Cookies」选择导出的 cookies.txt，"
+            "或完全关闭 Chrome/Edge 后重试浏览器读取。"
         )
         return f"{details}\n{hint}".strip()
+
+    def _summarize_cookie_retry_errors(self, last_error: str, retry_errors: list[str]) -> str:
+        """压缩 cookies 重试错误，保留 Chrome 数据库占用等关键原因"""
+        all_errors = [str(item or "").strip() for item in [last_error, *retry_errors] if str(item or "").strip()]
+        summary: list[str] = []
+        if any("could not copy chrome cookie database" in error.lower() for error in all_errors):
+            summary.append("Chrome/Edge cookies 数据库复制失败：通常是浏览器正在运行或配置文件被占用。")
+        if any("sign in to confirm" in error.lower() or "confirm you" in error.lower() for error in all_errors):
+            summary.append("读取到的 cookies 仍没有有效 YouTube 登录态，或 YouTube 仍要求真人验证。")
+        for error in all_errors:
+            first_line = next((line.strip() for line in error.splitlines() if line.strip()), "")
+            if first_line and first_line not in summary:
+                summary.append(first_line)
+            if len(summary) >= 4:
+                break
+        return "\n".join(summary)
 
     def _run_with_cookie_retry(self, action: str, runner: Callable[[list[str]], str]) -> str:
         """执行需要 yt-dlp 的任务，遇到验证拦截时自动换浏览器 cookies 重试"""

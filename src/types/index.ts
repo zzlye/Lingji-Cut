@@ -116,6 +116,13 @@ export interface ProjectPaths {
   exports_dir: PathInfo
 }
 
+/** YouTube 登录 Cookies 设置 */
+export interface YtdlpCookieSettings {
+  cookies_file: string
+  cookies_browser: string
+  cookies_file_exists: boolean
+}
+
 /** 外部工具状态 */
 export interface ToolStatus {
   name: string

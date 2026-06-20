@@ -4,8 +4,17 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from backend.core.paths import ensure_project_dirs, ensure_video_workspace, find_video_workspace
+from backend.core import paths as paths_module
+from backend.core.paths import (
+    ensure_project_dirs,
+    ensure_video_workspace,
+    find_video_workspace,
+    load_ytdlp_cookie_settings,
+    save_project_root,
+    save_ytdlp_cookie_settings,
+)
 
 
 class ProjectPathsTest(unittest.TestCase):
@@ -57,6 +66,27 @@ class ProjectPathsTest(unittest.TestCase):
 
             self.assertIsNotNone(paths)
             self.assertEqual(paths["workspace_dir"], workspace_dir)
+
+    def test_cookie_settings_do_not_overwrite_project_root(self):
+        """保存 YouTube cookies 配置时不覆盖项目目录"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = os.path.join(temp_dir, "data")
+            config_path = os.path.join(config_dir, "settings.json")
+            project_root = os.path.join(temp_dir, "项目")
+            cookies_path = os.path.join(temp_dir, "cookies.txt")
+            with open(cookies_path, "w", encoding="utf-8") as file:
+                file.write("# Netscape HTTP Cookie File\n")
+
+            with patch.object(paths_module, "CONFIG_DIR", config_dir), \
+                    patch.object(paths_module, "CONFIG_PATH", config_path), \
+                    patch.object(paths_module, "APP_ROOT", temp_dir):
+                save_project_root(project_root)
+                settings = save_ytdlp_cookie_settings(cookies_path, "chrome,edge")
+
+                self.assertEqual(settings["cookies_file"], cookies_path)
+                self.assertEqual(settings["cookies_browser"], "chrome,edge")
+                self.assertEqual(paths_module.load_project_root(), project_root)
+                self.assertEqual(load_ytdlp_cookie_settings()["cookies_file"], cookies_path)
 
 
 if __name__ == "__main__":

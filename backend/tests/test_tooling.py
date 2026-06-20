@@ -135,6 +135,7 @@ class ToolingTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": ""}), \
                 patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                patch("backend.core.downloader.load_ytdlp_cookie_settings", return_value={"cookies_file": "", "cookies_browser": ""}), \
                 patch("backend.core.downloader.subprocess.run", side_effect=fake_run):
             downloader = Downloader()
             result = downloader.parse_video("https://youtube.com/watch?v=test")
@@ -199,6 +200,50 @@ class ToolingTests(unittest.TestCase):
         self.assertIn("chrome", captured_cmd)
         self.assertLess(captured_cmd.index("--cookies-from-browser"), captured_cmd.index("https://youtube.com/watch?v=test"))
 
+    def test_download_video_uses_configured_cookies_file(self):
+        """下载视频时优先使用用户配置的 cookies.txt 文件"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "merged.mp4")
+            cookies_path = os.path.join(temp_dir, "cookies.txt")
+            open(output_path, "wb").close()
+            open(cookies_path, "w", encoding="utf-8").close()
+            captured_cmd: list[str] = []
+
+            def fake_popen(cmd, **_):
+                """记录命令并返回模拟下载进程"""
+                captured_cmd.extend(cmd)
+                return FakeDownloadProcess(output_path)
+
+            with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": ""}), \
+                    patch("backend.core.downloader.load_ytdlp_cookie_settings", return_value={"cookies_file": cookies_path, "cookies_browser": ""}), \
+                    patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                result = downloader.download_video(
+                    url="https://youtube.com/watch?v=test",
+                    output_dir=temp_dir,
+                    format_id="137+140",
+                )
+
+        self.assertEqual(result, output_path)
+        self.assertIn("--cookies", captured_cmd)
+        self.assertIn(cookies_path, captured_cmd)
+        self.assertLess(captured_cmd.index("--cookies"), captured_cmd.index("https://youtube.com/watch?v=test"))
+
+    def test_cookie_retry_message_summarizes_locked_chrome_database(self):
+        """浏览器 cookies 数据库被占用时给出可操作中文提示"""
+        with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"):
+            downloader = Downloader()
+            message = downloader._cookie_retry_failure_message(
+                "视频解析",
+                "ERROR: Could not copy Chrome cookie database",
+                ["ERROR: [youtube] test: Sign in to confirm you're not a bot."],
+            )
+
+        self.assertIn("Chrome/Edge cookies 数据库复制失败", message)
+        self.assertIn("cookies.txt", message)
+
     def test_download_video_retries_with_browser_cookies_when_youtube_requires_auth(self):
         """下载遇到 YouTube 机器人验证时会自动重试浏览器 cookies"""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -216,6 +261,7 @@ class ToolingTests(unittest.TestCase):
             with patch.dict(os.environ, {"YTV_YTDLP_COOKIES_FILE": "", "YTV_YTDLP_COOKIES_BROWSER": ""}), \
                     patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
                     patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.load_ytdlp_cookie_settings", return_value={"cookies_file": "", "cookies_browser": ""}), \
                     patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
                 downloader = Downloader()
                 result = downloader.download_video(

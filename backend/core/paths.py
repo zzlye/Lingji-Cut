@@ -49,6 +49,13 @@ def _read_settings() -> dict[str, Any]:
         return {}
 
 
+def _write_settings(settings: dict[str, Any]) -> None:
+    """写入本地设置文件，调用方负责传入完整配置"""
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as file:
+        json.dump(settings, file, ensure_ascii=False, indent=2)
+
+
 def load_project_root() -> str:
     """获取当前项目目录"""
     settings = _read_settings()
@@ -60,9 +67,9 @@ def save_project_root(project_root: str) -> str:
     root = normalize_project_root(project_root)
     ensure_project_dirs(root)
 
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as file:
-        json.dump({"project_root": root}, file, ensure_ascii=False, indent=2)
+    settings = _read_settings()
+    settings["project_root"] = root
+    _write_settings(settings)
 
     return root
 
@@ -169,6 +176,24 @@ def get_project_paths(create: bool = True) -> dict[str, dict[str, Any]]:
         }
         for key, value in raw_paths.items()
     }
+
+
+def load_ytdlp_cookie_settings() -> dict[str, Any]:
+    """读取 yt-dlp 访问 YouTube 时使用的 cookies 配置"""
+    settings = _read_settings()
+    return {
+        "cookies_file": str(settings.get("ytdlp_cookies_file") or "").strip(),
+        "cookies_browser": str(settings.get("ytdlp_cookies_browser") or "").strip(),
+    }
+
+
+def save_ytdlp_cookie_settings(cookies_file: str | None = None, cookies_browser: str | None = None) -> dict[str, Any]:
+    """保存 yt-dlp cookies 配置，空值表示回到自动浏览器读取"""
+    settings = _read_settings()
+    settings["ytdlp_cookies_file"] = os.path.abspath(os.path.expanduser(cookies_file.strip())) if cookies_file and cookies_file.strip() else ""
+    settings["ytdlp_cookies_browser"] = str(cookies_browser or "").strip()
+    _write_settings(settings)
+    return load_ytdlp_cookie_settings()
 
 
 def _build_project_paths(project_root: str) -> dict[str, str]:

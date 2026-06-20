@@ -16,6 +16,7 @@ export interface ElectronAPI {
   }
   dialog: {
     selectDirectory: (defaultPath?: string) => Promise<string | null>
+    selectCookiesFile: (defaultPath?: string) => Promise<string | null>
     selectVideoFile: () => Promise<string | null>
   }
 }

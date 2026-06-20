@@ -296,6 +296,24 @@ app.whenReady().then(async () => {
     return result.filePaths[0]
   })
 
+  // 选择 yt-dlp 使用的 cookies.txt 文件，用于 YouTube 登录验证。
+  ipcMain.handle('dialog:select-cookies-file', async (_event, defaultPath?: string) => {
+    const result = await dialog.showOpenDialog({
+      title: '选择 YouTube cookies.txt',
+      defaultPath,
+      properties: ['openFile'],
+      filters: [
+        { name: 'Cookies 文本文件', extensions: ['txt'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
+  })
+
   // 选择本地视频文件，供主流程直接处理使用。
   ipcMain.handle('dialog:select-video-file', async () => {
     const result = await dialog.showOpenDialog({

@@ -30,6 +30,8 @@ const electronAPI = {
   dialog: {
     /** 选择项目目录 */
     selectDirectory: (defaultPath?: string) => ipcRenderer.invoke('dialog:select-directory', defaultPath),
+    /** 选择 YouTube cookies.txt 文件 */
+    selectCookiesFile: (defaultPath?: string) => ipcRenderer.invoke('dialog:select-cookies-file', defaultPath),
     /** 选择本地视频文件 */
     selectVideoFile: () => ipcRenderer.invoke('dialog:select-video-file')
   }

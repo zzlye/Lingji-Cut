@@ -8,13 +8,17 @@ import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { settingsApi } from '@/lib/api'
 import { useLogStore } from '@/stores/logStore'
-import type { ProjectPaths, ToolStatusMap } from '@/types'
+import type { ProjectPaths, ToolStatusMap, YtdlpCookieSettings } from '@/types'
 
 export function FileLocationPanel() {
   const [paths, setPaths] = useState<ProjectPaths | null>(null)
   const [tools, setTools] = useState<ToolStatusMap | null>(null)
+  const [cookieSettings, setCookieSettings] = useState<YtdlpCookieSettings | null>(null)
   const [projectRoot, setProjectRoot] = useState('')
+  const [cookiesFile, setCookiesFile] = useState('')
+  const [cookiesBrowser, setCookiesBrowser] = useState('')
   const [isSaving, setIsSaving] = useState(false)
+  const [isSavingCookies, setIsSavingCookies] = useState(false)
   const [isLoadingTools, setIsLoadingTools] = useState(false)
   const addLog = useLogStore((s) => s.addLog)
 
@@ -39,9 +43,21 @@ export function FileLocationPanel() {
     }
   }
 
+  const loadCookieSettings = async () => {
+    try {
+      const data = await settingsApi.ytdlpCookies()
+      setCookieSettings(data)
+      setCookiesFile(data.cookies_file || '')
+      setCookiesBrowser(data.cookies_browser || '')
+    } catch (error) {
+      addLog('error', `加载 YouTube Cookies 设置失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
   useEffect(() => {
     loadPaths()
     loadTools()
+    loadCookieSettings()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -71,6 +87,38 @@ export function FileLocationPanel() {
       addLog('error', `保存文件位置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     } finally {
       setIsSaving(false)
+    }
+  }
+
+  const handleSelectCookiesFile = async () => {
+    const picker = window.electron?.dialog?.selectCookiesFile
+    if (!picker) {
+      addLog('warn', '当前环境不支持系统文件选择，请直接输入 cookies.txt 路径')
+      return
+    }
+    try {
+      const selected = await picker(cookiesFile || projectRoot)
+      if (selected) setCookiesFile(selected)
+    } catch (error) {
+      addLog('error', `选择 Cookies 文件失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+  }
+
+  const handleSaveCookies = async () => {
+    setIsSavingCookies(true)
+    try {
+      const data = await settingsApi.updateYtdlpCookies({
+        cookies_file: cookiesFile,
+        cookies_browser: cookiesBrowser,
+      })
+      setCookieSettings(data)
+      setCookiesFile(data.cookies_file || '')
+      setCookiesBrowser(data.cookies_browser || '')
+      addLog('info', data.cookies_file ? 'YouTube Cookies 设置已保存' : 'YouTube Cookies 文件已清空，将改用浏览器读取')
+    } catch (error) {
+      addLog('error', `保存 YouTube Cookies 设置失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    } finally {
+      setIsSavingCookies(false)
     }
   }
 
@@ -110,6 +158,41 @@ export function FileLocationPanel() {
             <Button variant="outline" className="h-10 gap-1.5" onClick={handleReset} disabled={isSaving}><RotateCcw className="size-4" /> 恢复默认</Button>
             <Button variant="ghost" className="h-10 gap-1.5" onClick={loadPaths}><RefreshCw className="size-4" /> 重新读取</Button>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-sm">YouTube 登录 Cookies</CardTitle>
+              <CardDescription>遇到“确认不是机器人”时，优先使用这里选择的 cookies.txt。</CardDescription>
+            </div>
+            {cookieSettings?.cookies_file ? (
+              <Badge variant={cookieSettings.cookies_file_exists ? 'default' : 'destructive'}>
+                {cookieSettings.cookies_file_exists ? '文件可用' : '文件不存在'}
+              </Badge>
+            ) : (
+              <Badge variant="outline">未设置文件</Badge>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Input value={cookiesFile} onChange={(e) => setCookiesFile(e.target.value)} placeholder="选择浏览器扩展导出的 cookies.txt" className="h-10 min-w-64 flex-1" />
+            <Button variant="outline" className="h-10 gap-1.5" onClick={handleSelectCookiesFile}><FolderOpen className="size-4" /> 选择文件</Button>
+            <Button variant="ghost" className="h-10" onClick={() => setCookiesFile('')}>清空</Button>
+          </div>
+          <div className="grid gap-2 lg:grid-cols-[1fr_auto]">
+            <Input value={cookiesBrowser} onChange={(e) => setCookiesBrowser(e.target.value)} placeholder="浏览器候选，例如 chrome,edge,firefox" className="h-10" />
+            <div className="flex flex-wrap gap-2">
+              <Button className="h-10" onClick={handleSaveCookies} disabled={isSavingCookies}>{isSavingCookies ? '保存中…' : '保存 Cookies 设置'}</Button>
+              <Button variant="ghost" className="h-10 gap-1.5" onClick={loadCookieSettings}><RefreshCw className="size-4" /> 重新读取</Button>
+            </div>
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">
+            推荐用浏览器扩展导出 YouTube 登录后的 cookies.txt。只用浏览器读取时，请先完全关闭 Chrome/Edge，否则 yt-dlp 可能无法复制 cookies 数据库。
+          </p>
         </CardContent>
       </Card>
 
