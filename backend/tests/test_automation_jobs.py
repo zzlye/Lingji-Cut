@@ -745,6 +745,88 @@ class AutomationJobTests(unittest.TestCase):
             with open(os.path.join(temp_dir, "youtube_link.txt"), "r", encoding="utf-8") as file:
                 self.assertEqual(file.read().strip(), video.url)
 
+    def test_resume_reuses_cached_video_when_youtube_parse_requires_auth(self):
+        """断点续跑已有下载结果时不应重新解析 YouTube，避免卡在机器人验证"""
+        with tempfile.TemporaryDirectory(prefix="automation_resume_cached_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloads", "downloaded.mp4")
+            effects_path = os.path.join(temp_dir, "output", "enhanced.mp4")
+            os.makedirs(os.path.dirname(downloaded_path), exist_ok=True)
+            os.makedirs(os.path.dirname(effects_path), exist_ok=True)
+            with open(downloaded_path, "wb") as file:
+                file.write(b"downloaded")
+            with open(effects_path, "wb") as file:
+                file.write(b"effects")
+
+            video = VideoSource(id=42, platform="youtube", video_id="resume-cached", url="https://youtu.be/resume-cached", title="缓存视频")
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            job = AutomationJobRecord(
+                id="auto-resume-cached",
+                source_url=video.url,
+                video_id=42,
+                title=video.title,
+                status="failed",
+                progress=92,
+                current_step="流程失败",
+                params=json.dumps({
+                    "url": video.url,
+                    "workspace_dir": temp_dir,
+                    "workspace_name": "resume-cached",
+                    "video_downloads_dir": os.path.dirname(downloaded_path),
+                    "video_output_dir": os.path.dirname(effects_path),
+                    "video_exports_dir": os.path.join(temp_dir, "exports"),
+                    "output_format": "mp4",
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "parse", "status": "failed", "progress": 5, "task_id": None, "output_path": None, "error_message": "视频解析失败"},
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": downloaded_path, "error_message": None},
+                    {"key": "effects", "status": "completed", "progress": 100, "task_id": 2, "output_path": effects_path, "error_message": None},
+                    {"key": "subtitle", "status": "skipped", "progress": 100, "task_id": 3, "output_path": None, "error_message": "字幕烧录失败后跳过"},
+                    {"key": "voice", "status": "skipped", "progress": 100, "task_id": None, "output_path": None, "error_message": "没有启用或没有已保存配音配置"},
+                    {"key": "export", "status": "completed", "progress": 100, "task_id": 4, "output_path": effects_path, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [], [video])
+            task_ids = iter(range(100, 110))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            _prepare_job_for_resume(job)
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=FailingParseDownloader()),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", side_effect=AssertionError("不应重新解析 YouTube")) as parse_mock,
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=True,
+                        processing_preset={},
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    db,
+                    job,
+                    resume_from_checkpoint=True,
+                )
+
+            stage_by_key = {stage.key: stage for stage in response.stages}
+            parse_mock.assert_not_called()
+            self.assertEqual(stage_by_key["parse"].status, "completed")
+            self.assertEqual(stage_by_key["download"].output_path, downloaded_path)
+            self.assertEqual(fake_recognizer.video_paths, [effects_path])
+            self.assertEqual(fake_processor.burn_calls[0]["video_path"], effects_path)
+
     def test_automation_translation_saves_comparison_subtitle_for_review(self):
         """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""
         class EnglishRecognizer:
@@ -878,7 +960,8 @@ class AutomationJobTests(unittest.TestCase):
                 {"key": "effects", "status": "completed", "progress": 100, "task_id": 2, "output_path": "D:/effects.mp4", "error_message": None},
                 {"key": "export", "status": "failed", "progress": 35, "task_id": 3, "output_path": None, "error_message": "导出失败"},
                 {"key": "voice", "status": "paused", "progress": 20, "task_id": 4, "output_path": None, "error_message": "暂停"},
-                {"key": "subtitle", "status": "cancelled", "progress": 10, "task_id": 5, "output_path": None, "error_message": "取消"},
+                {"key": "subtitle", "status": "skipped", "progress": 100, "task_id": 5, "output_path": None, "error_message": "字幕烧录失败后跳过"},
+                {"key": "parse", "status": "cancelled", "progress": 10, "task_id": 6, "output_path": None, "error_message": "取消"},
             ], ensure_ascii=False),
         )
 
@@ -895,6 +978,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertIsNone(stages["export"]["error_message"])
         self.assertEqual(stages["voice"]["status"], "pending")
         self.assertEqual(stages["subtitle"]["status"], "pending")
+        self.assertEqual(stages["parse"]["status"], "pending")
 
     def test_prepare_job_export_stage_for_rerun_only_resets_export(self):
         """字幕调整页重新导出只重置导出阶段，不动下载/画面/字幕/配音结果"""

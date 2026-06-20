@@ -1051,6 +1051,19 @@ def _parse_or_update_video(db: Session, url: str, downloader: Downloader) -> Vid
     return dedup.add_video_source(video_info)
 
 
+def _cached_video_for_resume(db: Session, job: Optional[AutomationJobRecord]) -> Optional[VideoSource]:
+    """断点续跑时复用已入库的视频信息，避免已下载任务再次卡在 YouTube 解析"""
+    if not job or not job.video_id:
+        return None
+    try:
+        video = db.query(VideoSource).filter(VideoSource.id == job.video_id).first()
+    except Exception:
+        return None
+    if not video or not getattr(video, "video_id", None):
+        return None
+    return video
+
+
 def _load_subtitle_tracks(video: VideoSource) -> list[dict[str, Any]]:
     """读取解析阶段保存的字幕轨列表"""
     if not video.subtitles:
@@ -1839,8 +1852,10 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         _update_job_stage(db, job, "parse", "running", progress=5)
     try:
         local_source_path = _resolve_local_video_source_path(request.url, job) if is_local_source else None
-        video = _parse_or_update_local_video(db, local_source_path) if local_source_path else _parse_or_update_video(db, request.url, downloader)
-        paths = ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
+        cached_video = _cached_video_for_resume(db, job) if resume_from_checkpoint else None
+        video = cached_video or (_parse_or_update_local_video(db, local_source_path) if local_source_path else _parse_or_update_video(db, request.url, downloader))
+        cached_paths = _job_workspace_paths(job, db) if cached_video else None
+        paths = cached_paths or ensure_video_workspace(video.video_id or video.id, video.title or video.video_id)
     except Exception as exc:
         if job:
             _update_job_stage(db, job, "parse", "failed", progress=5, error_message=str(exc))
@@ -2463,7 +2478,10 @@ def _prepare_job_for_resume(job: AutomationJobRecord) -> None:
     clear_job_control_requests(None, job)
     stages = _load_job_stages(job)
     for stage in stages:
-        if stage.get("status") in {"running", "failed", "paused", CANCELLED_STATUS}:
+        status = stage.get("status")
+        # 带错误的 skipped 多数是“失败后降级继续”，继续完成时应重新尝试该阶段。
+        should_retry_skipped = status == "skipped" and bool(stage.get("error_message"))
+        if status in {"running", "failed", "paused", CANCELLED_STATUS} or should_retry_skipped:
             stage["status"] = "pending"
             stage["progress"] = 0
             stage["task_id"] = None
