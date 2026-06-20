@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -58,6 +58,9 @@ class FakeDb:
     def delete(self, job):
         if job in self.jobs:
             self.jobs.remove(job)
+
+    def close(self):
+        pass
 
 
 class FakeTaskDb(FakeDb):
@@ -1106,6 +1109,75 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(stages["subtitle"]["status"], "pending")
         self.assertIsNone(stages["subtitle"]["task_id"])
         self.assertIsNone(stages["subtitle"]["error_message"])
+
+    def test_prepare_interrupted_job_for_startup_recovers_old_cancelled_restart_message(self):
+        """旧版本写入的后端重启取消记录，应自动恢复为可续跑任务"""
+        job = AutomationJobRecord(
+            id="auto-startup-cancelled",
+            source_url="https://youtube.com/watch?v=test",
+            status="cancelled",
+            progress=45,
+            current_step="已取消",
+            error_message=BACKEND_RESTART_INTERRUPTED_MESSAGE,
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+                {"key": "subtitle", "status": "cancelled", "progress": 45, "task_id": 2, "output_path": None, "error_message": BACKEND_RESTART_INTERRUPTED_MESSAGE},
+                {"key": "export", "status": "cancelled", "progress": 0, "task_id": None, "output_path": None, "error_message": BACKEND_RESTART_INTERRUPTED_MESSAGE},
+            ], ensure_ascii=False),
+        )
+
+        _prepare_interrupted_job_for_startup(job)
+        stages = {stage["key"]: stage for stage in json.loads(job.stages)}
+
+        self.assertEqual(job.status, "pending")
+        self.assertEqual(job.current_step, "后端重启后等待恢复")
+        self.assertIsNone(job.error_message)
+        self.assertEqual(stages["download"]["status"], "completed")
+        self.assertEqual(stages["subtitle"]["status"], "pending")
+        self.assertEqual(stages["export"]["status"], "pending")
+        self.assertIsNone(stages["subtitle"]["error_message"])
+
+    def test_recover_automation_jobs_on_startup_resubmits_interrupted_jobs(self):
+        """后端启动时不再把运行中任务取消，而是提交断点续跑"""
+        running_job = AutomationJobRecord(
+            id="auto-running-startup",
+            source_url="https://youtube.com/watch?v=test",
+            status="running",
+            progress=60,
+            stages=json.dumps([
+                {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": "D:/download.mp4", "error_message": None},
+                {"key": "subtitle", "status": "running", "progress": 60, "task_id": 2, "output_path": None, "error_message": None},
+            ], ensure_ascii=False),
+        )
+        old_cancelled_job = AutomationJobRecord(
+            id="auto-old-cancelled-startup",
+            source_url="https://youtube.com/watch?v=test2",
+            status="cancelled",
+            error_message=BACKEND_RESTART_INTERRUPTED_MESSAGE,
+            stages=json.dumps([
+                {"key": "parse", "status": "cancelled", "progress": 10, "task_id": None, "output_path": None, "error_message": BACKEND_RESTART_INTERRUPTED_MESSAGE},
+            ], ensure_ascii=False),
+        )
+        user_cancelled_job = AutomationJobRecord(
+            id="auto-user-cancelled-startup",
+            source_url="https://youtube.com/watch?v=test3",
+            status="cancelled",
+            error_message="用户取消",
+            stages=json.dumps(_default_stages(), ensure_ascii=False),
+        )
+        db = FakeDb([running_job, old_cancelled_job, user_cancelled_job])
+        submitted_ids: list[str] = []
+
+        with patch("backend.api.automation.SessionLocal", return_value=db), \
+                patch("backend.api.automation._submit_automation_job", side_effect=lambda job_id, resume_from_checkpoint=False: submitted_ids.append(job_id)):
+            result = recover_automation_jobs_on_startup()
+
+        self.assertEqual(result, {"submitted": 2, "paused": 0, "interrupted": 2})
+        self.assertEqual(submitted_ids, ["auto-running-startup", "auto-old-cancelled-startup"])
+        self.assertEqual(running_job.status, "pending")
+        self.assertEqual(old_cancelled_job.status, "pending")
+        self.assertEqual(user_cancelled_job.status, "cancelled")
+        self.assertEqual(db.commit_count, 1)
 
     def test_stage_output_reusable_requires_existing_file(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:

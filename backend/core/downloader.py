@@ -190,9 +190,17 @@ class Downloader:
         """生成 cookies 重试失败提示，不输出任何 cookies 内容"""
         browser_names = ", ".join(self._configured_cookie_browsers() or self._default_cookie_browsers())
         details = self._summarize_cookie_retry_errors(last_error, retry_errors)
+        cookie_settings = load_ytdlp_cookie_settings()
+        configured_file = str(cookie_settings.get("cookies_file") or "").strip()
+        if configured_file and not os.path.isfile(os.path.expanduser(configured_file)):
+            config_hint = f"当前配置的 cookies.txt 不存在：{configured_file}。"
+        elif configured_file:
+            config_hint = "当前已配置 cookies.txt，但 YouTube 仍要求验证，请重新导出最新 cookies。"
+        else:
+            config_hint = "当前没有配置 cookies.txt。"
         hint = (
             f"{action}遇到 YouTube 登录验证，已尝试读取本机浏览器 cookies（{browser_names}）但仍失败。"
-            "请在设置里的「YouTube 登录 Cookies」选择导出的 cookies.txt，"
+            f"{config_hint}请在设置里的「YouTube 登录 Cookies」选择导出的 cookies.txt，"
             "或完全关闭 Chrome/Edge 后重试浏览器读取。"
         )
         return f"{details}\n{hint}".strip()
@@ -207,11 +215,22 @@ class Downloader:
             summary.append("读取到的 cookies 仍没有有效 YouTube 登录态，或 YouTube 仍要求真人验证。")
         for error in all_errors:
             first_line = next((line.strip() for line in error.splitlines() if line.strip()), "")
-            if first_line and first_line not in summary:
+            if first_line and not self._is_noisy_cookie_error_line(first_line) and first_line not in summary:
                 summary.append(first_line)
             if len(summary) >= 4:
                 break
         return "\n".join(summary)
+
+    def _is_noisy_cookie_error_line(self, line: str) -> bool:
+        """过滤 yt-dlp 自带的英文 FAQ 长链接，前端只展示可执行中文提示"""
+        text = str(line or "").lower()
+        noisy_markers = (
+            "github.com/yt-dlp",
+            "how-do-i-pass-cookies",
+            "exporting-youtube-cookies",
+            "use --cookies-from-browser or --cookies",
+        )
+        return any(marker in text for marker in noisy_markers)
 
     def _run_with_cookie_retry(self, action: str, runner: Callable[[list[str]], str]) -> str:
         """执行需要 yt-dlp 的任务，遇到验证拦截时自动换浏览器 cookies 重试"""

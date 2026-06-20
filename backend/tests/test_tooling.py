@@ -233,7 +233,8 @@ class ToolingTests(unittest.TestCase):
 
     def test_cookie_retry_message_summarizes_locked_chrome_database(self):
         """浏览器 cookies 数据库被占用时给出可操作中文提示"""
-        with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"):
+        with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                patch("backend.core.downloader.load_ytdlp_cookie_settings", return_value={"cookies_file": "", "cookies_browser": ""}):
             downloader = Downloader()
             message = downloader._cookie_retry_failure_message(
                 "视频解析",
@@ -242,7 +243,9 @@ class ToolingTests(unittest.TestCase):
             )
 
         self.assertIn("Chrome/Edge cookies 数据库复制失败", message)
+        self.assertIn("当前没有配置 cookies.txt", message)
         self.assertIn("cookies.txt", message)
+        self.assertNotIn("github.com/yt-dlp", message)
 
     def test_download_video_retries_with_browser_cookies_when_youtube_requires_auth(self):
         """下载遇到 YouTube 机器人验证时会自动重试浏览器 cookies"""

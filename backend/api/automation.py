@@ -47,6 +47,7 @@ SCHEDULED_AUTOMATION_JOBS: set[str] = set()
 SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
+BACKEND_RESTART_INTERRUPTED_MESSAGE = "后端重启前任务已中断，请点击继续重新执行"
 MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 LOCAL_VIDEO_SOURCE_PREFIX = "local:"
@@ -2501,7 +2502,9 @@ def _prepare_interrupted_job_for_startup(job: AutomationJobRecord) -> None:
     """后端重启后恢复中断任务，尽量从已完成阶段后继续"""
     stages = _load_job_stages(job)
     for stage in stages:
-        if stage.get("status") in {"running", "failed", "paused", CANCELLED_STATUS}:
+        error_message = str(stage.get("error_message") or "")
+        is_backend_restart_cancel = stage.get("status") == CANCELLED_STATUS and BACKEND_RESTART_INTERRUPTED_MESSAGE in error_message
+        if stage.get("status") in {"running", "failed", "paused"} or is_backend_restart_cancel:
             stage["status"] = "pending"
             stage["progress"] = 0
             stage["task_id"] = None
@@ -3214,7 +3217,9 @@ def recover_automation_jobs_on_startup() -> dict[str, int]:
     """后端启动后恢复未完成的一键自动化任务"""
     db = SessionLocal()
     try:
-        jobs = db.query(AutomationJobRecord).filter(AutomationJobRecord.status.in_(["pending", "running", "paused"])).all()
+        jobs = db.query(AutomationJobRecord).filter(
+            AutomationJobRecord.status.in_(["pending", "running", "paused", CANCELLED_STATUS])
+        ).all()
         _restore_batch_runtime_state(jobs)
 
         submitted = 0
@@ -3224,11 +3229,13 @@ def recover_automation_jobs_on_startup() -> dict[str, int]:
             if job.status == "paused":
                 paused += 1
                 continue
-            if job.status == "running":
-                request_job_control(db, job, "cancel")
-                _cancel_job(db, job, "后端重启前任务已中断，请点击继续重新执行")
-                interrupted += 1
+            # 兼容旧版本：后端重启时曾把运行中任务写成 cancelled，这类任务应自动回到断点续跑。
+            if job.status == CANCELLED_STATUS and job.error_message != BACKEND_RESTART_INTERRUPTED_MESSAGE:
                 continue
+            if job.status in {"running", CANCELLED_STATUS}:
+                clear_job_control_requests(db, job)
+                _prepare_interrupted_job_for_startup(job)
+                interrupted += 1
             elif job.status == "pending":
                 job.current_step = job.current_step or "等待恢复"
             submitted += 1

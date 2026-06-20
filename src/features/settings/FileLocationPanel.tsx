@@ -100,7 +100,8 @@ export function FileLocationPanel() {
       const selected = await picker(cookiesFile || projectRoot)
       if (selected) setCookiesFile(selected)
     } catch (error) {
-      addLog('error', `选择 Cookies 文件失败: ${error instanceof Error ? error.message : '未知错误'}`)
+      const message = error instanceof Error ? error.message : '未知错误'
+      addLog('warn', `系统文件选择暂不可用，请重启应用后重试，或直接把 cookies.txt 完整路径粘贴到输入框后保存。详情: ${message}`)
     }
   }
 

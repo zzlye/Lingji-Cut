@@ -21,6 +21,8 @@ const TOOLS_PYTHON = 'D:\\tools\\python-3.12.10-embed\\python.exe'
 const LEGACY_APP_NAMES = ['YouTube视频处理器', 'youtube-video-processor']
 const MAX_BACKEND_RESTART_ATTEMPTS = 3
 
+type IpcHandleListener = Parameters<typeof ipcMain.handle>[1]
+
 // 固定用户数据目录名称，避免 productName 调整后历史记录和设置换目录。
 app.setName('灵剪工坊')
 
@@ -52,6 +54,16 @@ function migrateLegacyUserData(): void {
       console.error(`[Main] 迁移旧版数据目录失败: ${error}`)
     }
   }
+}
+
+/** 注册 IPC 处理器前先清掉旧处理器，避免开发热更新后出现重复或遗漏。 */
+function registerIpcHandler(channel: string, listener: IpcHandleListener): void {
+  try {
+    ipcMain.removeHandler(channel)
+  } catch {
+    // 没有旧处理器时忽略即可。
+  }
+  ipcMain.handle(channel, listener)
 }
 
 /**
@@ -272,10 +284,10 @@ app.whenReady().then(async () => {
   })
 
   // 获取后端地址
-  ipcMain.handle('get-backend-url', () => BACKEND_URL)
+  registerIpcHandler('get-backend-url', () => BACKEND_URL)
 
   // 打开本地路径，供素材库或设置页直接跳转到系统文件夹。
-  ipcMain.handle('shell:open-path', async (_event, path: string) => {
+  registerIpcHandler('shell:open-path', async (_event, path: string) => {
     if (!path || typeof path !== 'string') {
       return '路径不能为空'
     }
@@ -283,7 +295,7 @@ app.whenReady().then(async () => {
   })
 
   // 选择项目目录，供文件位置设置使用
-  ipcMain.handle('dialog:select-directory', async (_event, defaultPath?: string) => {
+  registerIpcHandler('dialog:select-directory', async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
       title: '选择项目目录',
       defaultPath,
@@ -297,7 +309,7 @@ app.whenReady().then(async () => {
   })
 
   // 选择 yt-dlp 使用的 cookies.txt 文件，用于 YouTube 登录验证。
-  ipcMain.handle('dialog:select-cookies-file', async (_event, defaultPath?: string) => {
+  registerIpcHandler('dialog:select-cookies-file', async (_event, defaultPath?: string) => {
     const result = await dialog.showOpenDialog({
       title: '选择 YouTube cookies.txt',
       defaultPath,
@@ -315,7 +327,7 @@ app.whenReady().then(async () => {
   })
 
   // 选择本地视频文件，供主流程直接处理使用。
-  ipcMain.handle('dialog:select-video-file', async () => {
+  registerIpcHandler('dialog:select-video-file', async () => {
     const result = await dialog.showOpenDialog({
       title: '选择本地视频',
       properties: ['openFile'],
