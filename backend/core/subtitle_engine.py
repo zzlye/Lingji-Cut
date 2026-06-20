@@ -511,14 +511,47 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         ]
 
     def _double_line_text(self, lines: list[str], max_chars: int) -> tuple[str, str]:
-        """生成双行字幕文本：显式两行优先，否则把长句切成上下两行"""
+        """生成双行字幕文本：显式两行优先，否则把长句均衡切成上下两行"""
         if len(lines) >= 2:
             return lines[0], " ".join(lines[1:])
 
-        parts = self._split_subtitle_text(lines[0], max_chars)
+        text = lines[0].strip() if lines else ""
+        if not text:
+            return "", ""
+        if len(text) <= max_chars:
+            return text, ""
+        # 均衡切分：切点取句子中点附近，避免第二行只剩一两个字
+        split_at = self._balanced_split_at(text, max_chars)
+        first = text[:split_at].strip()
+        second = text[split_at:].strip()
+        if first and second:
+            return first, second
+        # 兜底：切点异常时退回原逐段切分
+        parts = self._split_subtitle_text(text, max_chars)
         if len(parts) == 1:
             return parts[0], ""
         return parts[0], " ".join(parts[1:])
+
+    def _balanced_split_at(self, text: str, max_chars: int) -> int:
+        """为双行字幕找均衡切点，让上下两行字数尽量接近，避免第二行只剩一两个字"""
+        length = len(text)
+        # 目标切在中点，同时保证每行都不超过单行上限
+        target = (length + 1) // 2
+        target = max(target, length - max_chars)
+        target = min(target, max_chars)
+        if target < 1:
+            target = max(1, min(max_chars, length // 2))
+        break_chars = "，。、！？；：,.!?;:… "
+        window = max(2, min(6, max_chars // 3))
+        # 在目标点附近由近及远找标点或空格断开
+        for offset in range(0, window + 1):
+            for idx in (target + offset, target - offset):
+                if 1 <= idx < length and text[idx - 1] in break_chars:
+                    return idx - 1 if text[idx - 1] == " " else idx
+        # 没有自然断点就退回 CJK 安全边界，避免把词切坏
+        lower = max(1, target - window)
+        upper = min(length - 1, target + window)
+        return adjust_cjk_split_boundary(text, target, min_index=lower, max_index=upper)
 
     def _max_display_chars(self, preset: dict) -> int:
         """根据字号估算单行可读字符数"""
