@@ -25,7 +25,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
-from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib
+from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
@@ -52,10 +52,11 @@ SCHEDULED_JOB_LOCK = Lock()
 CANCELLED_STATUS = "cancelled"
 TERMINAL_STATUSES = {"completed", "failed", CANCELLED_STATUS}
 BACKEND_RESTART_INTERRUPTED_MESSAGE = "后端重启前任务已中断，请点击继续重新执行"
-MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac"}
+MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 LOCAL_VIDEO_SOURCE_PREFIX = "local:"
 LOCAL_VIDEO_SOURCE_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
 EDITABLE_SUBTITLE_EXTENSIONS = {".srt", ".vtt", ".ass"}
 VIDEO_WORKSPACE_STAGE_DIRS = ("downloads", "output", "exports")
 
@@ -474,15 +475,55 @@ def _stage_by_key(job: Optional[AutomationJobRecord], key: str) -> Optional[dict
     return None
 
 
-def _stage_output_if_reusable(job: Optional[AutomationJobRecord], key: str) -> Optional[str]:
-    """返回可复用的阶段输出文件路径"""
+def _stage_output_if_reusable(
+    job: Optional[AutomationJobRecord],
+    key: str,
+    allowed_exts: Optional[set[str]] = None,
+    log_context: Optional[str] = None,
+) -> Optional[str]:
+    """返回可复用的阶段输出文件路径，可按阶段限制文件类型"""
     stage = _stage_by_key(job, key)
     if not stage or stage.get("status") not in {"completed", "skipped"}:
         return None
     output_path = stage.get("output_path")
-    if isinstance(output_path, str) and output_path and os.path.exists(output_path):
-        return output_path
-    return None
+    if not isinstance(output_path, str) or not output_path.strip():
+        return None
+    normalized = os.path.abspath(os.path.expanduser(output_path.strip()))
+    if not os.path.exists(normalized) or not os.path.isfile(normalized):
+        return None
+    ext = os.path.splitext(normalized)[1].lower()
+    if allowed_exts and ext not in allowed_exts:
+        if log_context:
+            allowed = ", ".join(sorted(allowed_exts))
+            logger.warning(f"{log_context}拒绝复用阶段产物: job_id={getattr(job, 'id', None)}, stage={key}, path={normalized}, ext={ext or '无后缀'}, allowed={allowed}")
+        return None
+    if log_context:
+        logger.info(f"{log_context}复用阶段产物: job_id={getattr(job, 'id', None)}, stage={key}, path={normalized}")
+    return normalized
+
+
+def _stage_video_output_if_reusable(job: Optional[AutomationJobRecord], key: str, log_context: Optional[str] = None) -> Optional[str]:
+    """返回可复用的视频阶段产物，防止字幕缓存被当成视频输入"""
+    return _stage_output_if_reusable(job, key, LOCAL_VIDEO_SOURCE_EXTENSIONS, log_context)
+
+
+def _stage_audio_output_if_reusable(job: Optional[AutomationJobRecord], key: str, log_context: Optional[str] = None) -> Optional[str]:
+    """返回可复用的音频阶段产物，防止非音频文件进入合成流程"""
+    return _stage_output_if_reusable(job, key, AUDIO_EXTENSIONS, log_context)
+
+
+def _stage_subtitle_output_if_reusable(job: Optional[AutomationJobRecord], key: str, log_context: Optional[str] = None) -> Optional[str]:
+    """返回可复用的字幕阶段产物，允许字幕文件或已烧录视频"""
+    return _stage_output_if_reusable(job, key, EDITABLE_SUBTITLE_EXTENSIONS | LOCAL_VIDEO_SOURCE_EXTENSIONS, log_context)
+
+
+def _ensure_video_input_path(path: str, stage_label: str) -> str:
+    """校验要送入 ASR 或 ffmpeg 的输入必须是真实视频文件"""
+    normalized = _existing_file(path, LOCAL_VIDEO_SOURCE_EXTENSIONS)
+    if not normalized:
+        ext = os.path.splitext(str(path or "").strip())[1].lower() or "无后缀"
+        raise RuntimeError(f"{stage_label}输入不是可用视频文件: {path}，后缀={ext}")
+    return normalized
 
 
 def _existing_file(path: Optional[str], allowed_exts: Optional[set[str]] = None) -> Optional[str]:
@@ -578,9 +619,9 @@ def _subtitle_search_dirs(job: Optional[AutomationJobRecord], db: Optional[Sessi
     for candidate in (
         subtitle_stage_output,
         source_video_path,
-        _stage_output_if_reusable(job, "download"),
-        _stage_output_if_reusable(job, "effects"),
-        _stage_output_if_reusable(job, "export"),
+        _stage_video_output_if_reusable(job, "download"),
+        _stage_video_output_if_reusable(job, "effects"),
+        _stage_video_output_if_reusable(job, "export"),
     ):
         if not candidate:
             continue
@@ -655,18 +696,18 @@ def _find_job_source_video_path(job: Optional[AutomationJobRecord]) -> Optional[
     """推导重新合成导出要使用的源视频，优先画面处理产物，再回退下载原片"""
     params = _get_job_params(job) if job else {}
     for key in ("source_video_path", "downloaded_video_path"):
-        candidate = _existing_file(str(params.get(key) or ""), MEDIA_EXTENSIONS)
+        candidate = _existing_file(str(params.get(key) or ""), LOCAL_VIDEO_SOURCE_EXTENSIONS)
         if candidate:
             return candidate
     return (
-        _stage_output_if_reusable(job, "effects")
-        or _stage_output_if_reusable(job, "download")
+        _stage_video_output_if_reusable(job, "effects")
+        or _stage_video_output_if_reusable(job, "download")
     )
 
 
 def _find_job_voice_asset_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
     """推导配音音轨路径"""
-    return _stage_output_if_reusable(job, "voice")
+    return _stage_audio_output_if_reusable(job, "voice")
 
 
 def _find_job_cover_asset_path(job: Optional[AutomationJobRecord]) -> Optional[str]:
@@ -769,7 +810,7 @@ def _job_export_video_path(job: AutomationJobRecord) -> Optional[str]:
     """读取素材库卡片要预览的最终成品视频路径"""
     export_stage = _stage_by_key(job, "export")
     for candidate in (job.output_path, (export_stage or {}).get("output_path")):
-        path = _existing_file(str(candidate or ""), MEDIA_EXTENSIONS)
+        path = _existing_file(str(candidate or ""), LOCAL_VIDEO_SOURCE_EXTENSIONS)
         if path:
             return path
     return None
@@ -780,7 +821,7 @@ def _find_job_subtitle_only_video_path(job: Optional[AutomationJobRecord]) -> Op
     if not job:
         return None
     params = _get_job_params(job)
-    return _existing_file(str(params.get("subtitle_only_video_path") or ""), MEDIA_EXTENSIONS)
+    return _existing_file(str(params.get("subtitle_only_video_path") or ""), LOCAL_VIDEO_SOURCE_EXTENSIONS)
 
 
 def _job_thumbnail_output_dir(job: AutomationJobRecord, video_path: str) -> str:
@@ -952,12 +993,12 @@ def _job_workspace_paths(job: Optional[AutomationJobRecord], db: Optional[Sessio
         }
 
     for candidate in (
-        _stage_output_if_reusable(job, "download"),
-        _stage_output_if_reusable(job, "effects"),
-        _stage_output_if_reusable(job, "subtitle"),
-        _stage_output_if_reusable(job, "voice"),
-        _stage_output_if_reusable(job, "export"),
-        _existing_file(str(params.get("source_video_path") or ""), MEDIA_EXTENSIONS),
+        _stage_video_output_if_reusable(job, "download"),
+        _stage_video_output_if_reusable(job, "effects"),
+        _stage_subtitle_output_if_reusable(job, "subtitle"),
+        _stage_audio_output_if_reusable(job, "voice"),
+        _stage_video_output_if_reusable(job, "export"),
+        _existing_file(str(params.get("source_video_path") or ""), LOCAL_VIDEO_SOURCE_EXTENSIONS),
     ):
         if not candidate:
             continue
@@ -1330,20 +1371,33 @@ def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
         device=profile["device"],
         model_name=profile["model_name"],
         beam_size=int(profile["beam_size"]),
+        # 模式3 时间轴识别关闭补漏：内容由 Gemini 出，Whisper 漏的词在对齐时会补上，无需 CPU 逐个漏区重跑
+        gap_rescue=False,
     )
 
 
 def _gemini_align_timeline_profile() -> dict[str, str]:
     """返回 Gemini 对齐本地时间轴识别配置，写入缓存用于自动失效旧结果"""
-    requested_device = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE") or "auto").strip().lower() or "auto"
-    configured_model = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL") or "").strip()
-    beam_size = _env_int("YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE", 2, 1, 4)
+    requested_device = (
+        os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE")
+        or os.environ.get("YTV_ASR_DEVICE")
+        or "auto"
+    ).strip().lower() or "auto"
+    if requested_device not in {"auto", "cpu", "cuda"}:
+        requested_device = "auto"
+    configured_model = (
+        os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL")
+        or os.environ.get("YTV_ASR_MODEL")
+        or ""
+    ).strip()
+    # beam_size 从 2 提高到 5，提升词级时间戳精度，让 Gemini 对齐更准确
+    beam_size = _env_int("YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE", 5, 1, 8)
 
     if asr_cuda_disabled_by_marker() and requested_device != "cuda":
-        return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+        return {"device": "cpu", "model_name": configured_model or "base", "beam_size": str(beam_size)}
 
     if requested_device == "cpu":
-        return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+        return {"device": "cpu", "model_name": configured_model or "base", "beam_size": str(beam_size)}
 
     if requested_device == "cuda":
         return {
@@ -1352,27 +1406,59 @@ def _gemini_align_timeline_profile() -> dict[str, str]:
             "beam_size": str(beam_size),
         }
 
-    if cuda_device_count() > 0 and cuda_free_memory_mib() >= _env_int("YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB", 1800, 512, 49152):
+    # base 模型 float16 显存占用约 1GB，门槛设 1200 给余量，让时间轴识别尽量走 GPU 提速。
+    # 如果空闲显存查询失败但能读到总显存，仍允许自动 GPU，避免 nvidia-smi 查询异常时误退 CPU。
+    if _gemini_align_gpu_available(_env_int("YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB", 1200, 512, 49152)):
         return {
             "device": "cuda",
             "model_name": configured_model or _safe_gemini_align_gpu_model(),
             "beam_size": str(beam_size),
         }
-    return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+    return {"device": "cpu", "model_name": configured_model or "base", "beam_size": str(beam_size)}
 
 
 def _gemini_align_cache_profile(profile: Optional[dict[str, str]] = None) -> dict[str, str]:
     """生成时间轴缓存签名，只保留会影响时间轴质量的模型名，忽略 CPU/GPU 执行设备"""
     current = profile or _gemini_align_timeline_profile()
-    return {"model_name": str(current.get("model_name") or "small")}
+    return {"model_name": str(current.get("model_name") or "base")}
 
 
 def _safe_gemini_align_gpu_model() -> str:
-    """按当前空闲显存选择时间轴模型，优先避免 CUDA 显存压力导致进程崩溃"""
+    """选择模式3 时间轴模型，优先 large-v3-turbo 提升对齐精度
+
+    模式3 字幕内容来自 Gemini，本地识别负责精确时间轴骨架；
+    时间轴骨架的词级识别越准确，difflib 对齐时匹配率越高，
+    最终字幕的音画同步和内容完整性都会大幅提升。
+    """
+    # 按空闲显存选择最大可用模型，large-v3-turbo 约需 4GB 显存
     free_mib = cuda_free_memory_mib()
-    if free_mib >= _env_int("YTV_GEMINI_ALIGN_SMALL_VRAM_MIB", 2600, 1024, 49152):
+    if free_mib >= 4500:
+        return "large-v3-turbo"
+    if free_mib >= 3500:
+        return "medium"
+    if free_mib >= 2000:
         return "small"
+    if free_mib > 0:
+        return "base"
+    # 空闲显存查询失败时退回总显存估算，避免可用 CUDA 被误判成 CPU。
+    memory_mib = cuda_memory_mib()
+    if memory_mib >= 7000:
+        return "large-v3-turbo"
+    if memory_mib >= 3500:
+        return "medium"
     return "base"
+
+
+def _gemini_align_gpu_available(min_free_mib: int) -> bool:
+    """判断对齐时间轴是否可使用 CUDA，空闲显存不可读时按总显存兜底"""
+    if cuda_device_count() <= 0:
+        return False
+    free_mib = cuda_free_memory_mib()
+    if free_mib >= min_free_mib:
+        return True
+    if free_mib > 0:
+        return False
+    return cuda_memory_mib() >= min_free_mib
 
 
 def _env_int(key: str, default: int, minimum: int, maximum: int) -> int:
@@ -1485,6 +1571,8 @@ def _recognize_subtitle_entries(
 ) -> tuple[list[dict], str]:
     """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
     mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    # 记录识别模式，便于排查前端配置是否传到后端。
+    logger.info(f"字幕识别模式: mode={mode}, subtitle_recognition_mode={request.subtitle_recognition_mode}")
     if mode == "gemini_full":
         # 方案2：Gemini 分段转写整片，时间戳由内部 VAD 边界校准
         return _build_gemini_transcriber(db, request).transcribe_video(
@@ -2127,7 +2215,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         parse_warning_message = "；".join(message for message in (source_url_warning_message, cover_warning_message) if message) or None
         _update_job_stage(db, job, "parse", "completed", error_message=parse_warning_message)
 
-    reusable_download_path = _stage_output_if_reusable(job, "download") if resume_from_checkpoint else None
+    reusable_download_path = _stage_video_output_if_reusable(job, "download", "断点续跑") if resume_from_checkpoint else None
     if reusable_download_path:
         downloaded_path = reusable_download_path
         _mark_stage_reused(db, job, "download", downloaded_path)
@@ -2175,7 +2263,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "download", "failed", task_id=download_task.id, error_message=str(exc))
             raise
 
-    reusable_effects_path = _stage_output_if_reusable(job, "effects") if resume_from_checkpoint else None
+    reusable_effects_path = _stage_video_output_if_reusable(job, "effects", "断点续跑") if resume_from_checkpoint else None
     if not request.enable_effects:
         effects_path = downloaded_path
         stages.append(AutomationStageResult(key="effects", status="skipped", progress=100, output_path=effects_path, error_message="已按设置跳过画面处理"))
@@ -2239,7 +2327,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             raise
 
     video_for_export = effects_path
-    reusable_subtitle_path = _stage_output_if_reusable(job, "subtitle") if resume_from_checkpoint else None
+    reusable_subtitle_path = _stage_subtitle_output_if_reusable(job, "subtitle", "断点续跑") if resume_from_checkpoint else None
     if reusable_subtitle_path:
         video_for_export = reusable_subtitle_path if request.burn_subtitles else video_for_export
         subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else None
@@ -2257,6 +2345,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             engine = SubtitleEngine()
             asr_owner_thread = threading.current_thread()
             recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
+            effects_path = _ensure_video_input_path(effects_path, "字幕识别")
+            logger.info(
+                f"字幕识别输入: job_id={getattr(job, 'id', None)}, mode={recognition_mode}, "
+                f"path={effects_path}, ext={os.path.splitext(effects_path)[1].lower()}, exists={os.path.isfile(effects_path)}"
+            )
 
             def on_asr_progress(progress: float) -> None:
                 """同步本地语音识别进度"""
@@ -2429,7 +2522,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             raise resumable_error from exc
 
     voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice else None
-    reusable_audio_path = _stage_output_if_reusable(job, "voice") if resume_from_checkpoint else None
+    reusable_audio_path = _stage_audio_output_if_reusable(job, "voice", "断点续跑") if resume_from_checkpoint else None
     if reusable_audio_path:
         audio_path = reusable_audio_path
         _mark_stage_reused(db, job, "voice", audio_path)

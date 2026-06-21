@@ -865,6 +865,92 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_recognizer.video_paths, [effects_path])
             self.assertEqual(fake_processor.burn_calls[0]["video_path"], effects_path)
 
+    def test_resume_rejects_local_timeline_cache_as_video_input(self):
+        """继续完成时不能把本地时间轴缓存误当成下载视频传给 ASR"""
+        with tempfile.TemporaryDirectory(prefix="automation_resume_timeline_cache_") as temp_dir:
+            downloads_dir = os.path.join(temp_dir, "downloads")
+            output_dir = os.path.join(temp_dir, "output")
+            exports_dir = os.path.join(temp_dir, "exports")
+            os.makedirs(downloads_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+            os.makedirs(exports_dir, exist_ok=True)
+            timeline_cache_path = os.path.join(downloads_dir, "video_local_timeline.json")
+            downloaded_path = os.path.join(downloads_dir, "downloaded.mp4")
+            with open(timeline_cache_path, "w", encoding="utf-8") as file:
+                json.dump([{"text": "cached timeline"}], file)
+            with open(downloaded_path, "wb") as file:
+                file.write(b"downloaded")
+
+            video = VideoSource(id=43, platform="youtube", video_id="resume-timeline", url="https://youtu.be/resume-timeline", title="时间轴缓存")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            job = AutomationJobRecord(
+                id="auto-resume-timeline-cache",
+                source_url=video.url,
+                video_id=43,
+                title=video.title,
+                status="failed",
+                progress=52,
+                current_step="流程失败",
+                params=json.dumps({
+                    "url": video.url,
+                    "workspace_dir": temp_dir,
+                    "workspace_name": "resume-timeline",
+                    "video_downloads_dir": downloads_dir,
+                    "video_output_dir": output_dir,
+                    "video_exports_dir": exports_dir,
+                    "output_format": "mp4",
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "parse", "status": "completed", "progress": 100, "task_id": None, "output_path": None, "error_message": None},
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": timeline_cache_path, "error_message": None},
+                    {"key": "effects", "status": "skipped", "progress": 100, "task_id": 2, "output_path": timeline_cache_path, "error_message": None},
+                    {"key": "subtitle", "status": "failed", "progress": 22, "task_id": 3, "output_path": None, "error_message": "Invalid data found when processing input"},
+                    {"key": "voice", "status": "skipped", "progress": 100, "task_id": None, "output_path": None, "error_message": "没有启用或没有已保存配音配置"},
+                    {"key": "export", "status": "pending", "progress": 0, "task_id": None, "output_path": None, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [], [video])
+            task_ids = iter(range(110, 120))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            _prepare_job_for_resume(job)
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", side_effect=AssertionError("不应重新解析 YouTube")),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        processing_preset={},
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    db,
+                    job,
+                    resume_from_checkpoint=True,
+                )
+
+            stage_by_key = {stage.key: stage for stage in response.stages}
+            self.assertEqual(stage_by_key["download"].output_path, downloaded_path)
+            self.assertEqual(fake_recognizer.video_paths, [downloaded_path])
+            self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
+            self.assertNotIn(timeline_cache_path, fake_recognizer.video_paths)
+
     def test_gemini_align_reuses_cached_local_timeline(self):
         """Gemini 内容+本地时间轴继续执行时复用本地时间轴缓存，不再从头跑 ASR"""
         class FakeTimelineRecognizer:
@@ -970,10 +1056,50 @@ class AutomationJobTests(unittest.TestCase):
             }, clear=False),
             patch("backend.api.automation.cuda_device_count", return_value=1),
             patch("backend.api.automation.cuda_free_memory_mib", return_value=3200),
+            patch("backend.api.automation.cuda_memory_mib", return_value=4096),
         ):
             profile = _gemini_align_timeline_profile()
 
-        self.assertEqual(profile, {"device": "cuda", "model_name": "small", "beam_size": "2"})
+        self.assertEqual(profile, {"device": "cuda", "model_name": "small", "beam_size": "5"})
+
+    def test_gemini_align_timeline_profile_inherits_local_asr_model(self):
+        """Gemini 对齐时间轴默认继承本地 ASR 模型，避免用户换 large-v3-turbo 后仍跑 base"""
+        with (
+            patch.dict(os.environ, {
+                "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+                "YTV_ASR_DEVICE": "cuda",
+                "YTV_ASR_MODEL": "large-v3-turbo",
+            }, clear=False),
+            patch("backend.api.automation.asr_cuda_disabled_by_marker", return_value=True),
+            patch("backend.api.automation.cuda_device_count", return_value=1),
+            patch("backend.api.automation.cuda_free_memory_mib", return_value=6000),
+            patch("backend.api.automation.cuda_memory_mib", return_value=8192),
+        ):
+            profile = _gemini_align_timeline_profile()
+
+        self.assertEqual(profile, {"device": "cuda", "model_name": "large-v3-turbo", "beam_size": "5"})
+
+    def test_gemini_align_timeline_profile_uses_gpu_when_free_vram_query_fails(self):
+        """空闲显存读不到但总显存足够时仍走 GPU，避免误报后固定退 CPU"""
+        with (
+            patch.dict(os.environ, {
+                "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "auto",
+                "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+                "YTV_ASR_DEVICE": "",
+                "YTV_ASR_MODEL": "",
+                "YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB": "1800",
+            }, clear=False),
+            patch("backend.api.automation.asr_cuda_disabled_by_marker", return_value=False),
+            patch("backend.api.automation.cuda_device_count", return_value=1),
+            patch("backend.api.automation.cuda_free_memory_mib", return_value=0),
+            patch("backend.api.automation.cuda_memory_mib", return_value=8192),
+        ):
+            profile = _gemini_align_timeline_profile()
+
+        self.assertEqual(profile, {"device": "cuda", "model_name": "large-v3-turbo", "beam_size": "5"})
 
     def test_gemini_align_timeline_profile_falls_back_to_cpu_when_vram_is_low(self):
         """Gemini 对齐时间轴在空闲显存不足时退 CPU，避免 CUDA 显存压力导致流程崩溃"""
@@ -990,7 +1116,8 @@ class AutomationJobTests(unittest.TestCase):
         ):
             profile = _gemini_align_timeline_profile()
 
-        self.assertEqual(profile, {"device": "cpu", "model_name": "small", "beam_size": "2"})
+        # 模式3 时间轴默认用 base：内容由 Gemini 出，base 时间骨架够用且更快更省显存
+        self.assertEqual(profile, {"device": "cpu", "model_name": "base", "beam_size": "5"})
 
     def test_gemini_align_timeline_profile_uses_cpu_when_cuda_marker_exists(self):
         """检测到 CUDA 原生崩溃标记时，Gemini 对齐时间轴默认退回 CPU"""
@@ -1006,7 +1133,8 @@ class AutomationJobTests(unittest.TestCase):
         ):
             profile = _gemini_align_timeline_profile()
 
-        self.assertEqual(profile, {"device": "cpu", "model_name": "small", "beam_size": "2"})
+        # 模式3 时间轴默认用 base：内容由 Gemini 出，base 时间骨架够用且更快更省显存
+        self.assertEqual(profile, {"device": "cpu", "model_name": "base", "beam_size": "5"})
 
     def test_gemini_align_ignores_old_local_timeline_cache(self):
         """旧版本地时间轴缓存没有配置版本时必须失效，避免继续复用低精度时间轴"""
@@ -1095,7 +1223,7 @@ class AutomationJobTests(unittest.TestCase):
                     "cache_version": 2,
                     "video_path": os.path.abspath(video_path),
                     "signature": signature,
-                    "timeline_profile": {"device": "cuda", "model_name": "small", "beam_size": "2"},
+                    "timeline_profile": {"device": "cuda", "model_name": "base", "beam_size": "2"},
                     "language": "en",
                 }, file)
 
