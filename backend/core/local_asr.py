@@ -52,6 +52,8 @@ LEADING_FRAGMENT_WORDS = {
 
 # 模型缓存，避免同一轮任务重复加载模型。
 _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
+# CUDA 一旦出现运行级错误，当前进程内继续使用 CUDA 往往会反复失败。
+_CUDA_ASR_DISABLED = False
 
 
 def default_asr_model_dir() -> str:
@@ -135,6 +137,8 @@ def default_asr_device() -> str:
     requested = (os.environ.get("YTV_ASR_DEVICE") or "auto").strip().lower()
     if requested and requested != "auto":
         return requested
+    if _CUDA_ASR_DISABLED:
+        return "cpu"
     return "cuda" if cuda_device_count() > 0 else "cpu"
 
 
@@ -189,6 +193,7 @@ class LocalSpeechRecognizer:
                 if not self._should_fallback_to_cpu():
                     raise
                 logger.warning(f"GPU 本地识别失败，自动回退 CPU: {exc}")
+                self._disable_cuda_asr_for_process(exc)
                 self.device = "cpu"
                 if self.auto_model_name:
                     self.model_name = default_asr_model_name()
@@ -389,6 +394,8 @@ class LocalSpeechRecognizer:
                             rescued.append(entry)
             except Exception as exc:
                 logger.warning(f"补漏识别区段 {gap_start:.1f}-{gap_end:.1f}s 失败: {exc}")
+                if self._should_fallback_to_cpu():
+                    self._disable_cuda_asr_for_process(exc)
         if rescued:
             logger.info(f"补漏识别从 {len(gaps)} 个漏区中找回 {len(rescued)} 条字幕")
         return rescued
@@ -862,6 +869,15 @@ class LocalSpeechRecognizer:
     def _should_fallback_to_cpu(self) -> bool:
         """判断当前识别失败时是否允许回退 CPU"""
         return self.allow_cpu_fallback and self.device == "cuda"
+
+    def _disable_cuda_asr_for_process(self, reason: Exception) -> None:
+        """当前进程内禁用后续自动 CUDA 识别，避免 CUDA 上下文损坏后反复重启"""
+        global _CUDA_ASR_DISABLED
+        _CUDA_ASR_DISABLED = True
+        for key in list(_MODEL_CACHE):
+            if len(key) >= 3 and key[2] == "cuda":
+                _MODEL_CACHE.pop(key, None)
+        logger.warning(f"后续本地识别将改用 CPU，原因: {reason}")
 
     def _load_model(self):
         """延迟加载 faster-whisper 模型，缺依赖时给出明确提示"""

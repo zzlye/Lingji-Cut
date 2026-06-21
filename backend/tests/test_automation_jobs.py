@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -857,6 +857,87 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(stage_by_key["download"].output_path, downloaded_path)
             self.assertEqual(fake_recognizer.video_paths, [effects_path])
             self.assertEqual(fake_processor.burn_calls[0]["video_path"], effects_path)
+
+    def test_gemini_align_reuses_cached_local_timeline(self):
+        """Gemini 内容+本地时间轴继续执行时复用本地时间轴缓存，不再从头跑 ASR"""
+        class FakeTimelineRecognizer:
+            """测试用本地时间轴识别器"""
+
+            devices: list[str] = []
+            transcribe_paths: list[str] = []
+
+            def __init__(self, *_, **kwargs):
+                self.devices.append(kwargs.get("device") or "auto")
+
+            def transcribe_video(self, video_path, progress_callback=None):
+                self.transcribe_paths.append(video_path)
+                if progress_callback:
+                    progress_callback(100)
+                return ([
+                    {"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "local timeline"},
+                ], "en")
+
+            def _srt_time_to_seconds(self, value):
+                text = str(value).replace(",", ".")
+                hours, minutes, seconds = text.split(":")
+                return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+            def _seconds_to_srt_time(self, seconds):
+                total_ms = max(0, int(round(float(seconds) * 1000)))
+                hours = total_ms // 3600000
+                minutes = (total_ms % 3600000) // 60000
+                secs = (total_ms % 60000) // 1000
+                millis = total_ms % 1000
+                return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+        class FakeGeminiTranscriber:
+            """测试用 Gemini 转写器"""
+
+            languages: list[str | None] = []
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                self.languages.append(language)
+                if progress_callback:
+                    progress_callback(100)
+                return ([
+                    {"index": 1, "start": "00:00:00,200", "end": "00:00:03,800", "text": "Gemini content"},
+                ], language or "en")
+
+        with tempfile.TemporaryDirectory(prefix="automation_gemini_align_cache_") as temp_dir:
+            video_path = os.path.join(temp_dir, "enhanced.mp4")
+            with open(video_path, "wb") as file:
+                file.write(b"video")
+            request = AutomationRunRequest(
+                url="https://example.test/video",
+                subtitle_recognition_mode="gemini_align",
+                enable_effects=False,
+                processing_preset={},
+                enable_voice=False,
+                burn_subtitles=False,
+                output_format="mp4",
+            )
+            fake_gemini = FakeGeminiTranscriber()
+            progress_values: list[float] = []
+
+            with (
+                patch("backend.api.automation.LocalSpeechRecognizer", FakeTimelineRecognizer),
+                patch("backend.api.automation._build_gemini_transcriber", return_value=fake_gemini),
+            ):
+                entries, language = _recognize_subtitle_entries(FakeDb([]), request, video_path, progress_values.append)
+                cached_entries, cached_language = _recognize_subtitle_entries(FakeDb([]), request, video_path, progress_values.append)
+
+            cache_path = os.path.join(temp_dir, "enhanced_local_timeline.json")
+            cache_exists = os.path.exists(cache_path)
+
+        self.assertEqual(language, "en")
+        self.assertEqual(cached_language, "en")
+        self.assertEqual([entry["text"] for entry in entries], ["Gemini content"])
+        self.assertEqual([entry["text"] for entry in cached_entries], ["Gemini content"])
+        self.assertEqual(FakeTimelineRecognizer.devices[0], "cpu")
+        self.assertEqual(FakeTimelineRecognizer.transcribe_paths, [video_path])
+        self.assertEqual(fake_gemini.languages, ["en", "en"])
+        self.assertIn(50, progress_values)
+        self.assertTrue(cache_exists)
 
     def test_automation_translation_saves_comparison_subtitle_for_review(self):
         """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""

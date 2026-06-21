@@ -14,6 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+import backend.core.local_asr as local_asr_module
 from backend.core.local_asr import LocalSpeechRecognizer, _MODEL_CACHE, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 
 
@@ -69,6 +70,19 @@ class FailingGpuWhisperModel(FakeWhisperModel):
             raise RuntimeError("CUDA 初始化失败")
 
 
+class FailingCudaRuntimeWhisperModel(FakeWhisperModel):
+    """测试用模型，模拟 CUDA 推理运行中失败"""
+
+    def __init__(self, model_name, **kwargs):
+        super().__init__(model_name, **kwargs)
+        self.device = kwargs.get("device")
+
+    def transcribe(self, video_path, **kwargs):
+        if self.device == "cuda":
+            raise RuntimeError("cudaErrorLaunchFailure: unspecified launch failure")
+        return super().transcribe(video_path, **kwargs)
+
+
 class LocalSpeechRecognizerTest(unittest.TestCase):
     """本地语音识别器测试"""
 
@@ -78,6 +92,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
         cuda_free_memory_mib.cache_clear()
+        local_asr_module._CUDA_ASR_DISABLED = False
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
         # 测试中关闭音频预处理，避免真实调用 ffmpeg
@@ -95,6 +110,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
         cuda_free_memory_mib.cache_clear()
+        local_asr_module._CUDA_ASR_DISABLED = False
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_transcribe_video_uses_cpu_int8_defaults_and_returns_srt_entries(self):
@@ -192,6 +208,27 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
         self.assertEqual(FakeWhisperModel.init_calls[1]["model_name"], "base")
         self.assertEqual(FakeWhisperModel.init_calls[1]["compute_type"], "int8")
+
+    def test_cuda_runtime_failure_disables_auto_cuda_for_next_recognizer(self):
+        """CUDA 运行中崩溃后，后续自动本地识别默认改走 CPU，避免一键流程反复重启"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FailingCudaRuntimeWhisperModel
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+            next_recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
+        self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
+        self.assertEqual(next_recognizer.device, "cpu")
 
     def test_missing_video_raises_clear_error(self):
         """视频文件不存在时给出本地识别错误"""

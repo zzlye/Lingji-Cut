@@ -30,11 +30,12 @@ from ..core.subtitle_engine import adjust_cjk_unit_boundary
 from ..core.task_runtime import clear_job_control_requests, mark_job_child_tasks_controlled, request_job_control, request_stage_task_control
 from ..core.tooling import assert_required_tools_available, get_ffmpeg_command
 from ..models import AutomationJobRecord, DownloadTask, SessionLocal, SubtitlePreset, TextProviderProfile, VideoSource, VoiceProviderProfile, get_db
-from ..utils import decrypt_api_key
+from ..utils import decrypt_api_key, get_logger
 from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plain_text
 
 
 router = APIRouter(prefix="/automation", tags=["automation"])
+logger = get_logger("automation")
 
 # 后台自动化任务线程池，避免多个长视频同时阻塞 API 线程。
 AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
@@ -1273,6 +1274,90 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
     )
 
 
+def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
+    """构造 Gemini 对齐模式的本地时间轴识别器，默认用 CPU 避免长视频 CUDA 崩溃后反复重跑"""
+    device = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE") or "cpu").strip().lower() or "cpu"
+    return LocalSpeechRecognizer(device=device)
+
+
+def _gemini_align_timeline_cache_paths(video_path: str) -> tuple[str, str]:
+    """按处理后视频路径生成本地时间轴缓存文件路径"""
+    base_path = os.path.splitext(os.path.abspath(video_path))[0]
+    return f"{base_path}_local_timeline.json", f"{base_path}_local_timeline.meta.json"
+
+
+def _media_cache_signature(video_path: str) -> dict[str, Any]:
+    """记录视频文件大小和修改时间，用于判断缓存是否仍匹配当前视频"""
+    try:
+        return {
+            "size": os.path.getsize(video_path),
+            "mtime": os.path.getmtime(video_path),
+        }
+    except OSError:
+        return {"size": 0, "mtime": 0.0}
+
+
+def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[dict], str]]:
+    """读取 Gemini 对齐模式的本地时间轴缓存，后端重启后可跳过本地 ASR"""
+    cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
+    if not os.path.exists(cache_path) or not os.path.exists(meta_path):
+        return None
+    try:
+        with open(meta_path, "r", encoding="utf-8") as file:
+            meta = json.load(file)
+        if meta.get("video_path") != os.path.abspath(video_path):
+            return None
+        if meta.get("signature") != _media_cache_signature(video_path):
+            return None
+        with open(cache_path, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+        entries = payload.get("entries") if isinstance(payload, dict) else payload
+        if not isinstance(entries, list):
+            return None
+        if not entries:
+            return None
+        language = str(meta.get("language") or "auto")
+        return entries, language
+    except Exception as exc:
+        logger.warning(f"读取本地时间轴缓存失败，重新识别: {exc}")
+        return None
+
+
+def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], language: str) -> None:
+    """保存 Gemini 对齐模式的本地时间轴缓存，避免继续完成时从头识别"""
+    if not entries:
+        return
+    cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
+    try:
+        with open(cache_path, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "video_path": os.path.abspath(video_path),
+                    "signature": _media_cache_signature(video_path),
+                    "language": language,
+                    "entries": entries,
+                    "created_at": datetime.now().isoformat(),
+                },
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(meta_path, "w", encoding="utf-8") as file:
+            json.dump(
+                {
+                    "video_path": os.path.abspath(video_path),
+                    "signature": _media_cache_signature(video_path),
+                    "language": language,
+                },
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+        logger.info(f"已缓存本地时间轴: {cache_path}")
+    except Exception as exc:
+        logger.warning(f"保存本地时间轴缓存失败，继续后续处理: {exc}")
+
+
 def _recognize_subtitle_entries(
     db: Session,
     request: "AutomationRunRequest",
@@ -1289,12 +1374,20 @@ def _recognize_subtitle_entries(
         )
     if mode == "gemini_align":
         # 方案3：本地识别出精确时间轴骨架，Gemini 出准确内容，按时间重叠对齐
-        whisper_entries, language = LocalSpeechRecognizer().transcribe_video(
-            video_path=video_path,
-            progress_callback=lambda value: progress_callback(value * 0.5),
-        )
+        cached_timeline = _load_gemini_align_timeline_cache(video_path)
+        if cached_timeline:
+            whisper_entries, language = cached_timeline
+            if progress_callback:
+                progress_callback(50)
+        else:
+            whisper_entries, language = _gemini_align_timeline_recognizer().transcribe_video(
+                video_path=video_path,
+                progress_callback=lambda value: progress_callback(value * 0.5),
+            )
+            _save_gemini_align_timeline_cache(video_path, whisper_entries, language)
         gemini_entries, _ = _build_gemini_transcriber(db, request).transcribe_video(
             video_path=video_path,
+            language=None if not language or language == "auto" else language,
             progress_callback=lambda value: progress_callback(50.0 + value * 0.5),
         )
         asr = LocalSpeechRecognizer()
