@@ -83,6 +83,27 @@ class FailingCudaRuntimeWhisperModel(FakeWhisperModel):
         return super().transcribe(video_path, **kwargs)
 
 
+class FailingCudaIteratorWhisperModel(FakeWhisperModel):
+    """测试用模型，模拟 CUDA 在字幕段迭代阶段失败"""
+
+    def __init__(self, model_name, **kwargs):
+        super().__init__(model_name, **kwargs)
+        self.device = kwargs.get("device")
+
+    def transcribe(self, video_path, **kwargs):
+        self.transcribe_calls.append({"video_path": video_path, **kwargs})
+        if self.device == "cuda":
+            def failing_segments():
+                """迭代字幕段时才抛 CUDA 错误"""
+                raise RuntimeError("cudaErrorIllegalAddress: illegal memory access")
+                yield  # pragma: no cover
+
+            return failing_segments(), FakeInfo()
+        return [
+            FakeSegment(0.0, 1.2, "cpu fallback"),
+        ], FakeInfo()
+
+
 class LocalSpeechRecognizerTest(unittest.TestCase):
     """本地语音识别器测试"""
 
@@ -96,7 +117,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
         # 测试中关闭音频预处理，避免真实调用 ffmpeg
-        self.env_patcher = patch.dict(os.environ, {"YTV_ASR_PREPROCESS": "0"})
+        self.env_patcher = patch.dict(os.environ, {"YTV_ASR_PREPROCESS": "0", "YTV_ASR_CUDA_WORKER": "0"})
         self.env_patcher.start()
         self.temp_dir = tempfile.mkdtemp(prefix="local_asr_")
         self.video_path = os.path.join(self.temp_dir, "input.mp4")
@@ -168,6 +189,28 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[0]["compute_type"], "float16")
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["beam_size"], 5)
 
+    def test_transcribe_video_uses_cpu_when_cuda_marker_exists(self):
+        """存在 CUDA 熔断标记时默认不再使用 GPU，避免后端反复原生崩溃"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+        marker_path = os.path.join(self.temp_dir, "asr-cuda-disabled.flag")
+        with open(marker_path, "w", encoding="utf-8") as file:
+            file.write("cuda crash")
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {"YTV_ASR_CUDA_DISABLED_FLAG": marker_path}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
+
     def test_transcribe_video_uses_medium_model_on_large_gpu(self):
         """显存足够时 GPU 默认使用 medium，提高专业词识别准确率"""
         fake_module = types.ModuleType("faster_whisper")
@@ -229,6 +272,96 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
         self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
         self.assertEqual(next_recognizer.device, "cpu")
+
+    def test_cuda_iterator_failure_falls_back_to_cpu(self):
+        """CUDA 在字幕段迭代阶段崩溃时也要回退 CPU，避免一键流程直接失败"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FailingCudaIteratorWhisperModel
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertEqual(entries[0]["text"], "cpu fallback")
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
+        self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
+
+    def test_cuda_worker_native_crash_marks_cuda_disabled_and_falls_back_to_cpu(self):
+        """CUDA 子进程原生崩溃时写入熔断标记，并在主进程回退 CPU 完成识别"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+        marker_path = os.path.join(self.temp_dir, "cuda-worker-disabled.flag")
+
+        class CrashingWorkerProcess:
+            """测试用子进程，模拟 CUDA native 层直接崩溃"""
+
+            stdout = iter([])
+
+            def wait(self):
+                """返回 Windows 原生崩溃退出码"""
+                return 3221226505
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {
+                "YTV_ASR_CUDA_WORKER": "1",
+                "YTV_ASR_CUDA_DISABLED_FLAG": marker_path,
+            }),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+            patch("backend.core.local_asr.subprocess.Popen", return_value=CrashingWorkerProcess()),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertTrue(os.path.exists(marker_path))
+        with open(marker_path, "r", encoding="utf-8") as file:
+            marker_content = file.read()
+        self.assertIn("CUDA 子进程异常退出", marker_content)
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
+
+    def test_explicit_cuda_worker_failure_can_fallback_to_cpu(self):
+        """显式 CUDA 调用也默认允许回退 CPU，避免自动时间轴任务因子进程崩溃中断"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+        marker_path = os.path.join(self.temp_dir, "explicit-cuda-worker-disabled.flag")
+
+        class CrashingWorkerProcess:
+            """测试用子进程，模拟显式 CUDA 识别时 native 层崩溃"""
+
+            stdout = iter([])
+
+            def wait(self):
+                """返回非零退出码触发父进程回退"""
+                return 3221226505
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {
+                "YTV_ASR_CUDA_WORKER": "1",
+                "YTV_ASR_CUDA_DISABLED_FLAG": marker_path,
+            }),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+            patch("backend.core.local_asr.subprocess.Popen", return_value=CrashingWorkerProcess()),
+        ):
+            recognizer = LocalSpeechRecognizer(device="cuda", model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertTrue(os.path.exists(marker_path))
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
 
     def test_missing_video_raises_clear_error(self):
         """视频文件不存在时给出本地识别错误"""

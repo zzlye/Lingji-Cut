@@ -2,7 +2,7 @@
 // Electron 主进程入口 - 创建窗口、管理应用生命周期、启动 Python 后端
 import { app, BrowserWindow, shell, ipcMain, dialog } from 'electron'
 import { join } from 'path'
-import { cpSync, existsSync, mkdirSync, readdirSync } from 'fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { is } from '@electron-toolkit/utils'
 import { spawn, ChildProcess } from 'child_process'
 import { net } from 'electron'
@@ -14,12 +14,15 @@ let isQuitting = false
 let isStoppingBackend = false
 let backendRestartTimer: NodeJS.Timeout | null = null
 let backendRestartAttempts = 0
+// 记录当前后端是否刚进入 CUDA 本地识别，用于识别原生 CUDA 崩溃。
+let backendWasRunningCudaAsr = false
 // 后端服务地址
 const BACKEND_URL = 'http://127.0.0.1:8765'
 // 优先使用 D:\tools 下的 Python，避免 Windows Store python.exe 占位程序导致后端启动失败
 const TOOLS_PYTHON = 'D:\\tools\\python-3.12.10-embed\\python.exe'
 const LEGACY_APP_NAMES = ['YouTube视频处理器', 'youtube-video-processor']
 const MAX_BACKEND_RESTART_ATTEMPTS = 3
+const ASR_CUDA_DISABLED_FLAG_NAME = 'asr-cuda-disabled.flag'
 
 type IpcHandleListener = Parameters<typeof ipcMain.handle>[1]
 
@@ -53,6 +56,33 @@ function migrateLegacyUserData(): void {
     } catch (error) {
       console.error(`[Main] 迁移旧版数据目录失败: ${error}`)
     }
+  }
+}
+
+/** 返回 CUDA ASR 熔断标记路径，后端启动时会读取同一个文件。 */
+function asrCudaDisabledFlagPath(): string {
+  return join(app.getPath('userData'), 'data', ASR_CUDA_DISABLED_FLAG_NAME)
+}
+
+/** 后端 CUDA 原生崩溃后写入熔断标记，避免自动重启后反复崩溃。 */
+function markAsrCudaDisabled(reason: string): void {
+  try {
+    const flagPath = asrCudaDisabledFlagPath()
+    mkdirSync(join(app.getPath('userData'), 'data'), { recursive: true })
+    writeFileSync(flagPath, `${new Date().toISOString()}\n${reason}\n`, 'utf-8')
+    console.warn(`[Main] 已禁用本地识别 CUDA: ${reason}`)
+  } catch (error) {
+    console.error(`[Main] 写入 CUDA 熔断标记失败: ${error}`)
+  }
+}
+
+/** 从后端日志判断当前是否正在跑 CUDA 本地识别。 */
+function trackBackendAsrLog(message: string): void {
+  if (/本地识别字幕: .*device=cuda/i.test(message)) {
+    backendWasRunningCudaAsr = true
+  }
+  if (/本地识别完成|GPU 本地识别失败|后续本地识别将改用 CPU/i.test(message)) {
+    backendWasRunningCudaAsr = false
   }
 }
 
@@ -126,6 +156,7 @@ function startPythonBackend(): void {
 
   // 公共环境变量
   const env: NodeJS.ProcessEnv = { ...process.env, PYTHONIOENCODING: 'utf-8' }
+  env.YTV_ASR_CUDA_DISABLED_FLAG = asrCudaDisabledFlagPath()
   let command: string
   let args: string[]
   let cwd: string
@@ -167,13 +198,21 @@ function startPythonBackend(): void {
   })
 
   pythonProcess.stdout?.on('data', (data) => {
-    console.log(`[Python] ${data.toString().trim()}`)
+    const message = data.toString().trim()
+    trackBackendAsrLog(message)
+    console.log(`[Python] ${message}`)
   })
   pythonProcess.stderr?.on('data', (data) => {
-    console.error(`[Python Error] ${data.toString().trim()}`)
+    const message = data.toString().trim()
+    trackBackendAsrLog(message)
+    console.error(`[Python Error] ${message}`)
   })
   pythonProcess.on('close', (code) => {
     console.log(`[Python] 后端进程退出，退出码: ${code}`)
+    if (!isQuitting && !isStoppingBackend && backendWasRunningCudaAsr && code && code !== 0) {
+      markAsrCudaDisabled(`本地识别 CUDA 导致后端异常退出，退出码 ${code}`)
+    }
+    backendWasRunningCudaAsr = false
     pythonProcess = null
     if (!isQuitting && !isStoppingBackend) {
       schedulePythonBackendRestart()

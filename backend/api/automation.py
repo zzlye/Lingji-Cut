@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from glob import glob
@@ -24,6 +25,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
+from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
@@ -36,7 +38,7 @@ from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plai
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 logger = get_logger("automation")
-GEMINI_ALIGN_TIMELINE_CACHE_VERSION = 2
+GEMINI_ALIGN_TIMELINE_CACHE_VERSION = 3
 
 # 后台自动化任务线程池，避免多个长视频同时阻塞 API 线程。
 AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
@@ -1026,6 +1028,34 @@ def _update_export_progress(db: Session, job: Optional[AutomationJobRecord], tas
         _update_job_stage(db, job, "export", "running", progress=task.progress, task_id=task.id)
 
 
+def _update_subtitle_asr_progress(db: Session, job: Optional[AutomationJobRecord], task: DownloadTask, progress: float) -> None:
+    """同步字幕识别进度，允许 ASR 心跳线程使用独立会话安全更新"""
+    task_progress = min(35.0, 10.0 + progress * 0.25)
+    if task_progress <= float(task.progress or 0):
+        return
+    task.progress = task_progress
+    db.commit()
+    if job:
+        _update_job_stage(db, job, "subtitle", "running", progress=task_progress, task_id=task.id)
+
+
+def _update_subtitle_asr_progress_by_id(job_id: Optional[str], task_id: int, progress: float) -> None:
+    """跨线程刷新字幕识别进度，避免心跳线程复用主数据库会话"""
+    if not job_id:
+        return
+    db = SessionLocal()
+    try:
+        task = db.query(DownloadTask).filter(DownloadTask.id == task_id).first()
+        job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
+        if not task or not job or task.status not in {"processing", "downloading"} or job.status != "running":
+            return
+        _update_subtitle_asr_progress(db, job, task, progress)
+    except Exception as exc:
+        logger.warning(f"字幕识别心跳进度更新失败: {exc}")
+    finally:
+        db.close()
+
+
 def _create_task(db: Session, video_id: int, task_type: str, params: Optional[dict[str, Any]] = None, parent_job_id: Optional[str] = None) -> DownloadTask:
     """创建后端自动流程子任务"""
     task = DownloadTask(
@@ -1276,20 +1306,64 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
 
 
 def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
-    """构造 Gemini 对齐模式的本地时间轴识别器，默认用 CPU + small 兼顾稳定和时间轴精度"""
+    """构造 Gemini 对齐模式的本地时间轴识别器，按显存安全选择 GPU 或 CPU"""
     profile = _gemini_align_timeline_profile()
-    return LocalSpeechRecognizer(device=profile["device"], model_name=profile["model_name"])
+    return LocalSpeechRecognizer(
+        device=profile["device"],
+        model_name=profile["model_name"],
+        beam_size=int(profile["beam_size"]),
+    )
 
 
 def _gemini_align_timeline_profile() -> dict[str, str]:
     """返回 Gemini 对齐本地时间轴识别配置，写入缓存用于自动失效旧结果"""
-    device = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE") or "cpu").strip().lower() or "cpu"
-    model_name = (
-        os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL")
-        or os.environ.get("YTV_ASR_MODEL")
-        or "small"
-    ).strip() or "small"
-    return {"device": device, "model_name": model_name}
+    requested_device = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE") or "auto").strip().lower() or "auto"
+    configured_model = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL") or "").strip()
+    beam_size = _env_int("YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE", 2, 1, 4)
+
+    if asr_cuda_disabled_by_marker() and requested_device != "cuda":
+        return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+
+    if requested_device == "cpu":
+        return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+
+    if requested_device == "cuda":
+        return {
+            "device": "cuda",
+            "model_name": configured_model or _safe_gemini_align_gpu_model(),
+            "beam_size": str(beam_size),
+        }
+
+    if cuda_device_count() > 0 and cuda_free_memory_mib() >= _env_int("YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB", 1800, 512, 49152):
+        return {
+            "device": "cuda",
+            "model_name": configured_model or _safe_gemini_align_gpu_model(),
+            "beam_size": str(beam_size),
+        }
+    return {"device": "cpu", "model_name": configured_model or "small", "beam_size": str(beam_size)}
+
+
+def _gemini_align_cache_profile(profile: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """生成时间轴缓存签名，只保留会影响时间轴质量的模型名，忽略 CPU/GPU 执行设备"""
+    current = profile or _gemini_align_timeline_profile()
+    return {"model_name": str(current.get("model_name") or "small")}
+
+
+def _safe_gemini_align_gpu_model() -> str:
+    """按当前空闲显存选择时间轴模型，优先避免 CUDA 显存压力导致进程崩溃"""
+    free_mib = cuda_free_memory_mib()
+    if free_mib >= _env_int("YTV_GEMINI_ALIGN_SMALL_VRAM_MIB", 2600, 1024, 49152):
+        return "small"
+    return "base"
+
+
+def _env_int(key: str, default: int, minimum: int, maximum: int) -> int:
+    """读取整数环境变量并限制范围，避免错误配置造成异常"""
+    try:
+        value = int(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def _gemini_align_timeline_cache_paths(video_path: str) -> tuple[str, str]:
@@ -1317,9 +1391,12 @@ def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[di
     try:
         with open(meta_path, "r", encoding="utf-8") as file:
             meta = json.load(file)
-        if meta.get("cache_version") != GEMINI_ALIGN_TIMELINE_CACHE_VERSION:
+        # v2 缓存已经包含模型名和视频签名；CUDA/CPU 熔断只改变执行设备，不应导致已有时间轴失效。
+        if meta.get("cache_version") not in {2, GEMINI_ALIGN_TIMELINE_CACHE_VERSION}:
             return None
-        if meta.get("timeline_profile") != _gemini_align_timeline_profile():
+        old_profile = meta.get("timeline_profile") if isinstance(meta.get("timeline_profile"), dict) else None
+        cached_profile = meta.get("cache_profile") or _gemini_align_cache_profile(old_profile)
+        if cached_profile != _gemini_align_cache_profile():
             return None
         if meta.get("video_path") != os.path.abspath(video_path):
             return None
@@ -1345,6 +1422,7 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
         return
     cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
     timeline_profile = _gemini_align_timeline_profile()
+    cache_profile = _gemini_align_cache_profile(timeline_profile)
     try:
         with open(cache_path, "w", encoding="utf-8") as file:
             json.dump(
@@ -1353,6 +1431,7 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
                     "video_path": os.path.abspath(video_path),
                     "signature": _media_cache_signature(video_path),
                     "timeline_profile": timeline_profile,
+                    "cache_profile": cache_profile,
                     "language": language,
                     "entries": entries,
                     "created_at": datetime.now().isoformat(),
@@ -1368,6 +1447,7 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
                     "video_path": os.path.abspath(video_path),
                     "signature": _media_cache_signature(video_path),
                     "timeline_profile": timeline_profile,
+                    "cache_profile": cache_profile,
                     "language": language,
                 },
                 file,
@@ -2153,14 +2233,18 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             preset = _pick_subtitle_preset(db, request.subtitle_preset_id)
             preset_dict = _preset_to_dict(preset)
             engine = SubtitleEngine()
+            asr_owner_thread = threading.current_thread()
 
             def on_asr_progress(progress: float) -> None:
                 """同步本地语音识别进度"""
-                _check_control(db, job, subtitle_task)
-                subtitle_task.progress = min(35.0, 10.0 + progress * 0.25)
-                db.commit()
-                if job:
-                    _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
+                if job and subtitle_task.id is not None and threading.current_thread() is not asr_owner_thread:
+                    _update_subtitle_asr_progress_by_id(job.id, subtitle_task.id, progress)
+                    return
+                try:
+                    _check_control(db, job, subtitle_task)
+                    _update_subtitle_asr_progress(db, job, subtitle_task, progress)
+                except TaskControlRequested:
+                    raise
 
             entries, language = _recognize_subtitle_entries(
                 db,

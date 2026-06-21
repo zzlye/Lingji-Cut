@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -922,6 +922,15 @@ class AutomationJobTests(unittest.TestCase):
             progress_values: list[float] = []
 
             with (
+                patch.dict(os.environ, {
+                    "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "auto",
+                    "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                    "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+                    "YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB": "1800",
+                    "YTV_GEMINI_ALIGN_SMALL_VRAM_MIB": "2600",
+                }, clear=False),
+                patch("backend.api.automation.cuda_device_count", return_value=1),
+                patch("backend.api.automation.cuda_free_memory_mib", return_value=3200),
                 patch("backend.api.automation.LocalSpeechRecognizer", FakeTimelineRecognizer),
                 patch("backend.api.automation._build_gemini_transcriber", return_value=fake_gemini),
             ):
@@ -935,12 +944,62 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(cached_language, "en")
         self.assertEqual([entry["text"] for entry in entries], ["Gemini content"])
         self.assertEqual([entry["text"] for entry in cached_entries], ["Gemini content"])
-        self.assertEqual(FakeTimelineRecognizer.devices[0], "cpu")
+        self.assertEqual(FakeTimelineRecognizer.devices[0], "cuda")
         self.assertEqual(FakeTimelineRecognizer.model_names[0], "small")
         self.assertEqual(FakeTimelineRecognizer.transcribe_paths, [video_path])
         self.assertEqual(fake_gemini.languages, ["en", "en"])
         self.assertIn(50, progress_values)
         self.assertTrue(cache_exists)
+
+    def test_gemini_align_timeline_profile_uses_safe_gpu_when_vram_is_enough(self):
+        """Gemini 对齐时间轴在显存足够时走低 beam GPU，避免长视频固定 CPU 太慢"""
+        with (
+            patch.dict(os.environ, {
+                "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "auto",
+                "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+                "YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB": "1800",
+                "YTV_GEMINI_ALIGN_SMALL_VRAM_MIB": "2600",
+            }, clear=False),
+            patch("backend.api.automation.cuda_device_count", return_value=1),
+            patch("backend.api.automation.cuda_free_memory_mib", return_value=3200),
+        ):
+            profile = _gemini_align_timeline_profile()
+
+        self.assertEqual(profile, {"device": "cuda", "model_name": "small", "beam_size": "2"})
+
+    def test_gemini_align_timeline_profile_falls_back_to_cpu_when_vram_is_low(self):
+        """Gemini 对齐时间轴在空闲显存不足时退 CPU，避免 CUDA 显存压力导致流程崩溃"""
+        with (
+            patch.dict(os.environ, {
+                "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "auto",
+                "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+                "YTV_GEMINI_ALIGN_MIN_FREE_VRAM_MIB": "1800",
+                "YTV_GEMINI_ALIGN_SMALL_VRAM_MIB": "2600",
+            }, clear=False),
+            patch("backend.api.automation.cuda_device_count", return_value=1),
+            patch("backend.api.automation.cuda_free_memory_mib", return_value=900),
+        ):
+            profile = _gemini_align_timeline_profile()
+
+        self.assertEqual(profile, {"device": "cpu", "model_name": "small", "beam_size": "2"})
+
+    def test_gemini_align_timeline_profile_uses_cpu_when_cuda_marker_exists(self):
+        """检测到 CUDA 原生崩溃标记时，Gemini 对齐时间轴默认退回 CPU"""
+        with (
+            patch.dict(os.environ, {
+                "YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "auto",
+                "YTV_GEMINI_ALIGN_TIMELINE_MODEL": "",
+                "YTV_GEMINI_ALIGN_TIMELINE_BEAM_SIZE": "",
+            }, clear=False),
+            patch("backend.api.automation.asr_cuda_disabled_by_marker", return_value=True),
+            patch("backend.api.automation.cuda_device_count", return_value=1),
+            patch("backend.api.automation.cuda_free_memory_mib", return_value=6000),
+        ):
+            profile = _gemini_align_timeline_profile()
+
+        self.assertEqual(profile, {"device": "cpu", "model_name": "small", "beam_size": "2"})
 
     def test_gemini_align_ignores_old_local_timeline_cache(self):
         """旧版本地时间轴缓存没有配置版本时必须失效，避免继续复用低精度时间轴"""
@@ -1012,6 +1071,38 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertEqual(FreshTimelineRecognizer.transcribe_paths, [video_path])
         self.assertEqual([entry["text"] for entry in entries], ["Gemini fresh"])
+
+    def test_gemini_align_reuses_timeline_cache_after_cuda_fallback(self):
+        """CUDA 熔断切到 CPU 后仍复用同模型时间轴缓存，不应因为执行设备变化从头识别"""
+        with tempfile.TemporaryDirectory(prefix="automation_cuda_cache_reuse_") as temp_dir:
+            video_path = os.path.join(temp_dir, "enhanced.mp4")
+            with open(video_path, "wb") as file:
+                file.write(b"video")
+            cache_path = os.path.join(temp_dir, "enhanced_local_timeline.json")
+            meta_path = os.path.join(temp_dir, "enhanced_local_timeline.meta.json")
+            signature = {"size": os.path.getsize(video_path), "mtime": os.path.getmtime(video_path)}
+            with open(cache_path, "w", encoding="utf-8") as file:
+                json.dump({"entries": [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "cached timeline"}]}, file)
+            with open(meta_path, "w", encoding="utf-8") as file:
+                json.dump({
+                    "cache_version": 2,
+                    "video_path": os.path.abspath(video_path),
+                    "signature": signature,
+                    "timeline_profile": {"device": "cuda", "model_name": "small", "beam_size": "2"},
+                    "language": "en",
+                }, file)
+
+            with (
+                patch("backend.api.automation.asr_cuda_disabled_by_marker", return_value=True),
+                patch("backend.api.automation.cuda_device_count", return_value=1),
+                patch("backend.api.automation.cuda_free_memory_mib", return_value=6000),
+            ):
+                cached = _load_gemini_align_timeline_cache(video_path)
+
+        self.assertIsNotNone(cached)
+        entries, language = cached or ([], "")
+        self.assertEqual(language, "en")
+        self.assertEqual(entries[0]["text"], "cached timeline")
 
     def test_automation_translation_saves_comparison_subtitle_for_review(self):
         """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""

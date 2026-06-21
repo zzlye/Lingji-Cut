@@ -1,10 +1,14 @@
 # backend/core/local_asr.py
 # 本地语音识别 - 使用 faster-whisper 在本机从视频音频生成带时间轴字幕
 
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
@@ -54,6 +58,8 @@ LEADING_FRAGMENT_WORDS = {
 _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
 # CUDA 一旦出现运行级错误，当前进程内继续使用 CUDA 往往会反复失败。
 _CUDA_ASR_DISABLED = False
+CUDA_DISABLED_FLAG_NAME = "asr-cuda-disabled.flag"
+ASR_WORKER_EVENT_PREFIX = "__YTV_ASR_WORKER__"
 
 
 def default_asr_model_dir() -> str:
@@ -65,6 +71,37 @@ def default_asr_model_dir() -> str:
 def default_asr_model_name() -> str:
     """低配机器默认用 base，速度和准确率比 tiny 更均衡"""
     return os.environ.get("YTV_ASR_MODEL") or "base"
+
+
+def default_data_root() -> str:
+    """返回后端可写数据目录根路径，开发环境默认项目根目录"""
+    return os.environ.get("YTV_DATA_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+
+def asr_cuda_disabled_flag_path() -> str:
+    """返回 CUDA ASR 熔断标记路径，Electron 检测到原生崩溃后会写入该文件"""
+    return os.environ.get("YTV_ASR_CUDA_DISABLED_FLAG") or os.path.join(default_data_root(), "data", CUDA_DISABLED_FLAG_NAME)
+
+
+def asr_cuda_disabled_by_marker() -> bool:
+    """判断是否因上次 CUDA 原生崩溃而禁用本地识别 CUDA"""
+    if str(os.environ.get("YTV_ASR_FORCE_CUDA") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        return os.path.exists(asr_cuda_disabled_flag_path())
+    except OSError:
+        return False
+
+
+def mark_asr_cuda_disabled(reason: str) -> None:
+    """写入 CUDA ASR 熔断标记，避免下次启动后继续触发同一类原生崩溃"""
+    try:
+        flag_path = asr_cuda_disabled_flag_path()
+        os.makedirs(os.path.dirname(flag_path), exist_ok=True)
+        with open(flag_path, "w", encoding="utf-8") as file:
+            file.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\n{reason}\n")
+    except OSError as exc:
+        logger.warning(f"写入 CUDA 熔断标记失败: {exc}")
 
 
 def _query_nvidia_smi_mib(field: str) -> int:
@@ -134,6 +171,8 @@ def cuda_device_count() -> int:
 
 def default_asr_device() -> str:
     """默认优先 GPU，没有 CUDA 时自动回退 CPU"""
+    if asr_cuda_disabled_by_marker():
+        return "cpu"
     requested = (os.environ.get("YTV_ASR_DEVICE") or "auto").strip().lower()
     if requested and requested != "auto":
         return requested
@@ -160,19 +199,31 @@ class LocalSpeechRecognizer:
         device: Optional[str] = None,
         compute_type: Optional[str] = None,
         cpu_threads: Optional[int] = None,
+        beam_size: Optional[int] = None,
+        allow_cpu_fallback: Optional[bool] = None,
     ):
         """初始化本地识别参数，不在构造阶段加载模型"""
         self.model_dir = model_dir or default_asr_model_dir()
         requested_device = device or os.environ.get("YTV_ASR_DEVICE") or "auto"
         normalized_device = str(requested_device).strip().lower()
-        self.allow_cpu_fallback = normalized_device == "auto"
         self.device = default_asr_device() if normalized_device == "auto" else normalized_device
+        self.allow_cpu_fallback = self._resolve_cpu_fallback(normalized_device, allow_cpu_fallback)
         configured_model = model_name or os.environ.get("YTV_ASR_MODEL")
         self.auto_model_name = not configured_model
         # 有 GPU 时按显存提升模型准确率，CPU 仍用 base，兼顾准确率和中低配可用性。
         self.model_name = configured_model or (default_gpu_asr_model_name() if self.device == "cuda" else default_asr_model_name())
         self.compute_type = compute_type or default_asr_compute_type(self.device)
         self.cpu_threads = cpu_threads or min(4, max(1, os.cpu_count() or 1))
+        self.beam_size = beam_size
+
+    def _resolve_cpu_fallback(self, normalized_device: str, configured: Optional[bool]) -> bool:
+        """判断 CUDA 失败时是否允许回退 CPU，默认保护自动流程不中断"""
+        if configured is not None:
+            return bool(configured)
+        fallback_setting = str(os.environ.get("YTV_ASR_ALLOW_CPU_FALLBACK") or "true").strip().lower()
+        if fallback_setting in {"0", "false", "no", "off"}:
+            return False
+        return normalized_device in {"auto", "cuda"}
 
     def transcribe_video(
         self,
@@ -184,38 +235,26 @@ class LocalSpeechRecognizer:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"本地识别视频不存在: {video_path}")
 
+        if self._should_use_cuda_worker():
+            try:
+                return self._transcribe_video_in_worker(video_path, language, progress_callback)
+            except Exception as exc:
+                if not self._should_fallback_to_cpu():
+                    raise
+                logger.warning(f"GPU 本地识别子进程失败，自动回退 CPU: {exc}")
+                self._switch_to_cpu_after_cuda_failure(exc)
+
         # 预处理音频：响度归一化让低声说话更容易被识别，时间轴保持不变。
         audio_path, temp_audio_path = self._prepare_audio(video_path)
         try:
             try:
-                segments, info = self._transcribe_with_model(audio_path, language, progress_callback)
+                entries, detected_language = self._collect_transcription_entries(audio_path, language, progress_callback)
             except Exception as exc:
                 if not self._should_fallback_to_cpu():
                     raise
                 logger.warning(f"GPU 本地识别失败，自动回退 CPU: {exc}")
-                self._disable_cuda_asr_for_process(exc)
-                self.device = "cpu"
-                if self.auto_model_name:
-                    self.model_name = default_asr_model_name()
-                self.compute_type = os.environ.get("YTV_ASR_CPU_COMPUTE_TYPE") or "int8"
-                segments, info = self._transcribe_with_model(audio_path, language, progress_callback)
-
-            detected_language = str(getattr(info, "language", "") or language or "auto")
-            duration = float(getattr(info, "duration", 0) or 0)
-            entries: list[dict] = []
-            for segment in segments:
-                segment_entries = self._segment_to_entries(segment)
-                for entry in segment_entries:
-                    if not str(entry.get("text") or "").strip():
-                        continue
-                    entry["index"] = len(entries) + 1
-                    entries.append(entry)
-                if progress_callback and duration > 0:
-                    end = max(
-                        (self._srt_time_to_seconds(str(entry.get("end", "00:00:00,000"))) for entry in segment_entries),
-                        default=float(getattr(segment, "end", 0) or 0),
-                    )
-                    progress_callback(min(95.0, 5.0 + end / duration * 90.0))
+                self._switch_to_cpu_after_cuda_failure(exc)
+                entries, detected_language = self._collect_transcription_entries(audio_path, language, progress_callback)
 
             # 解码一次音频数组，供空洞补漏和 VAD 边界校准共用
             audio_array = self._decode_audio_array(audio_path)
@@ -245,6 +284,152 @@ class LocalSpeechRecognizer:
         logger.info(f"本地识别完成: {len(entries)} 条字幕, language={detected_language}")
         return entries, detected_language
 
+    def _collect_transcription_entries(
+        self,
+        audio_path: str,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+    ) -> tuple[list[dict], str]:
+        """执行识别并消费字幕段，确保推理迭代阶段出错也能被外层捕获回退"""
+        emit_progress = self._monotonic_progress_callback(progress_callback)
+        heartbeat_stop = self._start_transcribe_heartbeat(emit_progress)
+        try:
+            segments, info = self._transcribe_with_model(audio_path, language, emit_progress)
+            detected_language = str(getattr(info, "language", "") or language or "auto")
+            duration = float(getattr(info, "duration", 0) or 0)
+            entries: list[dict] = []
+            for segment in segments:
+                segment_entries = self._segment_to_entries(segment)
+                for entry in segment_entries:
+                    if not str(entry.get("text") or "").strip():
+                        continue
+                    entry["index"] = len(entries) + 1
+                    entries.append(entry)
+                if progress_callback and duration > 0:
+                    end = max(
+                        (self._srt_time_to_seconds(str(entry.get("end", "00:00:00,000"))) for entry in segment_entries),
+                        default=float(getattr(segment, "end", 0) or 0),
+                    )
+                    emit_progress(min(95.0, 5.0 + end / duration * 90.0))
+            return entries, detected_language
+        finally:
+            heartbeat_stop()
+
+    def _should_use_cuda_worker(self) -> bool:
+        """CUDA 识别默认放到子进程里跑，避免原生崩溃拖垮后端主进程"""
+        configured = str(os.environ.get("YTV_ASR_CUDA_WORKER") or "true").strip().lower()
+        if configured in {"0", "false", "no", "off"}:
+            return False
+        if str(os.environ.get("YTV_ASR_CHILD_WORKER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        return self.device == "cuda"
+
+    def _transcribe_video_in_worker(
+        self,
+        video_path: str,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+    ) -> tuple[list[dict], str]:
+        """在独立 Python 子进程中执行 CUDA 识别，子进程崩溃时主后端仍可回退 CPU"""
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        env = os.environ.copy()
+        env["YTV_ASR_CHILD_WORKER"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONPATH"] = os.pathsep.join([project_root, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+        command = [
+            sys.executable,
+            "-m",
+            "backend.core.local_asr_worker",
+            "--video-path", video_path,
+            "--model-name", self.model_name,
+            "--model-dir", self.model_dir,
+            "--device", self.device,
+            "--compute-type", self.compute_type,
+            "--cpu-threads", str(self.cpu_threads),
+        ]
+        if self.beam_size is not None:
+            command.extend(["--beam-size", str(self.beam_size)])
+        if language:
+            command.extend(["--language", language])
+
+        logger.info(f"本地识别 CUDA 子进程启动: model={self.model_name}, compute={self.compute_type}")
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        process = subprocess.Popen(
+            command,
+            cwd=project_root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+        )
+
+        result_payload: Optional[dict[str, Any]] = None
+        error_message = ""
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            if line.startswith(ASR_WORKER_EVENT_PREFIX):
+                try:
+                    event = json.loads(line[len(ASR_WORKER_EVENT_PREFIX):])
+                except json.JSONDecodeError:
+                    logger.warning(f"本地识别子进程事件解析失败: {line[:200]}")
+                    continue
+                event_type = str(event.get("type") or "")
+                if event_type == "progress" and progress_callback:
+                    progress_callback(float(event.get("value") or 0))
+                elif event_type == "result":
+                    result_payload = event
+                elif event_type == "error":
+                    error_message = str(event.get("message") or event.get("error_type") or "")
+                continue
+            logger.info(f"本地识别子进程: {line}")
+
+        return_code = process.wait()
+        if return_code != 0:
+            reason = error_message or f"退出码 {return_code}"
+            if return_code != 1:
+                mark_asr_cuda_disabled(f"本地识别 CUDA 子进程异常退出，{reason}")
+            raise RuntimeError(f"本地识别 CUDA 子进程失败: {reason}")
+        if not result_payload:
+            raise RuntimeError("本地识别 CUDA 子进程没有返回结果")
+        entries = result_payload.get("entries")
+        if not isinstance(entries, list):
+            raise RuntimeError("本地识别 CUDA 子进程返回结果格式错误")
+        language_value = str(result_payload.get("language") or language or "auto")
+        return entries, language_value
+
+    def _switch_to_cpu_after_cuda_failure(self, reason: Exception) -> None:
+        """切换到 CPU 识别参数，供 CUDA 初始化、推理和子进程失败共用"""
+        self._disable_cuda_asr_for_process(reason)
+        self.device = "cpu"
+        if self.auto_model_name:
+            self.model_name = default_asr_model_name()
+        self.compute_type = os.environ.get("YTV_ASR_CPU_COMPUTE_TYPE") or "int8"
+
+    def _monotonic_progress_callback(self, progress_callback: Optional[Callable[[float], None]]) -> Optional[Callable[[float], None]]:
+        """包装进度回调，保证心跳进度不会覆盖真实识别进度造成倒退"""
+        if not progress_callback:
+            return None
+        lock = threading.Lock()
+        last_progress = 0.0
+
+        def emit(progress: float) -> None:
+            """只向外发送递增的进度值"""
+            nonlocal last_progress
+            normalized = max(0.0, min(100.0, float(progress)))
+            with lock:
+                if normalized < last_progress:
+                    return
+                last_progress = normalized
+            progress_callback(normalized)
+
+        return emit
+
     def _transcribe_with_model(
         self,
         video_path: str,
@@ -268,6 +453,36 @@ class LocalSpeechRecognizer:
             hallucination_silence_threshold=self._hallucination_silence_threshold(),
             condition_on_previous_text=False,
         )
+
+    def _start_transcribe_heartbeat(self, progress_callback: Optional[Callable[[float], None]]) -> Callable[[], None]:
+        """识别过程中发送心跳进度，避免长视频 CPU/GPU 推理看起来卡死"""
+        if not progress_callback:
+            return lambda: None
+
+        interval = self._env_float("YTV_ASR_HEARTBEAT_INTERVAL_S", 15.0, 1.0, 120.0)
+        max_progress = self._env_float("YTV_ASR_HEARTBEAT_MAX_PROGRESS", 90.0, 6.0, 95.0)
+        stop_event = threading.Event()
+
+        def run() -> None:
+            """按时间缓慢推进到上限，真实字幕段进度返回后会继续覆盖它"""
+            started_at = time.monotonic()
+            while not stop_event.wait(interval):
+                elapsed = max(0.0, time.monotonic() - started_at)
+                progress = min(max_progress, 5.0 + elapsed / max(interval, 1.0) * 1.5)
+                try:
+                    progress_callback(progress)
+                except Exception as exc:
+                    logger.warning(f"本地识别心跳进度回调失败: {exc}")
+
+        thread = threading.Thread(target=run, name="ytv-asr-progress-heartbeat", daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            """停止心跳线程，避免识别结束后继续更新旧任务进度"""
+            stop_event.set()
+            thread.join(timeout=0.2)
+
+        return stop
 
     def _prepare_audio(self, video_path: str) -> tuple[str, Optional[str]]:
         """提取 16k 单声道音频并做响度归一化，返回(识别用路径, 待清理临时文件)"""
@@ -822,6 +1037,8 @@ class LocalSpeechRecognizer:
 
     def _beam_size(self) -> int:
         """读取识别 beam size，GPU 默认更准，CPU 默认更快"""
+        if self.beam_size is not None:
+            return max(1, min(8, int(self.beam_size)))
         configured = os.environ.get("YTV_ASR_BEAM_SIZE")
         if configured:
             try:

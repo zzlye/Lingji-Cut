@@ -62,21 +62,31 @@ class GeminiAudioTranscriber:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Gemini 识别视频不存在: {video_path}")
 
+        self._emit_progress(progress_callback, 2)
+        logger.info(f"Gemini 识别音频预处理开始: model={self.model}")
         audio_path, temp_audio = self._asr._prepare_audio(video_path)
         try:
-            if progress_callback:
-                progress_callback(5)
+            self._emit_progress(progress_callback, 8)
+            logger.info("Gemini 识别音频预处理完成，开始解码")
             audio = self._asr._decode_audio_array(audio_path)
             if audio is None:
                 raise RuntimeError("Gemini 识别无法解码音频")
             duration = len(audio) / 16000.0
+            self._emit_progress(progress_callback, 12)
+            logger.info(f"Gemini 识别音频解码完成: duration={duration:.1f}s")
             regions = self._asr._compute_vad_regions(audio)
+            self._emit_progress(progress_callback, 16)
+            logger.info(f"Gemini 识别 VAD 完成: {len(regions)} 个语音区间")
             segments = self._plan_segments(regions, duration, self._segment_seconds())
             if not segments:
                 segments = [(0.0, duration)]
-            seg_files = self._export_segment_files(audio_path, segments)
+            self._emit_progress(progress_callback, 20)
+            logger.info(f"Gemini 识别音频分段规划完成: {len(segments)} 段")
+            seg_files = self._export_segment_files(audio_path, segments, progress_callback)
             if not seg_files:
                 raise RuntimeError("Gemini 识别音频分段失败")
+            self._emit_progress(progress_callback, 30)
+            logger.info(f"Gemini 识别音频分段导出完成: {len(seg_files)} 段")
             try:
                 entries = asyncio.run(self._transcribe_segments(seg_files, language, progress_callback))
             finally:
@@ -98,6 +108,12 @@ class GeminiAudioTranscriber:
             if temp_audio:
                 self._safe_remove(temp_audio)
 
+    def _emit_progress(self, progress_callback: Optional[Callable[[float], None]], value: float) -> None:
+        """安全发送 Gemini 识别进度，避免进度回调异常打断识别主流程"""
+        if not progress_callback:
+            return
+        progress_callback(max(0.0, min(100.0, float(value))))
+
     def _plan_segments(self, regions: list[tuple[float, float]], duration: float, max_len: float) -> list[tuple[float, float]]:
         """把 VAD 语音区间贪心合并成不超过 max_len 的分段，切点落在静音间隙避免切断句子"""
         if not regions:
@@ -118,7 +134,12 @@ class GeminiAudioTranscriber:
             padded.append((max(0.0, start - 0.3), min(duration, end + 0.3)))
         return padded
 
-    def _export_segment_files(self, audio_path: str, segments: list[tuple[float, float]]) -> list[tuple[int, float, str]]:
+    def _export_segment_files(
+        self,
+        audio_path: str,
+        segments: list[tuple[float, float]],
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> list[tuple[int, float, str]]:
         """用 ffmpeg 把每个分段从预处理音频切成 mp3，返回(序号, 段起点秒, 文件路径)"""
         seg_files: list[tuple[int, float, str]] = []
         for index, (start, end) in enumerate(segments):
@@ -145,6 +166,7 @@ class GeminiAudioTranscriber:
             else:
                 logger.warning(f"Gemini 识别分段 {start:.1f}-{end:.1f}s 切割失败，已跳过")
                 self._safe_remove(out_path)
+            self._emit_progress(progress_callback, min(29.0, 20.0 + (index + 1) / max(1, len(segments)) * 9.0))
         return seg_files
 
     async def _transcribe_segments(
@@ -174,7 +196,7 @@ class GeminiAudioTranscriber:
                     finally:
                         done += 1
                         if progress_callback:
-                            progress_callback(min(95.0, 5.0 + done / max(1, total) * 90.0))
+                            progress_callback(min(95.0, 30.0 + done / max(1, total) * 65.0))
 
             await asyncio.gather(*(run_one(slot, seg_start, path) for slot, (_, seg_start, path) in enumerate(seg_files)))
 
