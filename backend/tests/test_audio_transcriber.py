@@ -174,6 +174,39 @@ class AlignTimelineTest(unittest.TestCase):
         self.assertNotEqual(out[2]["text"], gemini_text)
         self.assertEqual(" ".join(entry["text"] for entry in out), gemini_text)
 
+    def test_missing_gemini_sentences_do_not_create_dense_flash_subtitles(self):
+        """Gemini 异常把多句补漏挤到同一瞬间时，应合并到真实空档而不是生成密集闪字幕"""
+        whisper = [
+            {"index": 1, "start": "00:01:42,000", "end": "00:01:43,000", "text": "before"},
+            {"index": 2, "start": "00:01:48,880", "end": "00:01:51,470", "text": "after"},
+        ]
+        gemini = [
+            {"index": 1, "start": "00:01:42,000", "end": "00:01:43,000", "text": "before"},
+            {"index": 2, "start": "00:01:44,024", "end": "00:01:44,224", "text": "If I build a section above ground"},
+            {"index": 3, "start": "00:01:44,054", "end": "00:01:44,254", "text": "players will attack the decoy base"},
+            {"index": 4, "start": "00:01:44,134", "end": "00:01:44,334", "text": "the real one stays hidden underground"},
+            {"index": 5, "start": "00:01:44,234", "end": "00:01:44,434", "text": "Yo we're not even ready"},
+            {"index": 6, "start": "00:01:44,254", "end": "00:01:44,454", "text": "Falcon's not here"},
+            {"index": 7, "start": "00:01:48,880", "end": "00:01:51,470", "text": "after"},
+        ]
+
+        out = self._align(whisper, gemini)
+        inserted = [
+            entry for entry in out
+            if "before" not in entry["text"] and "after" not in entry["text"]
+        ]
+
+        self.assertLessEqual(len(inserted), 6)
+        for entry in inserted:
+            start = self.asr._srt_time_to_seconds(entry["start"])
+            end = self.asr._srt_time_to_seconds(entry["end"])
+            self.assertGreaterEqual(end - start, 0.75)
+        for left, right in zip(inserted, inserted[1:]):
+            self.assertLessEqual(
+                self.asr._srt_time_to_seconds(left["end"]),
+                self.asr._srt_time_to_seconds(right["start"]),
+            )
+
 
 class AudioContentPartTest(unittest.TestCase):
     """音频多模态片段格式测试：默认 image_url data URI，可切回 input_audio"""

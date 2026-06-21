@@ -186,6 +186,36 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(result[1]["source_index"], 11)
         self.assertLess(result[0]["end"], result[1]["end"])
 
+    def test_translate_does_not_split_too_short_timeline_into_flash_entries(self):
+        """原时间段过短时，即使模型返回多条译文，也要合并避免烧录成闪字幕"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"如果我在地面上建一部分基地"},{"id":1,"text":"技术上就没有违规"}]',
+        ])
+        entries = [
+            {
+                "index": 46,
+                "start": "00:01:44,024",
+                "end": "00:01:44,224",
+                "text": "If I build a section of my base above ground technically I'm not breaking any rules",
+            },
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="zh-CN",
+        ))
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["start"], "00:01:44,024")
+        self.assertEqual(result[0]["end"], "00:01:44,224")
+        self.assertEqual(result[0]["text"], "如果我在地面上建一部分基地技术上就没有违规")
+
     def test_translate_requires_all_entries_to_avoid_untranslated_leftovers(self):
         """翻译批次返回不完整时抛错，避免部分原文混入结果"""
         engine = FakeTextEngine([

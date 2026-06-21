@@ -18,6 +18,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.api.subtitles import (  # noqa: E402
     _default_subtitle_presets,
+    _parse_subtitle_entries,
     ensure_default_subtitle_presets,
     rename_preset,
     SubtitleCorrectionSaveAssRequest,
@@ -189,6 +190,41 @@ Language: ja
             self.assertEqual(reparsed[0]["start"], "00:00:01,000")
             self.assertEqual(reparsed[0]["end"], "00:00:02,500")
             self.assertEqual(reparsed[0]["text"], "修正后的字幕")
+
+    def test_save_srt_removes_duplicate_entries_on_disk(self):
+        """保存字幕时重复文案必须从磁盘文件里移除，不能留给后续烧录"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "deduped.srt")
+            request = SubtitleCorrectionSaveRequest(
+                output_path=output_path,
+                entries=[
+                    SubtitleEntryPayload(index=1, start="00:00:01,000", end="00:00:02,000", text="重复字幕"),
+                    SubtitleEntryPayload(index=2, start="00:00:03,000", end="00:00:04,000", text="不同字幕"),
+                    SubtitleEntryPayload(index=3, start="00:00:05,000", end="00:00:06,000", text="重复字幕"),
+                ],
+            )
+
+            response = asyncio.run(save_corrected_subtitle(request))
+            reparsed = SubtitleEngine().parse_srt(response.output_path)
+
+            self.assertEqual([entry["text"] for entry in reparsed], ["重复字幕", "不同字幕"])
+            self.assertEqual(SubtitleEngine().duplicate_text_count(reparsed), 0)
+
+    def test_parse_subtitle_entries_deduplicates_old_files(self):
+        """加载旧字幕文件时也要先去重，避免素材库和字幕调整继续读到旧重复"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subtitle_path = os.path.join(temp_dir, "old.srt")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write(
+                    "1\n00:00:01,000 --> 00:00:02,000\n重复字幕\n\n"
+                    "2\n00:00:03,000 --> 00:00:04,000\n重复字幕\n\n"
+                    "3\n00:00:05,000 --> 00:00:06,000\n不同字幕\n"
+                )
+
+            entries = _parse_subtitle_entries(SubtitleEngine(), subtitle_path)
+
+            self.assertEqual([entry["text"] for entry in entries], ["重复字幕", "不同字幕"])
+            self.assertEqual(SubtitleEngine().duplicate_text_count(entries), 0)
 
     def test_save_ass_generates_file(self):
         """校对后的字幕可以直接生成 ASS 文件"""
@@ -468,6 +504,31 @@ Language: ja
         )
 
         self.assertEqual([entry["text"] for entry in entries], ["有效字幕"])
+
+    def test_output_entries_are_deduplicated_globally_by_text(self):
+        """相同字幕文本只保留第一次，不能再次写进 SRT 或 ASS"""
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "重复字幕"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "不同字幕"},
+            {"index": 3, "start": "00:00:04,000", "end": "00:00:05,000", "text": "重复字幕"},
+        ]
+
+        deduped = SubtitleEngine().dedupe_entries_by_text(entries)
+
+        self.assertEqual([entry["text"] for entry in deduped], ["重复字幕", "不同字幕"])
+        self.assertEqual([entry["index"] for entry in deduped], [1, 2])
+
+    def test_double_line_deduplicates_by_primary_subtitle_line(self):
+        """双语字幕按第一行主字幕去重，避免中文主字幕重复但英文不同仍被保留"""
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "重复字幕\nfirst source"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "重复字幕\nsecond source"},
+        ]
+
+        deduped = SubtitleEngine().dedupe_entries_by_text(entries)
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["text"], "重复字幕\nfirst source")
 
     def test_output_subtitle_text_replaces_removed_punctuation_with_spacing(self):
         """输出字幕正文会把逗号、句号和省略号转成分隔空格"""

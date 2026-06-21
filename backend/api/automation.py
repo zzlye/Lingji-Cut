@@ -1717,12 +1717,17 @@ def _prepare_subtitle_for_burn(
     video_path: Optional[str] = None,
     suffix: str = "clean",
 ) -> str:
-    """烧录前统一清理字幕文件，避免旧 ASS/SRT 绕过标点过滤"""
+    """烧录前统一清理字幕文件，避免旧 ASS/SRT 绕过标点和重复过滤"""
     engine = SubtitleEngine()
     entries = _parse_subtitle_entries(engine, subtitle_path)
     if not entries:
         raise RuntimeError("字幕文件为空或无法解析，不能重新烧录")
+    entries = engine.dedupe_entries_by_text(entries)
+    if engine.duplicate_text_count(entries) > 0:
+        raise RuntimeError("字幕仍存在重复条目，已阻止烧录")
     display_entries = engine.normalize_entries_for_display(entries, preset)
+    if engine.duplicate_text_count(display_entries) > 0:
+        raise RuntimeError("显示字幕仍存在重复条目，已阻止烧录")
     base_name = os.path.splitext(os.path.basename(subtitle_path))[0]
     output_path = os.path.join(output_dir, f"{base_name}_{suffix}.ass")
     video_size = FFmpegProcessor().media_video_size(video_path) if video_path else None
@@ -2049,6 +2054,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 effects_path,
                 on_asr_progress,
             )
+            entries = engine.dedupe_entries_by_text(entries)
             subtitle_path = os.path.join(paths["output_dir"], f"{video.video_id}_{language}_local.srt")
             engine.save_srt(entries, subtitle_path)
             _check_control(db, job, subtitle_task)
@@ -2123,7 +2129,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 except Exception as text_exc:
                     operation_label = SUBTITLE_API_OPERATION_LABELS.get(request.subtitle_operation, "处理")
                     raise _resumable_stage_error(f"字幕{operation_label}", text_exc) from text_exc
-            entries = _apply_glossary_terms(entries, request.glossary_terms)
+            entries = engine.dedupe_entries_by_text(_apply_glossary_terms(entries, request.glossary_terms))
             subtitle_text = entries_to_plain_text(entries)
             if subtitle_was_translated:
                 translated_entries_for_display = [dict(entry) for entry in entries]

@@ -333,11 +333,11 @@ def _parse_subtitle_entries(engine: SubtitleEngine, subtitle_path: str) -> list[
     """按字幕文件格式解析字幕条目"""
     ext = os.path.splitext(subtitle_path)[1].lower()
     if ext == ".srt":
-        return engine.parse_srt(subtitle_path)
+        return engine.dedupe_entries_by_text(engine.parse_srt(subtitle_path))
     if ext == ".vtt":
-        return engine.parse_vtt(subtitle_path)
+        return engine.dedupe_entries_by_text(engine.parse_vtt(subtitle_path))
     if ext == ".ass":
-        return engine.parse_ass(subtitle_path)
+        return engine.dedupe_entries_by_text(engine.parse_ass(subtitle_path))
     raise HTTPException(status_code=400, detail=f"暂不支持的字幕格式: {ext}")
 
 
@@ -345,9 +345,9 @@ def _parse_subtitle_text(engine: SubtitleEngine, content: str, subtitle_format: 
     """按格式解析粘贴的字幕文本"""
     normalized_format = subtitle_format.lower().lstrip(".")
     if normalized_format == "srt":
-        return engine.parse_srt_content(content)
+        return engine.dedupe_entries_by_text(engine.parse_srt_content(content))
     if normalized_format == "vtt":
-        return engine.parse_vtt_content(content)
+        return engine.dedupe_entries_by_text(engine.parse_vtt_content(content))
     raise HTTPException(status_code=400, detail=f"暂不支持的字幕文本格式: {subtitle_format}")
 
 
@@ -368,7 +368,7 @@ def _normalize_correction_entries(engine: SubtitleEngine, entries: list[Subtitle
         })
     if not normalized:
         raise HTTPException(status_code=400, detail="字幕条目不能为空")
-    return normalized
+    return engine.dedupe_entries_by_text(normalized)
 
 
 def _entry_payloads(entries: list[dict]) -> list[SubtitleEntryPayload]:

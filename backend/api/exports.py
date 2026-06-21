@@ -44,13 +44,18 @@ def _clean_export_subtitle_path(subtitle_path: str) -> str:
 
 
 def _prepare_subtitle_for_export_burn(subtitle_path: str, video_path: str, processor: FFmpegProcessor) -> str:
-    """导出烧录前统一清理逗号、句号、省略号，避免旧字幕文件绕过过滤"""
+    """导出烧录前统一清理标点和重复字幕，避免旧字幕文件绕过过滤"""
     engine = SubtitleEngine()
     output_path = _clean_export_subtitle_path(subtitle_path)
     entries = _parse_subtitle_entries(engine, subtitle_path)
     if not entries:
         raise RuntimeError("字幕文件为空或无法解析，不能导出")
+    entries = engine.dedupe_entries_by_text(entries)
+    if engine.duplicate_text_count(entries) > 0:
+        raise RuntimeError("字幕仍存在重复条目，已阻止导出")
     display_entries = engine.normalize_entries_for_display(entries, {})
+    if engine.duplicate_text_count(display_entries) > 0:
+        raise RuntimeError("显示字幕仍存在重复条目，已阻止导出")
     video_size = processor.media_video_size(video_path)
     engine.generate_ass(display_entries, output_path, {}, video_size=video_size)
     return output_path

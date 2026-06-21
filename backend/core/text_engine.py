@@ -13,6 +13,9 @@ from ..utils import get_logger
 
 logger = get_logger("text")
 
+# 翻译模型允许把长句拆短，但单条显示时间太短时不能继续硬拆成闪字幕。
+MIN_SPLIT_SUBTITLE_MS = 750
+
 
 class TextEngine:
     """文本模型调用封装"""
@@ -267,6 +270,12 @@ class TextEngine:
         if end_ms <= start_ms:
             end_ms = start_ms + max(1000, len(cleaned_texts) * 500)
         total_duration = max(1, end_ms - start_ms)
+        if total_duration < len(cleaned_texts) * MIN_SPLIT_SUBTITLE_MS:
+            next_entry = dict(entry)
+            next_entry["text"] = self._join_processed_texts(cleaned_texts)
+            next_entry["source_index"] = entry.get("index")
+            return [next_entry]
+
         weights = [max(1, len(text)) for text in cleaned_texts]
         total_weight = max(1, sum(weights))
         elapsed_weight = 0
@@ -284,6 +293,20 @@ class TextEngine:
             result.append(next_entry)
             segment_start = segment_end
         return result
+
+    def _join_processed_texts(self, texts: list[str]) -> str:
+        """合并同一条字幕拆出的多段译文，中文不加空格，英文数字之间保留空格"""
+        text = ""
+        for raw in texts:
+            piece = " ".join(str(raw or "").split())
+            if not piece:
+                continue
+            if not text:
+                text = piece
+                continue
+            separator = " " if re.search(r"[A-Za-z0-9]$", text) and re.match(r"^[A-Za-z0-9]", piece) else ""
+            text = f"{text}{separator}{piece}"
+        return text
 
     def _fallback_response_lines(self, response_text: str) -> list[str]:
         """把非结构化模型返回转成可回填的文本行"""

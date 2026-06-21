@@ -178,7 +178,7 @@ class SubtitleEngine:
     def entries_to_srt_content(self, entries: List[dict]) -> str:
         """将字幕条目转换为标准 SRT 文本"""
         blocks: list[str] = []
-        for index, entry in enumerate(entries, 1):
+        for index, entry in enumerate(self.dedupe_entries_by_text(entries), 1):
             text = self.clean_subtitle_text_for_output(str(entry.get("text") or "").replace("\\N", "\n"))
             if not text or self.is_meaningless_subtitle_text(text):
                 continue
@@ -423,8 +423,8 @@ Style: Secondary,{font_name},{secondary_font_size},{secondary_color},{secondary_
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
-        # 添加字幕条目
-        for entry in entries:
+        # 添加字幕条目，生成硬字幕前再次去重，避免重复文本进入最终画面。
+        for entry in self.dedupe_entries_by_text(entries):
             start = self._srt_time_to_ass(entry["start"])
             end = self._srt_time_to_ass(entry["end"])
             text = self._format_ass_dialogue_text(str(entry.get("text") or ""), preset)
@@ -442,7 +442,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         """清理字幕显示条目，避免烧录阶段二次硬切正常字幕"""
         preset = preset or {}
         if str(preset.get("line_mode") or "single").lower() == "double":
-            return self._normalize_double_line_entries(entries)
+            return self.dedupe_entries_by_text(self._normalize_double_line_entries(entries))
 
         normalized_entries: list[dict] = []
         for entry in self._merge_adjacent_display_fragments(entries):
@@ -462,7 +462,45 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "end": self._milliseconds_to_srt_time(max(start_ms + 1, end_ms)),
                 "text": text,
             })
-        return normalized_entries
+        return self.dedupe_entries_by_text(normalized_entries)
+
+    def dedupe_entries_by_text(self, entries: List[dict]) -> List[dict]:
+        """按字幕文本全局去重：同样字幕只保留第一次，后续重复条目丢弃"""
+        deduped: list[dict] = []
+        seen: set[str] = set()
+        for entry in entries:
+            cleaned_text = self.clean_subtitle_text_for_output(str(entry.get("text") or ""))
+            key = self._dedupe_text_key(cleaned_text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            next_entry = dict(entry)
+            next_entry["index"] = len(deduped) + 1
+            next_entry["text"] = cleaned_text
+            deduped.append(next_entry)
+        return deduped
+
+    def duplicate_text_count(self, entries: List[dict]) -> int:
+        """统计按输出文本规范化后的重复条目数量，重复就是错误，不能进入最终文件"""
+        seen: set[str] = set()
+        duplicate_count = 0
+        for entry in entries:
+            key = self._dedupe_text_key(str(entry.get("text") or ""))
+            if not key:
+                continue
+            if key in seen:
+                duplicate_count += 1
+                continue
+            seen.add(key)
+        return duplicate_count
+
+    def _dedupe_text_key(self, text: str) -> str:
+        """生成重复判断 key，双语字幕优先按第一行主字幕判断重复"""
+        normalized = self.clean_subtitle_text_for_output(str(text or "").replace("\\N", "\n"))
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        normalized = lines[0] if lines else ""
+        normalized = WHITESPACE_RE.sub(" ", normalized).strip().casefold()
+        return normalized
 
     def _ass_play_resolution(self, preset: dict, video_size: Optional[tuple[int, int]]) -> tuple[int, int]:
         """确定 ASS 渲染画布，优先跟随实际视频分辨率，避免字幕位置在不同视频上漂移"""

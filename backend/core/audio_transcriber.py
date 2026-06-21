@@ -18,6 +18,10 @@ from ..utils import get_logger
 
 logger = get_logger("audio_transcriber")
 
+# Gemini 时间戳偶尔会把多句话挤在同一个瞬间；补漏字幕必须有可读显示时长。
+MIN_MISSING_GAP_SECONDS = 0.75
+MIN_MISSING_SUBTITLE_SECONDS = 0.85
+
 # 要求模型逐句输出带段内相对秒数的 JSON，便于拼回完整时间轴
 _TRANSCRIBE_PROMPT = (
     "这是一段视频音频。请把里面所有说话内容逐句转写成原始语言的文字，保持原文不要翻译，"
@@ -481,19 +485,125 @@ def align_gemini_content_to_whisper_timeline(
             next_entry["text"] = _join_sentences(text for _, text in assigned[index])
         aligned.append(next_entry)
 
-    # Whisper 时间轴没覆盖到的 Gemini 句子作为补漏条目插入
-    for g_start, g_end, g_text in missing:
-        aligned.append({
-            "index": 0,
-            "start": seconds_to_srt(g_start),
-            "end": seconds_to_srt(max(g_start + 0.2, g_end)),
-            "text": g_text,
-        })
+    aligned.extend(_build_missing_gemini_entries(missing, whisper_spans, seconds_to_srt))
 
     aligned.sort(key=lambda item: srt_to_seconds(str(item.get("start") or "00:00:00,000")))
     for index, entry in enumerate(aligned, 1):
         entry["index"] = index
     return aligned
+
+
+def _build_missing_gemini_entries(
+    missing: list[tuple[float, float, str]],
+    whisper_spans: list[tuple[float, float, dict]],
+    seconds_to_srt: Callable[[float], str],
+) -> list[dict]:
+    """把 Whisper 漏掉的 Gemini 内容分配到真实空档，避免 0.2 秒密集闪字幕"""
+    if not missing:
+        return []
+
+    grouped: dict[tuple[float, float], list[tuple[float, float, str]]] = {}
+    for g_start, g_end, g_text in sorted(missing, key=lambda item: (item[0], item[1])):
+        gap = _find_missing_gap(g_start, g_end, whisper_spans)
+        if not gap:
+            continue
+        gap_start, gap_end = gap
+        if gap_end - gap_start < MIN_MISSING_GAP_SECONDS:
+            continue
+        grouped.setdefault((round(gap_start, 3), round(gap_end, 3)), []).append((g_start, g_end, g_text))
+
+    entries: list[dict] = []
+    for (gap_start, gap_end), items in sorted(grouped.items(), key=lambda item: item[0][0]):
+        gap_duration = max(0.0, gap_end - gap_start)
+        max_chunks = max(1, int(gap_duration // MIN_MISSING_SUBTITLE_SECONDS))
+        chunks = _merge_missing_texts([text for _start, _end, text in items], max_chunks)
+        entries.extend(_timed_missing_chunks(chunks, gap_start, gap_end, seconds_to_srt))
+    return entries
+
+
+def _find_missing_gap(
+    g_start: float,
+    g_end: float,
+    whisper_spans: list[tuple[float, float, dict]],
+) -> Optional[tuple[float, float]]:
+    """找到 Gemini 补漏内容所在的本地识别空档"""
+    if not whisper_spans:
+        end = max(g_end, g_start + MIN_MISSING_SUBTITLE_SECONDS)
+        return max(0.0, g_start), end
+
+    previous_end = 0.0
+    for w_start, w_end, _entry in whisper_spans:
+        if w_end <= g_start:
+            previous_end = max(previous_end, w_end)
+            continue
+        if w_start >= g_start:
+            return previous_end, w_start
+        # 理论上有重叠时不会进 missing；这里兜底跳过，避免和本地时间轴打架。
+        return None
+
+    end = max(g_end, g_start + MIN_MISSING_SUBTITLE_SECONDS)
+    return max(previous_end, g_start), end
+
+
+def _merge_missing_texts(texts: list[str], max_chunks: int) -> list[str]:
+    """把同一空档里过多的 Gemini 补漏句合并成可读数量"""
+    cleaned = [" ".join(str(text or "").split()) for text in texts if str(text or "").strip()]
+    if not cleaned:
+        return []
+    safe_max = max(1, max_chunks)
+    if len(cleaned) <= safe_max:
+        return cleaned
+
+    chunks: list[str] = []
+    start = 0
+    for index in range(safe_max):
+        remaining_slots = safe_max - index - 1
+        target = round(len(cleaned) * (index + 1) / safe_max)
+        end = len(cleaned) if index == safe_max - 1 else min(len(cleaned) - remaining_slots, max(start + 1, target))
+        piece = _join_sentences(cleaned[start:end])
+        if piece:
+            chunks.append(piece)
+        start = end
+    return chunks
+
+
+def _timed_missing_chunks(
+    chunks: list[str],
+    gap_start: float,
+    gap_end: float,
+    seconds_to_srt: Callable[[float], str],
+) -> list[dict]:
+    """按文本长度把补漏字幕均匀放进本地识别空档"""
+    if not chunks:
+        return []
+    duration = max(0.0, gap_end - gap_start)
+    if duration < MIN_MISSING_GAP_SECONDS:
+        return []
+
+    weights = [max(1, len(chunk)) for chunk in chunks]
+    total_weight = max(1, sum(weights))
+    entries: list[dict] = []
+    cursor = gap_start
+    elapsed = 0
+    for index, chunk in enumerate(chunks):
+        elapsed += weights[index]
+        if index == len(chunks) - 1:
+            end = gap_end
+        else:
+            end = gap_start + duration * elapsed / total_weight
+            min_end = cursor + MIN_MISSING_SUBTITLE_SECONDS
+            max_end = gap_end - MIN_MISSING_SUBTITLE_SECONDS * (len(chunks) - index - 1)
+            end = max(min_end, min(max_end, end))
+        if end - cursor < 0.2:
+            continue
+        entries.append({
+            "index": 0,
+            "start": seconds_to_srt(cursor),
+            "end": seconds_to_srt(end),
+            "text": chunk,
+        })
+        cursor = end
+    return entries
 
 
 def _split_sentence_by_weights(text: str, weights: list[float]) -> list[str]:
