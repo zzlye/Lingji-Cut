@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -283,6 +283,13 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(response.batch_id, "batch-test")
         self.assertTrue(response.can_pause)
         self.assertTrue(response.can_cancel)
+
+    def test_gemini_subtitle_progress_does_not_stay_at_old_local_asr_22_percent(self):
+        """Gemini 字幕识别不能沿用本地 ASR 的 10-35 映射，否则远程识别时界面会一直停在 22%"""
+        self.assertEqual(_subtitle_recognition_stage_progress("local", 50), 22.5)
+        self.assertEqual(_subtitle_recognition_stage_progress("gemini_align", 50), 32.5)
+        self.assertEqual(_subtitle_recognition_stage_progress("gemini_align", 100), 55)
+        self.assertEqual(_subtitle_text_stage_progress("gemini_align", 100), 70)
 
     def test_job_response_exposes_reusable_subtitle_and_media_paths(self):
         """任务响应会补充可编辑字幕、重导出源视频和配音音轨路径"""

@@ -1028,9 +1028,27 @@ def _update_export_progress(db: Session, job: Optional[AutomationJobRecord], tas
         _update_job_stage(db, job, "export", "running", progress=task.progress, task_id=task.id)
 
 
-def _update_subtitle_asr_progress(db: Session, job: Optional[AutomationJobRecord], task: DownloadTask, progress: float) -> None:
+def _subtitle_recognition_stage_progress(recognition_mode: str, progress: float) -> float:
+    """把不同字幕识别方式的内部进度映射到字幕阶段进度，避免 Gemini 模式长时间停在 22%"""
+    mode = (recognition_mode or "local").strip().lower()
+    normalized = max(0.0, min(100.0, float(progress or 0)))
+    if mode in {"gemini_full", "gemini_align"}:
+        return min(55.0, 10.0 + normalized * 0.45)
+    return min(35.0, 10.0 + normalized * 0.25)
+
+
+def _subtitle_text_stage_progress(recognition_mode: str, progress: float) -> float:
+    """把文本翻译/润色进度接到识别进度后面，保证字幕阶段整体进度单调向前"""
+    mode = (recognition_mode or "local").strip().lower()
+    normalized = max(0.0, min(100.0, float(progress or 0)))
+    if mode in {"gemini_full", "gemini_align"}:
+        return min(70.0, 55.0 + normalized * 0.15)
+    return min(65.0, 35.0 + normalized * 0.30)
+
+
+def _update_subtitle_asr_progress(db: Session, job: Optional[AutomationJobRecord], task: DownloadTask, progress: float, recognition_mode: str = "local") -> None:
     """同步字幕识别进度，允许 ASR 心跳线程使用独立会话安全更新"""
-    task_progress = min(35.0, 10.0 + progress * 0.25)
+    task_progress = _subtitle_recognition_stage_progress(recognition_mode, progress)
     if task_progress <= float(task.progress or 0):
         return
     task.progress = task_progress
@@ -1039,7 +1057,7 @@ def _update_subtitle_asr_progress(db: Session, job: Optional[AutomationJobRecord
         _update_job_stage(db, job, "subtitle", "running", progress=task_progress, task_id=task.id)
 
 
-def _update_subtitle_asr_progress_by_id(job_id: Optional[str], task_id: int, progress: float) -> None:
+def _update_subtitle_asr_progress_by_id(job_id: Optional[str], task_id: int, progress: float, recognition_mode: str = "local") -> None:
     """跨线程刷新字幕识别进度，避免心跳线程复用主数据库会话"""
     if not job_id:
         return
@@ -1049,7 +1067,7 @@ def _update_subtitle_asr_progress_by_id(job_id: Optional[str], task_id: int, pro
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if not task or not job or task.status not in {"processing", "downloading"} or job.status != "running":
             return
-        _update_subtitle_asr_progress(db, job, task, progress)
+        _update_subtitle_asr_progress(db, job, task, progress, recognition_mode)
     except Exception as exc:
         logger.warning(f"字幕识别心跳进度更新失败: {exc}")
     finally:
@@ -2234,15 +2252,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             preset_dict = _preset_to_dict(preset)
             engine = SubtitleEngine()
             asr_owner_thread = threading.current_thread()
+            recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
 
             def on_asr_progress(progress: float) -> None:
                 """同步本地语音识别进度"""
                 if job and subtitle_task.id is not None and threading.current_thread() is not asr_owner_thread:
-                    _update_subtitle_asr_progress_by_id(job.id, subtitle_task.id, progress)
+                    _update_subtitle_asr_progress_by_id(job.id, subtitle_task.id, progress, recognition_mode)
                     return
                 try:
                     _check_control(db, job, subtitle_task)
-                    _update_subtitle_asr_progress(db, job, subtitle_task, progress)
+                    _update_subtitle_asr_progress(db, job, subtitle_task, progress, recognition_mode)
                 except TaskControlRequested:
                     raise
 
@@ -2257,7 +2276,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             engine.save_srt(entries, subtitle_path)
             _check_control(db, job, subtitle_task)
             if job:
-                _update_job_stage(db, job, "subtitle", "running", progress=35, task_id=subtitle_task.id)
+                _update_job_stage(db, job, "subtitle", "running", progress=_subtitle_recognition_stage_progress(recognition_mode, 100), task_id=subtitle_task.id)
             if not entries:
                 raise RuntimeError("本地字幕识别结果为空，无法继续自动字幕处理")
             original_entries_for_display = [dict(entry) for entry in entries]
@@ -2281,7 +2300,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     def on_text_progress(progress: float) -> None:
                         """同步文本 API 批处理进度到字幕阶段"""
                         _check_control(db, job, subtitle_task)
-                        subtitle_task.progress = 35 + progress * 0.3
+                        subtitle_task.progress = _subtitle_text_stage_progress(recognition_mode, progress)
                         db.commit()
                         if job:
                             _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
