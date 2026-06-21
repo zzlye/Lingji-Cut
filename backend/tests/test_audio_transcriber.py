@@ -174,6 +174,24 @@ class AlignTimelineTest(unittest.TestCase):
         self.assertNotEqual(out[2]["text"], gemini_text)
         self.assertEqual(" ".join(entry["text"] for entry in out), gemini_text)
 
+    def test_long_gemini_sentence_uses_local_speech_density_when_split(self):
+        """同样时长的本地时间槽说话密度不同，Gemini 文本应按本地识别密度拆分，避免节奏漂移"""
+        whisper = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "one two three four five six seven eight"},
+            {"index": 2, "start": "00:00:04,000", "end": "00:00:08,000", "text": "pause"},
+        ]
+        gemini = [{
+            "index": 1,
+            "start": "00:00:00,000",
+            "end": "00:00:08,000",
+            "text": "alpha beta gamma delta epsilon zeta eta theta iota",
+        }]
+
+        out = self._align(whisper, gemini)
+
+        self.assertEqual(out[0]["text"], "alpha beta gamma delta epsilon zeta eta theta")
+        self.assertEqual(out[1]["text"], "iota")
+
     def test_missing_gemini_sentences_do_not_create_dense_flash_subtitles(self):
         """Gemini 异常把多句补漏挤到同一瞬间时，应合并到真实空档而不是生成密集闪字幕"""
         whisper = [

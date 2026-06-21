@@ -864,10 +864,12 @@ class AutomationJobTests(unittest.TestCase):
             """测试用本地时间轴识别器"""
 
             devices: list[str] = []
+            model_names: list[str] = []
             transcribe_paths: list[str] = []
 
             def __init__(self, *_, **kwargs):
                 self.devices.append(kwargs.get("device") or "auto")
+                self.model_names.append(kwargs.get("model_name") or "auto")
 
             def transcribe_video(self, video_path, progress_callback=None):
                 self.transcribe_paths.append(video_path)
@@ -934,10 +936,82 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual([entry["text"] for entry in entries], ["Gemini content"])
         self.assertEqual([entry["text"] for entry in cached_entries], ["Gemini content"])
         self.assertEqual(FakeTimelineRecognizer.devices[0], "cpu")
+        self.assertEqual(FakeTimelineRecognizer.model_names[0], "small")
         self.assertEqual(FakeTimelineRecognizer.transcribe_paths, [video_path])
         self.assertEqual(fake_gemini.languages, ["en", "en"])
         self.assertIn(50, progress_values)
         self.assertTrue(cache_exists)
+
+    def test_gemini_align_ignores_old_local_timeline_cache(self):
+        """旧版本地时间轴缓存没有配置版本时必须失效，避免继续复用低精度时间轴"""
+        class FreshTimelineRecognizer:
+            """测试用新时间轴识别器"""
+
+            transcribe_paths: list[str] = []
+
+            def __init__(self, *_, **__):
+                pass
+
+            def transcribe_video(self, video_path, progress_callback=None):
+                self.transcribe_paths.append(video_path)
+                if progress_callback:
+                    progress_callback(100)
+                return ([
+                    {"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "fresh timeline"},
+                ], "en")
+
+            def _srt_time_to_seconds(self, value):
+                text = str(value).replace(",", ".")
+                hours, minutes, seconds = text.split(":")
+                return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+            def _seconds_to_srt_time(self, seconds):
+                total_ms = max(0, int(round(float(seconds) * 1000)))
+                hours = total_ms // 3600000
+                minutes = (total_ms % 3600000) // 60000
+                secs = (total_ms % 60000) // 1000
+                millis = total_ms % 1000
+                return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+        class FakeGeminiTranscriber:
+            """测试用 Gemini 转写器"""
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                if progress_callback:
+                    progress_callback(100)
+                return ([
+                    {"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "Gemini fresh"},
+                ], language or "en")
+
+        with tempfile.TemporaryDirectory(prefix="automation_old_gemini_align_cache_") as temp_dir:
+            video_path = os.path.join(temp_dir, "enhanced.mp4")
+            with open(video_path, "wb") as file:
+                file.write(b"video")
+            cache_path = os.path.join(temp_dir, "enhanced_local_timeline.json")
+            meta_path = os.path.join(temp_dir, "enhanced_local_timeline.meta.json")
+            signature = {"size": os.path.getsize(video_path), "mtime": os.path.getmtime(video_path)}
+            with open(cache_path, "w", encoding="utf-8") as file:
+                json.dump({"entries": [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "stale timeline"}]}, file)
+            with open(meta_path, "w", encoding="utf-8") as file:
+                json.dump({"video_path": os.path.abspath(video_path), "signature": signature, "language": "en"}, file)
+            request = AutomationRunRequest(
+                url="https://example.test/video",
+                subtitle_recognition_mode="gemini_align",
+                enable_effects=False,
+                processing_preset={},
+                enable_voice=False,
+                burn_subtitles=False,
+                output_format="mp4",
+            )
+
+            with (
+                patch("backend.api.automation.LocalSpeechRecognizer", FreshTimelineRecognizer),
+                patch("backend.api.automation._build_gemini_transcriber", return_value=FakeGeminiTranscriber()),
+            ):
+                entries, _language = _recognize_subtitle_entries(FakeDb([]), request, video_path, lambda _value: None)
+
+        self.assertEqual(FreshTimelineRecognizer.transcribe_paths, [video_path])
+        self.assertEqual([entry["text"] for entry in entries], ["Gemini fresh"])
 
     def test_automation_translation_saves_comparison_subtitle_for_review(self):
         """一键翻译后单独保存校对用中英对照字幕，不受单行烧录预设影响"""

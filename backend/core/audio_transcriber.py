@@ -461,7 +461,7 @@ def align_gemini_content_to_whisper_timeline(
             # 句子中心落在该 Whisper 区间内，或与之有实质重叠，就归到这条
             center = (g_start + g_end) / 2
             if overlap > 0.05 or (w_start <= center <= w_end):
-                overlaps.append((index, max(overlap, 0.05)))
+                overlaps.append((index, _alignment_slot_weight(whisper_spans[index], max(overlap, 0.05))))
 
         if not overlaps:
             missing.append((g_start, g_end, g_text))
@@ -635,6 +635,18 @@ def _split_sentence_by_weights(text: str, weights: list[float]) -> list[str]:
         pieces.append(_join_sentence_units(units[start:end]))
         start = end
     return pieces
+
+
+def _alignment_slot_weight(whisper_span: tuple[float, float, dict], overlap: float) -> float:
+    """计算 Gemini 长句拆分权重，优先按本地识别文本密度还原真实说话节奏"""
+    w_start, w_end, entry = whisper_span
+    duration = max(0.001, w_end - w_start)
+    local_text = " ".join(str(entry.get("text") or "").split())
+    text_weight = len(_sentence_units(local_text)) if local_text else 0
+    overlap_ratio = max(0.05, min(1.0, overlap / duration))
+    if text_weight > 0:
+        return max(0.05, text_weight * overlap_ratio)
+    return max(0.05, overlap)
 
 
 def _sentence_units(text: str) -> list[str]:

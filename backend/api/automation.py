@@ -36,6 +36,7 @@ from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plai
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 logger = get_logger("automation")
+GEMINI_ALIGN_TIMELINE_CACHE_VERSION = 2
 
 # 后台自动化任务线程池，避免多个长视频同时阻塞 API 线程。
 AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
@@ -1275,9 +1276,20 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
 
 
 def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
-    """构造 Gemini 对齐模式的本地时间轴识别器，默认用 CPU 避免长视频 CUDA 崩溃后反复重跑"""
+    """构造 Gemini 对齐模式的本地时间轴识别器，默认用 CPU + small 兼顾稳定和时间轴精度"""
+    profile = _gemini_align_timeline_profile()
+    return LocalSpeechRecognizer(device=profile["device"], model_name=profile["model_name"])
+
+
+def _gemini_align_timeline_profile() -> dict[str, str]:
+    """返回 Gemini 对齐本地时间轴识别配置，写入缓存用于自动失效旧结果"""
     device = (os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE") or "cpu").strip().lower() or "cpu"
-    return LocalSpeechRecognizer(device=device)
+    model_name = (
+        os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL")
+        or os.environ.get("YTV_ASR_MODEL")
+        or "small"
+    ).strip() or "small"
+    return {"device": device, "model_name": model_name}
 
 
 def _gemini_align_timeline_cache_paths(video_path: str) -> tuple[str, str]:
@@ -1305,6 +1317,10 @@ def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[di
     try:
         with open(meta_path, "r", encoding="utf-8") as file:
             meta = json.load(file)
+        if meta.get("cache_version") != GEMINI_ALIGN_TIMELINE_CACHE_VERSION:
+            return None
+        if meta.get("timeline_profile") != _gemini_align_timeline_profile():
+            return None
         if meta.get("video_path") != os.path.abspath(video_path):
             return None
         if meta.get("signature") != _media_cache_signature(video_path):
@@ -1328,12 +1344,15 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
     if not entries:
         return
     cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
+    timeline_profile = _gemini_align_timeline_profile()
     try:
         with open(cache_path, "w", encoding="utf-8") as file:
             json.dump(
                 {
+                    "cache_version": GEMINI_ALIGN_TIMELINE_CACHE_VERSION,
                     "video_path": os.path.abspath(video_path),
                     "signature": _media_cache_signature(video_path),
+                    "timeline_profile": timeline_profile,
                     "language": language,
                     "entries": entries,
                     "created_at": datetime.now().isoformat(),
@@ -1345,8 +1364,10 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
         with open(meta_path, "w", encoding="utf-8") as file:
             json.dump(
                 {
+                    "cache_version": GEMINI_ALIGN_TIMELINE_CACHE_VERSION,
                     "video_path": os.path.abspath(video_path),
                     "signature": _media_cache_signature(video_path),
+                    "timeline_profile": timeline_profile,
                     "language": language,
                 },
                 file,
