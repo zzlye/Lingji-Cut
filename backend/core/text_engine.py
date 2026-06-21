@@ -17,6 +17,9 @@ logger = get_logger("text")
 MIN_SPLIT_SUBTITLE_MS = 750
 DEFAULT_TARGET_CJK_SUBTITLE_CHARS = 18
 MAX_TARGET_CJK_SUBTITLE_CHARS = 22
+SOURCE_SMOOTH_MAX_GAP_MS = 450
+SOURCE_SMOOTH_MAX_DURATION_MS = 6500
+SOURCE_SMOOTH_MAX_WORDS = 30
 CJK_SUBTITLE_CLAUSE_PREFIXES = (
     "所以", "但是", "然后", "因为", "如果", "不过", "而且", "可是", "并且", "同时", "接着", "最后",
     "我们", "你们", "他们", "她们", "它们", "有人",
@@ -25,6 +28,25 @@ CJK_SUBTITLE_CLAUSE_PREFIXES = (
 CJK_SUBTITLE_PRONOUN_PREFIXES = ("我", "你", "他", "她", "它")
 CJK_SUBTITLE_OBJECT_VERB_TAILS = ("到", "见", "找", "追", "打", "抓", "救", "杀", "带", "给", "让", "问", "叫", "等")
 CJK_SUBTITLE_PARTICLE_HEADS = ("了", "的", "地", "得", "着", "过", "吗", "呢", "吧")
+SOURCE_INCOMPLETE_TAIL_WORDS = {
+    "a", "an", "the", "this", "that", "these", "those",
+    "my", "your", "his", "her", "our", "their", "its",
+    "and", "or", "but", "so", "because", "if", "when", "while", "although", "though",
+    "that", "which", "who", "where", "why", "how",
+    "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "into",
+    "onto", "over", "under", "around", "about", "as", "than", "like", "through",
+    "between", "against", "after", "before", "during",
+    "all", "some", "any", "no", "each", "every", "another", "other",
+    "is", "are", "was", "were", "be", "been", "being",
+    "get", "gets", "got", "getting", "have", "has", "had",
+    "do", "does", "did", "can", "could", "would", "should", "will", "might", "may", "must",
+    "not", "completely", "totally", "really", "very",
+}
+SOURCE_CONTINUATION_HEAD_WORDS = {
+    "and", "or", "but", "so", "because", "then", "also", "that", "which", "who", "where",
+    "to", "of", "for", "with", "without", "in", "on", "at", "by", "from", "into", "over",
+}
+SOURCE_TRAILING_SUBJECT_WORDS = {"someone", "somebody", "everyone", "everybody", "anyone", "anybody", "nobody", "noone"}
 
 
 class TextEngine:
@@ -80,13 +102,14 @@ class TextEngine:
             return []
 
         options = settings or {}
+        source_entries = self._smooth_source_entries_for_translation(entries, operation)
         chunks = self._chunk_subtitle_entries(
-            entries,
+            source_entries,
             batch_size=self._int(options.get("subtitle_batch_size"), 12),
             max_chars=self._int(options.get("subtitle_batch_chars"), 2800),
         )
         if not chunks:
-            return [dict(entry) for entry in entries]
+            return [dict(entry) for entry in source_entries]
 
         concurrency = max(1, min(16, self._int(options.get("concurrency"), 2)))
         semaphore = asyncio.Semaphore(concurrency)
@@ -303,6 +326,117 @@ class TextEngine:
             result.append(next_entry)
             segment_start = segment_end
         return result
+
+    def _smooth_source_entries_for_translation(self, entries: list[dict[str, Any]], operation: str) -> list[dict[str, Any]]:
+        """翻译前合并英文碎片，避免把 and、介词和补语尾巴单独交给模型"""
+        if operation != "translate" or len(entries) < 2:
+            return [dict(entry) for entry in entries]
+
+        smoothed: list[dict[str, Any]] = []
+        for raw_entry in entries:
+            entry = self._source_entry_with_metadata(raw_entry)
+            if not str(entry.get("text") or "").strip():
+                continue
+            if smoothed and self._should_merge_source_entry(smoothed[-1], entry):
+                self._append_source_entry(smoothed[-1], entry)
+                continue
+            smoothed.append(entry)
+
+        for index, entry in enumerate(smoothed, 1):
+            entry["batch_source_index"] = index
+        return smoothed
+
+    def _source_entry_with_metadata(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """复制原字幕条目，并记录合并前的来源文本和序号"""
+        next_entry = dict(entry)
+        text = " ".join(str(next_entry.get("text") or "").replace("\\N", " ").split())
+        next_entry["text"] = text
+        source_index = next_entry.get("index")
+        next_entry["source_index"] = source_index
+        next_entry["source_indexes"] = [source_index] if source_index is not None else []
+        next_entry["source_text"] = text
+        next_entry["source_texts"] = [text] if text else []
+        return next_entry
+
+    def _append_source_entry(self, previous: dict[str, Any], current: dict[str, Any]) -> None:
+        """把当前字幕并入上一组，同时保留原始来源信息"""
+        previous["text"] = self._join_source_texts([str(previous.get("text") or ""), str(current.get("text") or "")])
+        previous["end"] = current.get("end") or previous.get("end")
+        previous_indexes = list(previous.get("source_indexes") or [])
+        previous_indexes.extend(list(current.get("source_indexes") or []))
+        previous["source_indexes"] = [item for item in previous_indexes if item is not None]
+        source_texts = [str(item or "") for item in previous.get("source_texts") or [] if str(item or "").strip()]
+        source_texts.extend(str(item or "") for item in current.get("source_texts") or [] if str(item or "").strip())
+        previous["source_texts"] = source_texts
+        previous["source_text"] = self._join_source_texts(source_texts)
+
+    def _should_merge_source_entry(self, previous: dict[str, Any], current: dict[str, Any]) -> bool:
+        """判断两个原文字幕是否属于同一句被本地时间轴切碎"""
+        previous_text = str(previous.get("text") or "").strip()
+        current_text = str(current.get("text") or "").strip()
+        if not previous_text or not current_text:
+            return False
+        if not self._contains_latin_text(f"{previous_text} {current_text}"):
+            return False
+        if self._source_text_has_hard_terminal(previous_text):
+            return False
+
+        previous_start = self._srt_time_to_milliseconds(str(previous.get("start") or "00:00:00,000"))
+        previous_end = self._srt_time_to_milliseconds(str(previous.get("end") or previous.get("start") or "00:00:00,000"))
+        current_start = self._srt_time_to_milliseconds(str(current.get("start") or "00:00:00,000"))
+        current_end = self._srt_time_to_milliseconds(str(current.get("end") or current.get("start") or "00:00:00,000"))
+        gap_ms = current_start - previous_end
+        if gap_ms < -80 or gap_ms > SOURCE_SMOOTH_MAX_GAP_MS:
+            return False
+        if current_end - previous_start > SOURCE_SMOOTH_MAX_DURATION_MS:
+            return False
+
+        combined_words = self._source_words(self._join_source_texts([previous_text, current_text]))
+        if len(combined_words) > SOURCE_SMOOTH_MAX_WORDS:
+            return False
+        return self._source_text_looks_incomplete(previous_text) or self._source_text_starts_continuation(current_text)
+
+    def _source_text_looks_incomplete(self, text: str) -> bool:
+        """识别英文原文片段是否像还没说完"""
+        value = str(text or "").strip()
+        if not value or self._source_text_has_hard_terminal(value):
+            return False
+        if value[-1] in ",;:，；：-":
+            return True
+        words = self._source_words(value)
+        if not words:
+            return False
+        last_word = words[-1]
+        if last_word in SOURCE_INCOMPLETE_TAIL_WORDS:
+            return True
+        if last_word in SOURCE_TRAILING_SUBJECT_WORDS and len(words) >= 2:
+            return True
+        return bool(re.search(
+            r"\b(?:is|are|was|were|be|been|being|gets?|got|getting|have|has|had)\s+"
+            r"(?:\w+ly|completely|totally|really|very|so|too)$",
+            " ".join(words),
+        ))
+
+    def _source_text_starts_continuation(self, text: str) -> bool:
+        """识别当前英文片段是否明显承接上一条"""
+        words = self._source_words(text)
+        return bool(words and words[0] in SOURCE_CONTINUATION_HEAD_WORDS)
+
+    def _source_text_has_hard_terminal(self, text: str) -> bool:
+        """英文句号、问号和叹号才算硬终止，逗号仍可继续合并"""
+        return bool(re.search(r"[.!?。！？][\"')\]}”’]*$", str(text or "").strip()))
+
+    def _contains_latin_text(self, text: str) -> bool:
+        """只对拉丁字母原文启用碎片平滑，避免误合并中文润色结果"""
+        return bool(re.search(r"[A-Za-z]", str(text or "")))
+
+    def _source_words(self, text: str) -> list[str]:
+        """提取英文单词用于判断字幕片段边界"""
+        return [word.lower() for word in re.findall(r"[A-Za-z]+(?:['-][A-Za-z]+)?", str(text or ""))]
+
+    def _join_source_texts(self, texts: list[str]) -> str:
+        """合并原文片段，英文之间保留空格"""
+        return self._join_processed_texts(texts)
 
     def _normalize_processed_texts_for_display(self, texts: list[str]) -> list[str]:
         """模型没有按提示词拆短时，后端按中文显示长度做兜底拆分"""

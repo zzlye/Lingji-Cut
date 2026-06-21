@@ -276,6 +276,36 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(result[0]["end"], "00:01:44,224")
         self.assertEqual(result[0]["text"], "如果我在地面上建一部分基地技术上就没有违规")
 
+    def test_translate_smooths_incomplete_english_source_fragments(self):
+        """翻译前先合并未说完的英文碎片，避免生成“而且”这类半句字幕"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"它被洗劫了有人偷走了所有村民"},{"id":1,"text":"而且还被彻底破坏了"}]',
+        ])
+        entries = [
+            {"index": 4, "start": "00:00:07,600", "end": "00:00:08,460", "text": "gets raided someone"},
+            {"index": 5, "start": "00:00:08,620", "end": "00:00:10,000", "text": "stole all the villagers and"},
+            {"index": 6, "start": "00:00:10,320", "end": "00:00:11,520", "text": "it even gets completely"},
+            {"index": 7, "start": "00:00:11,520", "end": "00:00:13,260", "text": "griefed Yeah"},
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="zh-CN",
+        ))
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["start"], "00:00:07,600")
+        self.assertEqual(result[-1]["end"], "00:00:13,260")
+        self.assertEqual("".join(entry["text"] for entry in result), "它被洗劫了有人偷走了所有村民而且还被彻底破坏了")
+        self.assertFalse(any(entry["text"].endswith(("而且", "彻底地")) for entry in result))
+        self.assertIn("gets raided someone stole all the villagers and it even gets completely griefed Yeah", engine.prompts[0])
+
     def test_translate_requires_all_entries_to_avoid_untranslated_leftovers(self):
         """翻译批次返回不完整时抛错，避免部分原文混入结果"""
         engine = FakeTextEngine([

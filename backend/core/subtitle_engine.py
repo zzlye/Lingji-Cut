@@ -462,6 +462,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "end": self._milliseconds_to_srt_time(max(start_ms + 1, end_ms)),
                 "text": text,
             })
+        normalized_entries = self._smooth_flash_display_entries(normalized_entries)
         return self.dedupe_entries_by_text(normalized_entries)
 
     def dedupe_entries_by_text(self, entries: List[dict]) -> List[dict]:
@@ -705,6 +706,75 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if duration <= cap_ms + 500:
             return end_ms
         return max(start_ms + 700, min(end_ms, start_ms + cap_ms))
+
+    def _smooth_flash_display_entries(self, entries: list[dict]) -> list[dict]:
+        """合并或延长极短字幕，避免硬字幕只闪一下看不清"""
+        if not entries:
+            return []
+
+        merged: list[dict] = []
+        for raw_entry in entries:
+            entry = dict(raw_entry)
+            if merged and self._should_merge_flash_entry(merged[-1], entry):
+                merged[-1]["text"] = self._join_subtitle_fragments(str(merged[-1].get("text") or ""), str(entry.get("text") or ""))
+                merged[-1]["end"] = entry.get("end") or merged[-1].get("end")
+                continue
+            merged.append(entry)
+
+        readable = [dict(entry) for entry in merged]
+        for index, entry in enumerate(readable):
+            start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+            end_ms = self._time_to_milliseconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+            target_ms = self._minimum_readable_display_ms(str(entry.get("text") or ""))
+            if end_ms - start_ms >= target_ms:
+                continue
+            if index + 1 < len(readable):
+                next_start_ms = self._time_to_milliseconds(str(readable[index + 1].get("start") or "00:00:00,000"))
+                max_end_ms = max(start_ms + 1, next_start_ms - 40)
+            else:
+                max_end_ms = start_ms + target_ms
+            desired_end_ms = min(max_end_ms, start_ms + target_ms)
+            if desired_end_ms > end_ms:
+                entry["end"] = self._milliseconds_to_srt_time(desired_end_ms)
+
+        for index, entry in enumerate(readable, 1):
+            entry["index"] = index
+        return readable
+
+    def _should_merge_flash_entry(self, previous: dict, current: dict) -> bool:
+        """极短当前条紧贴上一条时并回上一条，避免单词尾巴闪现"""
+        current_duration = self._entry_duration_ms(current)
+        if current_duration >= 650:
+            return False
+        previous_text = str(previous.get("text") or "").strip()
+        current_text = str(current.get("text") or "").strip()
+        if not previous_text or not current_text:
+            return False
+        previous_end = self._time_to_milliseconds(str(previous.get("end") or "00:00:00,000"))
+        current_start = self._time_to_milliseconds(str(current.get("start") or "00:00:00,000"))
+        if current_start - previous_end > 160:
+            return False
+        combined_text = self._join_subtitle_fragments(previous_text, current_text)
+        if self._meaningful_char_count(combined_text) > 22:
+            return False
+        previous_start = self._time_to_milliseconds(str(previous.get("start") or "00:00:00,000"))
+        current_end = self._time_to_milliseconds(str(current.get("end") or current.get("start") or "00:00:00,000"))
+        if current_end - previous_start > 5000:
+            return False
+        return self._previous_text_looks_incomplete(previous_text) or self._meaningful_char_count(current_text) <= 4
+
+    def _minimum_readable_display_ms(self, text: str) -> int:
+        """按字幕长度给出最低可读显示时长"""
+        meaningful_count = self._meaningful_char_count(text)
+        if meaningful_count <= 0:
+            return 1
+        return max(700, min(1100, 520 + meaningful_count * 45))
+
+    def _entry_duration_ms(self, entry: dict) -> int:
+        """读取字幕条目的显示时长"""
+        start_ms = self._time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+        end_ms = self._time_to_milliseconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+        return max(0, end_ms - start_ms)
 
     def _split_subtitle_text(self, text: str, max_chars: int) -> list[str]:
         """按显示宽度拆字幕文本，优先在标点或空格处断开"""

@@ -463,6 +463,34 @@ Language: ja
         self.assertEqual(entries[0]["start"], "00:01:03,290")
         self.assertLess(entries[0]["end"], "00:01:07,000")
 
+    def test_normalize_entries_for_display_extends_flash_subtitle_when_gap_allows(self):
+        """短字幕后方有空档时延长显示，避免烧录后闪一下就消失"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [
+                {"index": 1, "start": "00:00:01,000", "end": "00:00:01,360", "text": "好的"},
+                {"index": 2, "start": "00:00:02,300", "end": "00:00:03,200", "text": "我们继续"},
+            ],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual(entries[0]["start"], "00:00:01,000")
+        self.assertGreaterEqual(SubtitleEngine()._time_to_milliseconds(entries[0]["end"]), 1700)
+        self.assertLess(entries[0]["end"], entries[1]["start"])
+
+    def test_normalize_entries_for_display_merges_flash_tail_to_previous(self):
+        """紧贴上一条的极短尾巴并回前文，避免单独闪现"""
+        entries = SubtitleEngine().normalize_entries_for_display(
+            [
+                {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "偷走了所有村民"},
+                {"index": 2, "start": "00:00:02,040", "end": "00:00:02,360", "text": "而且"},
+            ],
+            {"font_size": 80, "line_mode": "single"},
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], "偷走了所有村民而且")
+        self.assertEqual(entries[0]["end"], "00:00:02,360")
+
     def test_split_subtitle_text_does_not_leave_punctuation_only_or_single_char_fragments(self):
         """字幕切分不能留下纯标点条目，也不能把最后一个有效字单独切成一条"""
         parts = SubtitleEngine()._split_subtitle_text(

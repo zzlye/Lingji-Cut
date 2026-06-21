@@ -1898,7 +1898,11 @@ def combine_original_and_translated_entries(original_entries: list[dict], transl
         original = original_by_index.get(source_index) if source_index else None
         if original is None:
             original = original_entries[min(index, len(original_entries) - 1)]
-        original_text = " ".join(str(original.get("text") or "").replace("\\N", " ").split())
+        source_text = translated.get("source_text")
+        if isinstance(source_text, str) and source_text.strip():
+            original_text = " ".join(source_text.replace("\\N", " ").split())
+        else:
+            original_text = " ".join(str(original.get("text") or "").replace("\\N", " ").split())
         translated_text = " ".join(str(translated.get("text") or "").replace("\\N", " ").split())
         next_entry = dict(translated)
         if original_text and translated_text and original_text != translated_text:
