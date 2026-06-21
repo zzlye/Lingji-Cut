@@ -465,34 +465,49 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         return self.dedupe_entries_by_text(normalized_entries)
 
     def dedupe_entries_by_text(self, entries: List[dict]) -> List[dict]:
-        """按字幕文本全局去重：同样字幕只保留第一次，后续重复条目丢弃"""
+        """去掉时间上重叠或紧邻的重复字幕，保留正常复读台词"""
         deduped: list[dict] = []
-        seen: set[str] = set()
+        last_by_key: dict[str, dict] = {}
         for entry in entries:
             cleaned_text = self.clean_subtitle_text_for_output(str(entry.get("text") or ""))
             key = self._dedupe_text_key(cleaned_text)
-            if not key or key in seen:
+            if not key:
                 continue
-            seen.add(key)
+            previous = last_by_key.get(key)
+            if previous and self._is_timing_duplicate(previous, entry):
+                continue
             next_entry = dict(entry)
             next_entry["index"] = len(deduped) + 1
             next_entry["text"] = cleaned_text
             deduped.append(next_entry)
+            last_by_key[key] = next_entry
         return deduped
 
     def duplicate_text_count(self, entries: List[dict]) -> int:
-        """统计按输出文本规范化后的重复条目数量，重复就是错误，不能进入最终文件"""
-        seen: set[str] = set()
+        """统计时间上重叠或紧邻的重复条目，正常复读不算错误"""
+        last_by_key: dict[str, dict] = {}
         duplicate_count = 0
         for entry in entries:
             key = self._dedupe_text_key(str(entry.get("text") or ""))
             if not key:
                 continue
-            if key in seen:
+            previous = last_by_key.get(key)
+            if previous and self._is_timing_duplicate(previous, entry):
                 duplicate_count += 1
                 continue
-            seen.add(key)
+            last_by_key[key] = entry
         return duplicate_count
+
+    def _is_timing_duplicate(self, previous: dict, current: dict) -> bool:
+        """判断同文本字幕是否属于滚动字幕残留，而不是后面正常重复说了一遍"""
+        previous_start = self._time_to_milliseconds(str(previous.get("start") or "00:00:00,000"))
+        previous_end = self._time_to_milliseconds(str(previous.get("end") or previous.get("start") or "00:00:00,000"))
+        current_start = self._time_to_milliseconds(str(current.get("start") or "00:00:00,000"))
+        current_end = self._time_to_milliseconds(str(current.get("end") or current.get("start") or "00:00:00,000"))
+        if previous_start == current_start and previous_end == current_end:
+            return True
+        # YouTube 滚动字幕或模型重试残留通常会重叠，或在极短间隔内重复同一文本。
+        return current_start <= previous_end + 300
 
     def _dedupe_text_key(self, text: str) -> str:
         """生成重复判断 key，双语字幕优先按第一行主字幕判断重复"""

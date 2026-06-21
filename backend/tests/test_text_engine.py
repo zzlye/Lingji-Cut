@@ -186,6 +186,66 @@ class TextEngineTests(unittest.TestCase):
         self.assertEqual(result[1]["source_index"], 11)
         self.assertLess(result[0]["end"], result[1]["end"])
 
+    def test_translate_splits_long_cjk_response_even_when_model_ignores_prompt(self):
+        """模型仍返回超长中文字幕时，后端也要按显示长度兜底拆短"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"新的逃跑区域新的逃跑区域就在这边我看到他了他就在这里他在"}]',
+        ])
+        entries = [
+            {
+                "index": 260,
+                "start": "00:07:19,610",
+                "end": "00:07:21,410",
+                "text": "New flee zone new flee zone It's over here Yeah I see him He's right here He's",
+            },
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="zh-CN",
+        ))
+
+        self.assertGreater(len(result), 1)
+        self.assertLessEqual(max(len(entry["text"]) for entry in result), 22)
+        self.assertEqual("".join(entry["text"] for entry in result), "新的逃跑区域新的逃跑区域就在这边我看到他了他就在这里他在")
+        self.assertEqual([entry["text"] for entry in result], ["新的逃跑区域新的逃跑区域就在这边", "我看到他了他就在这里他在"])
+        self.assertEqual(result[0]["start"], "00:07:19,610")
+        self.assertEqual(result[-1]["end"], "00:07:21,410")
+
+    def test_translate_packs_existing_semantic_spaces_before_hard_splitting(self):
+        """模型用空格分出短语时，兜底拆分要优先按这些语义边界组合"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"新的逃跑区域 新的逃跑区域就在这边 我看到他了他就在这里 他在"}]',
+        ])
+        entries = [
+            {
+                "index": 260,
+                "start": "00:07:19,610",
+                "end": "00:07:21,410",
+                "text": "New flee zone new flee zone It's over here Yeah I see him He's right here He's",
+            },
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="zh-CN",
+        ))
+
+        self.assertEqual([entry["text"] for entry in result], ["新的逃跑区域新的逃跑区域就在这边", "我看到他了他就在这里他在"])
+        self.assertLessEqual(max(len(entry["text"]) for entry in result), 22)
+
     def test_translate_does_not_split_too_short_timeline_into_flash_entries(self):
         """原时间段过短时，即使模型返回多条译文，也要合并避免烧录成闪字幕"""
         engine = FakeTextEngine([

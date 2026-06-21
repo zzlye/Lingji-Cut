@@ -15,6 +15,16 @@ logger = get_logger("text")
 
 # 翻译模型允许把长句拆短，但单条显示时间太短时不能继续硬拆成闪字幕。
 MIN_SPLIT_SUBTITLE_MS = 750
+DEFAULT_TARGET_CJK_SUBTITLE_CHARS = 18
+MAX_TARGET_CJK_SUBTITLE_CHARS = 22
+CJK_SUBTITLE_CLAUSE_PREFIXES = (
+    "所以", "但是", "然后", "因为", "如果", "不过", "而且", "可是", "并且", "同时", "接着", "最后",
+    "我们", "你们", "他们", "她们", "它们", "有人",
+    "我", "你", "他", "她", "它", "这", "那", "会", "要", "能", "就", "都", "也", "还", "又", "再", "没", "不", "别", "把", "让", "给",
+)
+CJK_SUBTITLE_PRONOUN_PREFIXES = ("我", "你", "他", "她", "它")
+CJK_SUBTITLE_OBJECT_VERB_TAILS = ("到", "见", "找", "追", "打", "抓", "救", "杀", "带", "给", "让", "问", "叫", "等")
+CJK_SUBTITLE_PARTICLE_HEADS = ("了", "的", "地", "得", "着", "过", "吗", "呢", "吧")
 
 
 class TextEngine:
@@ -256,7 +266,7 @@ class TextEngine:
 
     def _split_entry_by_processed_texts(self, entry: dict[str, Any], texts: list[str]) -> list[dict[str, Any]]:
         """把同一原字幕返回的多段译文分配到原时间段内"""
-        cleaned_texts = [str(text or "").strip() for text in texts if str(text or "").strip()]
+        cleaned_texts = self._normalize_processed_texts_for_display(texts)
         if not cleaned_texts:
             return [dict(entry)]
         if len(cleaned_texts) == 1:
@@ -293,6 +303,180 @@ class TextEngine:
             result.append(next_entry)
             segment_start = segment_end
         return result
+
+    def _normalize_processed_texts_for_display(self, texts: list[str]) -> list[str]:
+        """模型没有按提示词拆短时，后端按中文显示长度做兜底拆分"""
+        normalized: list[str] = []
+        for raw_text in texts:
+            text = " ".join(str(raw_text or "").split())
+            if not text:
+                continue
+            normalized.extend(self._split_long_cjk_subtitle_text(text))
+        return self._merge_tiny_processed_texts(normalized)
+
+    def _split_long_cjk_subtitle_text(self, text: str) -> list[str]:
+        """把过长中文字幕按语义断点拆成多条，避免单条铺满整屏"""
+        if self._cjk_char_count(text) <= MAX_TARGET_CJK_SUBTITLE_CHARS:
+            return [text]
+        chunks = self._subtitle_semantic_chunks(text)
+        if len(chunks) > 1:
+            expanded_chunks: list[str] = []
+            for chunk in chunks:
+                if self._cjk_char_count(chunk) > MAX_TARGET_CJK_SUBTITLE_CHARS:
+                    expanded_chunks.extend(self._split_long_cjk_subtitle_units(chunk))
+                else:
+                    expanded_chunks.append(chunk)
+            return self._pack_subtitle_semantic_chunks(expanded_chunks)
+        return self._split_long_cjk_subtitle_units(text)
+
+    def _subtitle_semantic_chunks(self, text: str) -> list[str]:
+        """优先使用模型返回里的空格和标点作为语义短语边界"""
+        normalized = " ".join(str(text or "").split())
+        chunks = re.split(r"(?<=[，。！？；,.!?;:])\s*|\s+", normalized)
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    def _pack_subtitle_semantic_chunks(self, chunks: list[str]) -> list[str]:
+        """把语义短语打包到显示长度上限内，避免再按字硬切"""
+        parts: list[str] = []
+        current = ""
+        for chunk in chunks:
+            piece = " ".join(str(chunk or "").split())
+            if not piece:
+                continue
+            if not current:
+                current = piece
+                continue
+            combined = self._join_processed_texts([current, piece])
+            if self._cjk_char_count(combined) <= MAX_TARGET_CJK_SUBTITLE_CHARS:
+                current = combined
+                continue
+            parts.append(current)
+            current = piece
+        if current:
+            parts.append(current)
+        return parts or [self._join_processed_texts(chunks)]
+
+    def _split_long_cjk_subtitle_units(self, text: str) -> list[str]:
+        """没有明显语义分隔时，按中文分句边界兜底拆分"""
+        units = self._subtitle_text_units(text)
+        if len(units) <= 1:
+            return [text]
+
+        parts: list[str] = []
+        remaining = units
+        while self._cjk_char_count(self._join_subtitle_units(remaining)) > MAX_TARGET_CJK_SUBTITLE_CHARS:
+            split_at = self._subtitle_unit_split_at(remaining, DEFAULT_TARGET_CJK_SUBTITLE_CHARS)
+            if split_at <= 0 or split_at >= len(remaining):
+                break
+            piece = self._join_subtitle_units(remaining[:split_at])
+            if piece:
+                parts.append(piece)
+            remaining = remaining[split_at:]
+        tail = self._join_subtitle_units(remaining)
+        if tail:
+            parts.append(tail)
+        return parts or [text]
+
+    def _subtitle_unit_split_at(self, units: list[str], target_cjk_chars: int) -> int:
+        """为长中文字幕寻找靠近目标长度的安全切点"""
+        if len(units) <= 1:
+            return len(units)
+        cjk_seen = 0
+        target_index = 1
+        for index, unit in enumerate(units, 1):
+            cjk_seen += self._cjk_char_count(unit) or 1
+            if cjk_seen >= target_cjk_chars:
+                target_index = index
+                break
+        target_index = max(1, min(len(units) - 1, target_index))
+
+        lower = max(1, target_index - 8)
+        upper = min(len(units) - 1, target_index + 8)
+        sentence_breaks = "，。！？；,.!?;:"
+        soft_breaks = " "
+        for left, right in ((lower, target_index), (target_index + 1, upper)):
+            candidates = range(right, left - 1, -1) if left <= right else []
+            for candidate in candidates:
+                if units[candidate - 1] in sentence_breaks:
+                    return candidate
+        for offset in range(0, max(target_index - lower, upper - target_index) + 1):
+            for candidate in (target_index + offset, target_index - offset):
+                if lower <= candidate <= upper and units[candidate - 1] in soft_breaks:
+                    return candidate
+        semantic_split_at = self._subtitle_semantic_unit_split_at(units, target_index, lower, upper)
+        if semantic_split_at is not None:
+            return semantic_split_at
+        return adjust_cjk_unit_boundary(units, target_index, min_index=lower, max_index=upper)
+
+    def _subtitle_semantic_unit_split_at(self, units: list[str], target_index: int, lower: int, upper: int) -> int | None:
+        """无空格长句兜底时，优先切在新分句开头前"""
+        best_candidate: int | None = None
+        best_score: tuple[int, int] | None = None
+        for candidate in range(lower, upper + 1):
+            if candidate <= 0 or candidate >= len(units):
+                continue
+            left_text = self._join_subtitle_units(units[:candidate])
+            right_text = self._join_subtitle_units(units[candidate:])
+            if self._cjk_char_count(left_text) > MAX_TARGET_CJK_SUBTITLE_CHARS or self._cjk_char_count(right_text) <= 2:
+                continue
+            right_prefix = "".join(str(unit or "") for unit in units[candidate:candidate + 3])
+            if not any(right_prefix.startswith(prefix) for prefix in CJK_SUBTITLE_CLAUSE_PREFIXES):
+                continue
+            if self._is_bad_cjk_subtitle_clause_boundary(units, candidate):
+                continue
+            score = (abs(candidate - target_index), 0 if self._cjk_char_count(left_text) >= 8 else 1)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_candidate = candidate
+        return best_candidate
+
+    def _is_bad_cjk_subtitle_clause_boundary(self, units: list[str], split_at: int) -> bool:
+        """排除“看到 / 他了”这类把动宾短语硬拆开的候选切点"""
+        if split_at <= 0 or split_at >= len(units):
+            return False
+        left_tail = str(units[split_at - 1] or "").strip()
+        right_head = str(units[split_at] or "").strip()
+        right_next = str(units[split_at + 1] or "").strip() if split_at + 1 < len(units) else ""
+        if right_head in CJK_SUBTITLE_PRONOUN_PREFIXES and right_next in CJK_SUBTITLE_PARTICLE_HEADS:
+            return True
+        return bool(right_head in CJK_SUBTITLE_PRONOUN_PREFIXES and left_tail in CJK_SUBTITLE_OBJECT_VERB_TAILS)
+
+    def _subtitle_text_units(self, text: str) -> list[str]:
+        """生成字幕拆分单元：英文按词，中文按字，标点作为独立断点"""
+        normalized = " ".join(str(text or "").split())
+        raw_units = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+        return raw_units or [normalized]
+
+    def _join_subtitle_units(self, units: list[str]) -> str:
+        """把字幕拆分单元拼回文本，中文不加空格，英文单词之间保留空格"""
+        text = ""
+        for unit in [str(item or "").strip() for item in units if str(item or "").strip()]:
+            if not text:
+                text = unit
+                continue
+            separator = " " if re.search(r"[A-Za-z0-9]$", text) and re.match(r"^[A-Za-z0-9]", unit) else ""
+            text = f"{text}{separator}{unit}"
+        return text.strip()
+
+    def _merge_tiny_processed_texts(self, texts: list[str]) -> list[str]:
+        """避免兜底拆分后出现单字或过短字幕"""
+        merged: list[str] = []
+        for text in texts:
+            piece = " ".join(str(text or "").split())
+            if not piece:
+                continue
+            if merged and self._cjk_char_count(piece) <= 2:
+                merged[-1] = self._join_processed_texts([merged[-1], piece])
+                continue
+            merged.append(piece)
+        if len(merged) >= 2 and self._cjk_char_count(merged[-1]) <= 2:
+            tail = merged.pop()
+            merged[-1] = self._join_processed_texts([merged[-1], tail])
+        return merged
+
+    def _cjk_char_count(self, text: str) -> int:
+        """统计中文显示字符数，用于执行每条字幕长度上限"""
+        return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", str(text or "")))
 
     def _join_processed_texts(self, texts: list[str]) -> str:
         """合并同一条字幕拆出的多段译文，中文不加空格，英文数字之间保留空格"""
