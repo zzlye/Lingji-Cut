@@ -3,6 +3,7 @@
 
 import logging
 import re
+import sys
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -94,7 +95,8 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 
     # 控制台处理器
     if not _has_handler(logger, logging.StreamHandler):
-        handler = logging.StreamHandler()
+        # 普通 INFO/WARNING 日志走 stdout，避免 Electron 把正常运行日志标成 Python Error。
+        handler = logging.StreamHandler(sys.stdout)
         handler.setLevel(level)
         formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s [%(name)s] %(message)s",

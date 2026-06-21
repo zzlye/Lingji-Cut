@@ -156,6 +156,24 @@ class AlignTimelineTest(unittest.TestCase):
         self.assertIn("句子A", out[0]["text"])
         self.assertIn("句子B", out[0]["text"])
 
+    def test_long_gemini_sentence_is_not_duplicated_across_whisper_slots(self):
+        """Gemini 长句跨多个本地时间段时应切分分配，不能整句重复塞进每一条"""
+        whisper = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,140", "text": "On the strongest SMP"},
+            {"index": 2, "start": "00:00:01,760", "end": "00:00:03,020", "text": "Minecraft's sweatiest server"},
+            {"index": 3, "start": "00:00:03,260", "end": "00:00:05,800", "text": "it is required to have a public base"},
+        ]
+        gemini_text = "On the strongest SMP Minecraft's sweatiest server it is required to have a public base"
+        gemini = [{"index": 1, "start": "00:00:00,000", "end": "00:00:05,800", "text": gemini_text}]
+
+        out = self._align(whisper, gemini)
+
+        self.assertEqual(len(out), 3)
+        self.assertNotEqual(out[0]["text"], gemini_text)
+        self.assertNotEqual(out[1]["text"], gemini_text)
+        self.assertNotEqual(out[2]["text"], gemini_text)
+        self.assertEqual(" ".join(entry["text"] for entry in out), gemini_text)
+
 
 class AudioContentPartTest(unittest.TestCase):
     """音频多模态片段格式测试：默认 image_url data URI，可切回 input_audio"""

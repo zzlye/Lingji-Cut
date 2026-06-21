@@ -437,32 +437,52 @@ def align_gemini_content_to_whisper_timeline(
         )
         for g in gemini_entries
     ]
-    used = [False] * len(gemini_spans)
-    aligned: list[dict] = []
+    whisper_spans = [
+        (
+            srt_to_seconds(str(entry.get("start") or "00:00:00,000")),
+            srt_to_seconds(str(entry.get("end") or "00:00:00,000")),
+            entry,
+        )
+        for entry in whisper_entries
+    ]
+    assigned: list[list[tuple[float, str]]] = [[] for _ in whisper_entries]
+    missing: list[tuple[float, float, str]] = []
 
-    for entry in whisper_entries:
-        w_start = srt_to_seconds(str(entry.get("start") or "00:00:00,000"))
-        w_end = srt_to_seconds(str(entry.get("end") or "00:00:00,000"))
-        picked: list[tuple[float, str]] = []
-        for index, (g_start, g_end, g_text) in enumerate(gemini_spans):
-            if not g_text:
-                continue
+    for g_start, g_end, g_text in gemini_spans:
+        if not g_text:
+            continue
+        overlaps: list[tuple[int, float]] = []
+        for index, (w_start, w_end, _entry) in enumerate(whisper_spans):
             overlap = min(w_end, g_end) - max(w_start, g_start)
             # 句子中心落在该 Whisper 区间内，或与之有实质重叠，就归到这条
             center = (g_start + g_end) / 2
             if overlap > 0.05 or (w_start <= center <= w_end):
-                picked.append((g_start, g_text))
-                used[index] = True
+                overlaps.append((index, max(overlap, 0.05)))
+
+        if not overlaps:
+            missing.append((g_start, g_end, g_text))
+            continue
+        if len(overlaps) == 1:
+            assigned[overlaps[0][0]].append((g_start, g_text))
+            continue
+
+        # 一个 Gemini 长句横跨多个本地时间槽时，必须切分后分配；
+        # 不能把整句重复写进每个重叠槽位，否则字幕会成倍膨胀。
+        pieces = _split_sentence_by_weights(g_text, [weight for _index, weight in overlaps])
+        for (slot_index, _weight), piece in zip(overlaps, pieces):
+            if piece:
+                assigned[slot_index].append((g_start, piece))
+
+    aligned: list[dict] = []
+    for index, (_w_start, _w_end, entry) in enumerate(whisper_spans):
         next_entry = dict(entry)
-        if picked:
-            picked.sort(key=lambda item: item[0])
-            next_entry["text"] = _join_sentences(text for _, text in picked)
+        if assigned[index]:
+            assigned[index].sort(key=lambda item: item[0])
+            next_entry["text"] = _join_sentences(text for _, text in assigned[index])
         aligned.append(next_entry)
 
     # Whisper 时间轴没覆盖到的 Gemini 句子作为补漏条目插入
-    for index, (g_start, g_end, g_text) in enumerate(gemini_spans):
-        if used[index] or not g_text:
-            continue
+    for g_start, g_end, g_text in missing:
         aligned.append({
             "index": 0,
             "start": seconds_to_srt(g_start),
@@ -474,6 +494,57 @@ def align_gemini_content_to_whisper_timeline(
     for index, entry in enumerate(aligned, 1):
         entry["index"] = index
     return aligned
+
+
+def _split_sentence_by_weights(text: str, weights: list[float]) -> list[str]:
+    """按时间重叠权重把一句 Gemini 文本切给多个本地时间槽"""
+    if not weights:
+        return []
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return ["" for _ in weights]
+    units = _sentence_units(normalized)
+    if len(weights) == 1 or len(units) <= 1:
+        return [normalized] + ["" for _ in weights[1:]]
+
+    total_units = len(units)
+    total_weight = max(0.001, sum(max(0.001, weight) for weight in weights))
+    pieces: list[str] = []
+    start = 0
+    elapsed = 0.0
+    for index, weight in enumerate(weights):
+        elapsed += max(0.001, weight)
+        remaining_slots = len(weights) - index - 1
+        if index == len(weights) - 1:
+            end = total_units
+        else:
+            proposed = round(total_units * elapsed / total_weight)
+            min_end = start + (1 if total_units - start > remaining_slots else 0)
+            max_end = total_units - remaining_slots
+            end = max(min_end, min(max_end, proposed))
+        pieces.append(_join_sentence_units(units[start:end]))
+        start = end
+    return pieces
+
+
+def _sentence_units(text: str) -> list[str]:
+    """生成可切分文本单元：英文按词，连续中日韩文本按字"""
+    if re.search(r"[A-Za-z0-9]", text) and re.search(r"\s", text):
+        return [unit for unit in text.split(" ") if unit]
+    units = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", text)
+    return units or [text]
+
+
+def _join_sentence_units(units: list[str]) -> str:
+    """把切分单元拼回字幕文本，中文不加空格，英文单词之间保留空格"""
+    text = ""
+    for unit in [str(item or "").strip() for item in units if str(item or "").strip()]:
+        if not text:
+            text = unit
+            continue
+        separator = " " if re.search(r"[A-Za-z0-9]$", text) and re.match(r"^[A-Za-z0-9]", unit) else ""
+        text = f"{text}{separator}{unit}"
+    return text
 
 
 def _join_sentences(sentences: Any) -> str:
