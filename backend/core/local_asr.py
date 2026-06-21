@@ -60,6 +60,7 @@ _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
 _CUDA_ASR_DISABLED = False
 CUDA_DISABLED_FLAG_NAME = "asr-cuda-disabled.flag"
 ASR_WORKER_EVENT_PREFIX = "__YTV_ASR_WORKER__"
+ASR_INPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
 
 
 def default_asr_model_dir() -> str:
@@ -83,9 +84,26 @@ def asr_cuda_disabled_flag_path() -> str:
     return os.environ.get("YTV_ASR_CUDA_DISABLED_FLAG") or os.path.join(default_data_root(), "data", CUDA_DISABLED_FLAG_NAME)
 
 
+def _asr_force_cuda_enabled() -> bool:
+    """读取强制 CUDA 开关，调试时允许临时忽略熔断标记"""
+    return str(os.environ.get("YTV_ASR_FORCE_CUDA") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def read_asr_cuda_disabled_reason() -> str:
+    """读取 CUDA 熔断标记内容，日志里展示 CPU 回退原因"""
+    try:
+        flag_path = asr_cuda_disabled_flag_path()
+        if not os.path.exists(flag_path):
+            return ""
+        with open(flag_path, "r", encoding="utf-8") as file:
+            return " | ".join(line.strip() for line in file.readlines()[:3] if line.strip())
+    except OSError:
+        return ""
+
+
 def asr_cuda_disabled_by_marker() -> bool:
     """判断是否因上次 CUDA 原生崩溃而禁用本地识别 CUDA"""
-    if str(os.environ.get("YTV_ASR_FORCE_CUDA") or "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _asr_force_cuda_enabled():
         return False
     try:
         return os.path.exists(asr_cuda_disabled_flag_path())
@@ -144,6 +162,9 @@ def cuda_free_memory_mib() -> int:
 def default_gpu_asr_model_name() -> str:
     """优先按空闲显存选择模型，显存被其他程序占用时自动降级，避免推理中途显存不足崩溃"""
     free_mib = cuda_free_memory_mib()
+    # large-v3-turbo 约需 4GB 显存，准确率接近 large-v3 但速度快 3-4 倍
+    if free_mib >= 4500:
+        return "large-v3-turbo"
     if free_mib >= 3500:
         return "medium"
     if free_mib >= 2000:
@@ -153,9 +174,9 @@ def default_gpu_asr_model_name() -> str:
     # 空闲显存查询失败时退回按总显存估算
     memory_mib = cuda_memory_mib()
     if memory_mib >= 7000:
-        return "medium"
+        return "large-v3-turbo"
     if memory_mib >= 3500:
-        return "small"
+        return "medium"
     return "base"
 
 
@@ -172,13 +193,19 @@ def cuda_device_count() -> int:
 def default_asr_device() -> str:
     """默认优先 GPU，没有 CUDA 时自动回退 CPU"""
     if asr_cuda_disabled_by_marker():
+        logger.warning(f"本地识别 CUDA 已被熔断标记禁用: flag={asr_cuda_disabled_flag_path()}, reason={read_asr_cuda_disabled_reason() or '未记录'}")
         return "cpu"
     requested = (os.environ.get("YTV_ASR_DEVICE") or "auto").strip().lower()
     if requested and requested != "auto":
         return requested
     if _CUDA_ASR_DISABLED:
+        logger.warning("本地识别 CUDA 已在当前进程内禁用，自动改用 CPU")
         return "cpu"
-    return "cuda" if cuda_device_count() > 0 else "cpu"
+    count = cuda_device_count()
+    if count > 0:
+        return "cuda"
+    logger.info("本地识别未检测到可用 CUDA 设备，自动使用 CPU")
+    return "cpu"
 
 
 def default_asr_compute_type(device: str) -> str:
@@ -201,8 +228,11 @@ class LocalSpeechRecognizer:
         cpu_threads: Optional[int] = None,
         beam_size: Optional[int] = None,
         allow_cpu_fallback: Optional[bool] = None,
+        gap_rescue: Optional[bool] = None,
     ):
         """初始化本地识别参数，不在构造阶段加载模型"""
+        # 补漏识别开关覆盖：模式3 时间轴识别不需要 CPU 逐个漏区重跑（内容由 Gemini 补），传 False 关闭可大幅提速
+        self._gap_rescue_override = gap_rescue
         self.model_dir = model_dir or default_asr_model_dir()
         requested_device = device or os.environ.get("YTV_ASR_DEVICE") or "auto"
         normalized_device = str(requested_device).strip().lower()
@@ -215,6 +245,33 @@ class LocalSpeechRecognizer:
         self.compute_type = compute_type or default_asr_compute_type(self.device)
         self.cpu_threads = cpu_threads or min(4, max(1, os.cpu_count() or 1))
         self.beam_size = beam_size
+        self._log_device_profile(requested_device, normalized_device)
+
+    def _log_device_profile(self, requested_device: str, normalized_device: str) -> None:
+        """记录本地识别最终使用的模型和设备，方便排查 CPU/GPU 选择"""
+        marker_reason = read_asr_cuda_disabled_reason()
+        logger.info(
+            "本地识别配置: "
+            f"requested={requested_device}, normalized={normalized_device}, "
+            f"resolved_device={self.device}, model={self.model_name}, compute={self.compute_type}, "
+            f"cpu_threads={self.cpu_threads}, cuda_devices={cuda_device_count()}, "
+            f"free_vram_mib={cuda_free_memory_mib()}, total_vram_mib={cuda_memory_mib()}, "
+            f"cuda_marker={asr_cuda_disabled_flag_path() if marker_reason else ''}, "
+            f"marker_reason={marker_reason or ''}, force_cuda={_asr_force_cuda_enabled()}"
+        )
+
+    def _validate_input_media_path(self, video_path: str) -> str:
+        """校验本地识别输入，避免把时间轴 JSON 或字幕缓存交给 ffmpeg"""
+        normalized = os.path.abspath(os.path.expanduser(str(video_path or "").strip()))
+        ext = os.path.splitext(normalized)[1].lower()
+        logger.info(f"本地识别输入: path={normalized}, ext={ext or '无后缀'}, exists={os.path.isfile(normalized)}, device={self.device}, model={self.model_name}")
+        if not normalized:
+            raise ValueError("本地识别输入为空")
+        if not os.path.isfile(normalized):
+            raise FileNotFoundError(f"本地识别视频不存在: {normalized}")
+        if ext not in ASR_INPUT_EXTENSIONS:
+            raise ValueError(f"本地识别输入必须是音视频文件，当前是 {ext or '无后缀'}: {normalized}")
+        return normalized
 
     def _resolve_cpu_fallback(self, normalized_device: str, configured: Optional[bool]) -> bool:
         """判断 CUDA 失败时是否允许回退 CPU，默认保护自动流程不中断"""
@@ -232,8 +289,7 @@ class LocalSpeechRecognizer:
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> tuple[list[dict], str]:
         """识别视频音频并返回字幕条目和检测到的语言"""
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"本地识别视频不存在: {video_path}")
+        video_path = self._validate_input_media_path(video_path)
 
         if self._should_use_cuda_worker():
             try:
@@ -241,7 +297,8 @@ class LocalSpeechRecognizer:
             except Exception as exc:
                 if not self._should_fallback_to_cpu():
                     raise
-                logger.warning(f"GPU 本地识别子进程失败，自动回退 CPU: {exc}")
+                import traceback
+                logger.warning(f"GPU 本地识别子进程失败，自动回退 CPU: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
                 self._switch_to_cpu_after_cuda_failure(exc)
 
         # 预处理音频：响度归一化让低声说话更容易被识别，时间轴保持不变。
@@ -351,6 +408,9 @@ class LocalSpeechRecognizer:
             command.extend(["--beam-size", str(self.beam_size)])
         if language:
             command.extend(["--language", language])
+        # 补漏开关被显式覆盖时透传给子进程（模式3 时间轴识别关补漏提速），否则子进程读环境变量
+        if self._gap_rescue_override is not None:
+            command.extend(["--gap-rescue", "1" if self._gap_rescue_override else "0"])
 
         logger.info(f"本地识别 CUDA 子进程启动: model={self.model_name}, compute={self.compute_type}")
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -617,6 +677,9 @@ class LocalSpeechRecognizer:
 
     def _gap_rescue_enabled(self) -> bool:
         """读取空洞补漏开关，默认开启保证轻声细语也能出字幕"""
+        # 构造时显式指定的开关优先级最高（模式3 时间轴识别用它关闭补漏提速），否则读环境变量
+        if self._gap_rescue_override is not None:
+            return bool(self._gap_rescue_override)
         configured = str(os.environ.get("YTV_ASR_GAP_RESCUE") or "true").strip().lower()
         return configured not in {"0", "false", "no", "off"}
 

@@ -211,8 +211,30 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertTrue(entries)
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
 
-    def test_transcribe_video_uses_medium_model_on_large_gpu(self):
-        """显存足够时 GPU 默认使用 medium，提高专业词识别准确率"""
+    def test_transcribe_video_rejects_timeline_json_input(self):
+        """本地识别入口直接拒绝时间轴 JSON，避免交给 ffmpeg 后报不可读错误"""
+        timeline_path = os.path.join(self.temp_dir, "video_local_timeline.json")
+        with open(timeline_path, "w", encoding="utf-8") as file:
+            file.write("[]")
+
+        recognizer = LocalSpeechRecognizer(device="cpu", model_dir=self.temp_dir, cpu_threads=2)
+
+        with self.assertRaisesRegex(ValueError, "本地识别输入必须是音视频文件"):
+            recognizer.transcribe_video(timeline_path)
+
+    def test_cuda_marker_reason_is_read_for_diagnostics(self):
+        """CUDA 熔断原因会被读取出来，便于日志解释为什么当前走 CPU"""
+        marker_path = os.path.join(self.temp_dir, "asr-cuda-disabled.flag")
+        with open(marker_path, "w", encoding="utf-8") as file:
+            file.write("2026-06-22T02:00:00\n本地识别 CUDA 导致后端异常退出，退出码 3221226505\n")
+
+        with patch.dict(os.environ, {"YTV_ASR_CUDA_DISABLED_FLAG": marker_path}):
+            reason = local_asr_module.read_asr_cuda_disabled_reason()
+
+        self.assertIn("退出码 3221226505", reason)
+
+    def test_transcribe_video_uses_large_v3_turbo_model_on_large_gpu(self):
+        """显存足够时 GPU 默认使用 large-v3-turbo，提高多人视频识别准确率"""
         fake_module = types.ModuleType("faster_whisper")
         fake_module.WhisperModel = FakeWhisperModel
 
@@ -228,7 +250,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(language, "en")
         self.assertTrue(entries)
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
-        self.assertEqual(FakeWhisperModel.init_calls[0]["model_name"], "medium")
+        self.assertEqual(FakeWhisperModel.init_calls[0]["model_name"], "large-v3-turbo")
 
     def test_transcribe_video_falls_back_to_cpu_when_auto_gpu_fails(self):
         """自动 GPU 识别失败时回退 CPU，兼容没有完整 CUDA 环境的电脑"""
@@ -695,6 +717,21 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         rescue_call = GapRescueWhisperModel.transcribe_calls[-1]
         self.assertFalse(rescue_call["vad_filter"])
 
+
+    def test_gap_rescue_override_disables_rescue_regardless_of_env(self):
+        """构造时传 gap_rescue=False 应强制关闭补漏，优先级高于环境变量（模式3 时间轴提速用）"""
+        # 即使环境变量显式打开补漏，构造参数 False 也要压过它
+        with patch.dict(os.environ, {"YTV_ASR_GAP_RESCUE": "true"}):
+            recognizer = LocalSpeechRecognizer(device="cpu", gap_rescue=False)
+            self.assertFalse(recognizer._gap_rescue_enabled())
+        # 传 True 则强制开启
+        with patch.dict(os.environ, {"YTV_ASR_GAP_RESCUE": "false"}):
+            recognizer = LocalSpeechRecognizer(device="cpu", gap_rescue=True)
+            self.assertTrue(recognizer._gap_rescue_enabled())
+        # 不传(None)时回落到环境变量
+        with patch.dict(os.environ, {"YTV_ASR_GAP_RESCUE": "false"}):
+            recognizer = LocalSpeechRecognizer(device="cpu")
+            self.assertFalse(recognizer._gap_rescue_enabled())
 
     def test_vad_calibration_fixes_late_and_dragging_subtitle(self):
         """词级对齐偏慢的单音节字幕按 VAD 语音边界回贴，拖尾也会收回"""

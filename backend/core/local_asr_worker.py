@@ -25,6 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu-threads", type=int, required=True)
     parser.add_argument("--beam-size", type=int)
     parser.add_argument("--language")
+    parser.add_argument("--gap-rescue", type=int, choices=[0, 1])
     return parser
 
 
@@ -39,6 +40,8 @@ def main() -> int:
             compute_type=args.compute_type,
             cpu_threads=args.cpu_threads,
             beam_size=args.beam_size,
+            # 补漏开关由父进程透传：模式3 时间轴识别传 0 关闭，加速 GPU 子进程识别
+            gap_rescue=(None if args.gap_rescue is None else bool(args.gap_rescue)),
         )
 
         def on_progress(value: float) -> None:
