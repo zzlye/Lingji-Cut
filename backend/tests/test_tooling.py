@@ -146,6 +146,39 @@ class ToolingTests(unittest.TestCase):
         self.assertIn("--cookies-from-browser", calls[1])
         self.assertLess(calls[1].index("--cookies-from-browser"), calls[1].index("https://youtube.com/watch?v=test"))
 
+    def test_parse_video_enables_node_js_runtime_when_available(self):
+        """解析 YouTube 时自动启用 Node JS 运行时，避免挑战未解导致只剩图片格式"""
+        captured_cmd: list[str] = []
+
+        def fake_run(cmd, **_kwargs):
+            """记录解析命令并返回模拟视频信息"""
+            captured_cmd.extend(cmd)
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps({
+                    "id": "test",
+                    "title": "测试视频",
+                    "uploader": "测试作者",
+                    "duration": 12,
+                    "thumbnail": "https://example.test/cover.jpg",
+                    "formats": [],
+                    "subtitles": {},
+                    "automatic_captions": {},
+                }),
+                stderr="",
+            )
+
+        with patch.dict(os.environ, {"YTV_YTDLP_JS_RUNTIME": ""}), \
+                patch("backend.core.downloader.shutil.which", return_value="C:/node/node.exe"), \
+                patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                patch("backend.core.downloader.subprocess.run", side_effect=fake_run):
+            Downloader().parse_video("https://youtube.com/watch?v=test")
+
+        self.assertIn("--js-runtimes", captured_cmd)
+        self.assertIn("node", captured_cmd)
+        self.assertLess(captured_cmd.index("--js-runtimes"), captured_cmd.index("https://youtube.com/watch?v=test"))
+
     def test_download_video_adds_ffmpeg_location_for_custom_format(self):
         """指定下载格式时仍然传入本地 ffmpeg 位置"""
         with tempfile.TemporaryDirectory() as temp_dir:

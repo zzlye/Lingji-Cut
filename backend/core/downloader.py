@@ -5,6 +5,7 @@ import os
 import re
 import json
 import platform
+import shutil
 import subprocess
 import time
 import mimetypes
@@ -38,6 +39,7 @@ class Downloader:
         # 构建 yt-dlp 命令
         base_cmd = [
             self.yt_dlp_cmd,
+            *self._js_runtime_args(),
             "--dump-json",           # 输出 JSON 格式
             "--no-download",         # 不下载视频
             "--no-warnings",         # 不显示警告
@@ -112,6 +114,15 @@ class Downloader:
         stderr = str(result.stderr or "").strip()
         stdout = str(result.stdout or "").strip()
         return stderr or stdout
+
+    def _js_runtime_args(self) -> list[str]:
+        """为 YouTube JS 挑战启用本机 Node，避免只解析出图片格式"""
+        configured = str(os.environ.get("YTV_YTDLP_JS_RUNTIME") or "").strip()
+        if configured:
+            return ["--js-runtimes", configured]
+        if shutil.which("node"):
+            return ["--js-runtimes", "node"]
+        return []
 
     def _build_yt_dlp_command(self, base_cmd: list[str], url: str, cookie_args: Optional[list[str]] = None) -> list[str]:
         """在 URL 前插入 cookies 参数，避免 yt-dlp 把 cookies 参数误当成地址"""
@@ -340,6 +351,7 @@ class Downloader:
         # 构建 yt-dlp 命令
         base_cmd = [
             self.yt_dlp_cmd,
+            *self._js_runtime_args(),
             "-o", output_template,
             "--merge-output-format", output_format,
             "--no-warnings",
@@ -476,6 +488,7 @@ class Downloader:
 
         base_cmd = [
             self.yt_dlp_cmd,
+            *self._js_runtime_args(),
             "--skip-download",      # 不下载视频
             "--write-sub",          # 写入字幕
             "--sub-lang", language,
