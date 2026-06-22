@@ -1,4 +1,4 @@
-// src/features/voice/VoiceConfigPanel.tsx
+﻿// src/features/voice/VoiceConfigPanel.tsx
 // 配音配置面板 - 管理配音 API、音色、试听和生成参数
 // 交互重做：渠道/音色/试听露出，生成参数与多说话人收进高级折叠
 
@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { Pause, Play, Plus, Trash2, Volume2 } from 'lucide-react'
 import { BASE_URL, profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoicePresetProfile, VoiceSpeakerProfile } from '@/types'
+import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -126,16 +126,10 @@ function voiceValueLabel(value: string, voices: VoiceOption[] = []): string {
   return value || '未选择'
 }
 
-/** 根据预设构造下拉选项 */
-function voicePresetOptions(presets: VoicePresetProfile[]): FieldOption[] {
-  return presets.map((preset) => [preset.id, `${preset.name} · ${voiceValueLabel(preset.voice)}`] as FieldOption)
-}
-
-/** 合并音色目录、预设和当前值，避免下拉里丢失自定义 voice id */
-function voiceOptionsWithCustom(voices: VoiceOption[], presets: VoicePresetProfile[], currentVoice: string): FieldOption[] {
+/** 合并音色目录与当前值，避免下拉里丢失自定义 voice id */
+function voiceOptionsWithCustom(voices: VoiceOption[], currentVoice: string): FieldOption[] {
   const options = [
     ...voices.map((item) => [item.id, voiceOptionLabel(item)] as FieldOption),
-    ...presets.map((preset) => [preset.voice, `${preset.name} · ${voiceValueLabel(preset.voice, voices)}`] as FieldOption),
     currentVoice ? [currentVoice, voiceValueLabel(currentVoice, voices)] as FieldOption : null,
   ].filter(Boolean) as FieldOption[]
   return options.filter((item, index, list) => list.findIndex((candidate) => candidate[0] === item[0]) === index)
@@ -192,7 +186,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const profileRequestRef = useRef(0)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const currentVoiceRef = useRef(voice)
-  const lastXiaomiPresetSyncRef = useRef('')
+  const lastXiaomiSpeakerSyncRef = useRef('')
 
   const activeProvider = profileForm.provider_type
   const activeProviderMeta = VOICE_PROVIDERS.find((p) => p.id === activeProvider) || VOICE_PROVIDERS[0]
@@ -541,30 +535,6 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     } finally { setIsGenerating(false) }
   }
 
-  const handleVoicePresetPreview = async (preset: VoicePresetProfile) => {
-    if (!profileForm.base_url.trim() || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
-    setIsGenerating(true)
-    setAudioUrl('')
-    setNotice({ type: 'info', message: `正在生成 ${preset.name} 的试听...` })
-    try {
-      const result = await voiceApi.preview({
-        text: preset.sample_text || `${preset.name} 的配音试听。`,
-        profile_id: selectedProfileId,
-        provider_type: profileForm.provider_type,
-        base_url: profileForm.base_url,
-        api_key: profileForm.api_key || undefined,
-        voice: preset.voice,
-        model: activeModel,
-        settings: voiceSettingsForRequest({ style_prompt: preset.style_prompt || settings.style_prompt }),
-      })
-      setAudioUrl(`${BASE_URL}${result.audio_url}`)
-      setNotice({ type: 'success', message: `音色预设 "${preset.name}" 试听已生成。` })
-    } catch (error) {
-      const message = `音色预设试听失败: ${error instanceof Error ? error.message : '未知错误'}`
-      setNotice({ type: 'error', message }); addLog('error', message)
-    } finally { setIsGenerating(false) }
-  }
-
   const togglePreviewPlayback = () => {
     const audio = audioRef.current
     if (!audio) return
@@ -588,24 +558,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setAutomationOptions(saveAutomationPreferences({ voice_speakers: automationOptions.voice_speakers.map((s) => (s.id === id ? { ...s, ...patch } : s)) }))
   }
 
-  const updateVoicePreset = (id: string, patch: Partial<VoicePresetProfile>) => {
-    const presets = automationOptions.voice_presets.map((preset) => (preset.id === id ? { ...preset, ...patch } : preset))
-    setAutomationOptions(saveAutomationPreferences({
-      voice_presets: presets,
-      voice_speakers: automationOptions.voice_speakers.map((speaker) => (
-        speaker.preset_id === id
-          ? {
-              ...speaker,
-              voice: patch.voice ?? speaker.voice,
-              style_prompt: patch.style_prompt ?? speaker.style_prompt,
-              sample_text: patch.sample_text ?? speaker.sample_text,
-            }
-          : speaker
-      )),
-    }))
-  }
-
-  const syncXiaomiPresetVoices = (showNotice = true) => {
+  const syncXiaomiSpeakerVoices = (showNotice = true) => {
     if (!isXiaomiMiMo) return
     const validVoiceIds = new Set(voices.map((item) => item.id))
     let changed = false
@@ -632,111 +585,35 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       return markVoiceChange(voiceValue, fallbackVoice)
     }
 
-    const nextPresets = automationOptions.voice_presets.map((preset, index) => ({
-      ...preset,
-      voice: normalizeVoice(preset.voice, preset.name, preset.style_prompt, index),
+
+    const nextSpeakers = automationOptions.voice_speakers.map((speaker, index) => ({
+      ...speaker,
+      voice: normalizeVoice(speaker.voice, speaker.label, speaker.style_prompt || '', index),
     }))
-    const presetById = new Map(nextPresets.map((preset) => [preset.id, preset]))
-    const nextSpeakers = automationOptions.voice_speakers.map((speaker, index) => {
-      const preset = speaker.preset_id ? presetById.get(speaker.preset_id) : null
-      if (preset) {
-        const nextSpeaker = {
-          ...speaker,
-          voice: preset.voice,
-          style_prompt: preset.style_prompt,
-          sample_text: speaker.sample_text || preset.sample_text,
-        }
-        if (nextSpeaker.voice !== speaker.voice || nextSpeaker.style_prompt !== speaker.style_prompt) changed = true
-        if (nextSpeaker.sample_text !== speaker.sample_text) changed = true
-        return nextSpeaker
-      }
-      return {
-        ...speaker,
-        voice: normalizeVoice(speaker.voice, speaker.label, speaker.style_prompt || '', index),
-      }
-    })
 
     if (!changed) return
-    setAutomationOptions(saveAutomationPreferences({ voice_presets: nextPresets, voice_speakers: nextSpeakers }))
-    if (showNotice) setNotice({ type: 'success', message: '已按当前小米模型同步音色预设和多人说话人' })
+    setAutomationOptions(saveAutomationPreferences({ voice_speakers: nextSpeakers }))
+    if (showNotice) setNotice({ type: 'success', message: '已按当前小米模型同步说话人音色' })
   }
 
-  const voiceCatalogSignature = voices.map((item) => item.id).join('\u0001')
+  const voiceCatalogSignature = voices.map((item) => item.id).join('')
 
   useEffect(() => {
     if (!isXiaomiMiMo || !voiceCatalogSignature) return
-    const syncKey = `${activeProvider}\u0001${activeModel}\u0001${voiceCatalogSignature}`
-    if (lastXiaomiPresetSyncRef.current === syncKey) return
-    lastXiaomiPresetSyncRef.current = syncKey
-    syncXiaomiPresetVoices(false)
+    const syncKey = `${activeProvider}${activeModel}${voiceCatalogSignature}`
+    if (lastXiaomiSpeakerSyncRef.current === syncKey) return
+    lastXiaomiSpeakerSyncRef.current = syncKey
+    syncXiaomiSpeakerVoices(false)
   }, [isXiaomiMiMo, activeProvider, activeModel, voiceCatalogSignature])
-
-  const addVoicePreset = () => {
-    const nextIndex = automationOptions.voice_presets.length + 1
-    const preset: VoicePresetProfile = {
-      id: `voice_preset_${Date.now()}`,
-      name: `音色 ${nextIndex}`,
-      voice: activeVoiceValue || 'Kore',
-      style_prompt: settings.style_prompt || '',
-      sample_text: previewText || DEFAULT_PREVIEW_TEXT,
-    }
-    setAutomationOptions(saveAutomationPreferences({ voice_presets: [...automationOptions.voice_presets, preset] }))
-    setNotice({ type: 'success', message: `已添加音色预设：${preset.name}` })
-  }
-
-  const saveCurrentAsVoicePreset = () => {
-    const nextIndex = automationOptions.voice_presets.length + 1
-    const preset: VoicePresetProfile = {
-      id: `voice_preset_${Date.now()}`,
-      name: `当前音色 ${nextIndex}`,
-      voice: activeVoiceValue,
-      style_prompt: settings.style_prompt,
-      sample_text: previewText || DEFAULT_PREVIEW_TEXT,
-    }
-    setAutomationOptions(saveAutomationPreferences({ voice_presets: [...automationOptions.voice_presets, preset] }))
-    setNotice({ type: 'success', message: `已把当前音色保存为预设：${preset.name}` })
-  }
-
-  const removeVoicePreset = (id: string) => {
-    if (automationOptions.voice_presets.length <= 1) {
-      setNotice({ type: 'warning', message: '至少保留一个音色预设' })
-      return
-    }
-    const preset = automationOptions.voice_presets.find((item) => item.id === id)
-    const nextPresets = automationOptions.voice_presets.filter((item) => item.id !== id)
-    const fallback = nextPresets[0]
-    setAutomationOptions(saveAutomationPreferences({
-      voice_presets: nextPresets,
-      voice_speakers: automationOptions.voice_speakers.map((speaker) => (
-        speaker.preset_id === id
-          ? { ...speaker, preset_id: fallback.id, voice: fallback.voice, style_prompt: fallback.style_prompt, sample_text: speaker.sample_text || fallback.sample_text }
-          : speaker
-      )),
-    }))
-    setNotice({ type: 'info', message: `已删除音色预设：${preset?.name || id}` })
-  }
-
-  const applyPresetToSpeaker = (speakerId: string, presetId: string) => {
-    const preset = automationOptions.voice_presets.find((item) => item.id === presetId)
-    if (!preset) return
-    updateSpeaker(speakerId, {
-      preset_id: preset.id,
-      voice: preset.voice,
-      style_prompt: preset.style_prompt,
-      sample_text: preset.sample_text,
-    })
-  }
 
   const addSpeaker = () => {
     const nextIndex = automationOptions.voice_speakers.length + 1
-    const preset = automationOptions.voice_presets[(nextIndex - 1) % Math.max(automationOptions.voice_presets.length, 1)]
     const nextSpeaker: VoiceSpeakerProfile = {
       id: `speaker_${Date.now()}`,
       label: `角色 ${nextIndex}`,
-      preset_id: preset?.id || '',
-      voice: preset?.voice || activeVoiceValue,
-      style_prompt: preset?.style_prompt || '',
-      sample_text: preset?.sample_text || `这是角色 ${nextIndex} 的一句对话试听。`,
+      voice: activeVoiceValue || 'alloy',
+      style_prompt: settings.style_prompt || '',
+      sample_text: `这是角色 ${nextIndex} 的一句对话试听。`,
     }
     setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: true, voice_speakers: [...automationOptions.voice_speakers, nextSpeaker] }))
   }
@@ -865,7 +742,6 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={handleLocalPreview} disabled={!previewText.trim()}>{isLocalSpeaking ? '停止本地试听' : '本地试听'}</Button>
             <Button onClick={handlePreview} disabled={isGenerating || !previewText.trim()}>{isGenerating ? '生成中…' : '生成试听'}</Button>
-            <Button variant="outline" onClick={saveCurrentAsVoicePreset} disabled={!activeVoiceValue.trim()}>保存为预设</Button>
             <span className="text-xs text-muted-foreground">当前音色：{selectedVoiceLabel}</span>
           </div>
           {audioUrl && (
@@ -885,75 +761,6 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader><CardTitle className="text-sm">音色预设库</CardTitle></CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex flex-wrap justify-end gap-2">
-            {isXiaomiMiMo && (
-              <Button variant="outline" size="sm" onClick={() => syncXiaomiPresetVoices(true)}>
-                同步当前模型音色
-              </Button>
-            )}
-            <Button variant="outline" size="sm" onClick={addVoicePreset}>
-              <Plus className="mr-1 size-4" />
-              添加音色
-            </Button>
-          </div>
-          {automationOptions.voice_presets.map((preset) => (
-            <div key={preset.id} className="space-y-3 rounded-lg border bg-card p-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <TextField label="预设名称" value={preset.name} onChange={(v) => updateVoicePreset(preset.id, { name: v })} />
-                {isXiaomiVoiceDesign ? (
-                  <TextareaField
-                    label="文字音色描述"
-                    value={editableXiaomiVoiceDesignPrompt(preset.voice)}
-                    rows={2}
-                    placeholder="例如：低沉男声，普通话标准，声音稳重，适合旁白。"
-                    onChange={(v) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceDesign(v) })}
-                  />
-                ) : isXiaomiVoiceClone ? (
-                  <div className="space-y-2">
-                    <TextField
-                      label="克隆样本路径"
-                      value={editableXiaomiVoiceClonePath(preset.voice)}
-                      placeholder="选择 mp3/wav 后自动填入"
-                      onChange={(v) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceClonePath(v) })}
-                    />
-                    <input
-                      type="file"
-                      accept=".mp3,.wav,audio/mpeg,audio/wav"
-                      className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0] || null
-                        void handleXiaomiCloneSampleChange(file, (path) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceClonePath(path) }))
-                        event.currentTarget.value = ''
-                      }}
-                    />
-                  </div>
-                ) : activeProvider === 'custom_tts' ? (
-                  <TextField label="voice id" value={preset.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateVoicePreset(preset.id, { voice: v })} />
-                ) : (
-                  <SelectField
-                    label="voice id"
-                    value={preset.voice}
-                    options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, preset.voice)}
-                    onChange={(v) => updateVoicePreset(preset.id, { voice: v })}
-                  />
-                )}
-              </div>
-              <TextareaField label="风格提示" value={preset.style_prompt} rows={2} placeholder="例如：像真实游戏对话，语气有起伏，遇到惊讶和危险时加强重音，不要像念稿。" onChange={(v) => updateVoicePreset(preset.id, { style_prompt: v })} />
-              <TextField label="试听文本" value={preset.sample_text} onChange={(v) => updateVoicePreset(preset.id, { sample_text: v })} />
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={() => handleVoicePresetPreview(preset)} disabled={isGenerating}>试听</Button>
-                <Button variant="outline" size="sm" className="text-destructive" onClick={() => removeVoicePreset(preset.id)} disabled={automationOptions.voice_presets.length <= 1}>
-                  <Trash2 className="mr-1 size-4" />
-                  删除
-                </Button>
-              </div>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
 
       {/* 高级 */}
       <Accordion type="multiple" className="space-y-2">
@@ -1040,26 +847,30 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         <AccordionItem value="speakers" className="rounded-lg border px-4">
           <AccordionTrigger className="text-sm">多人说话人音色（{automationOptions.voice_speakers.length}）</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
+              {isXiaomiMiMo && (
+                <Button variant="outline" size="sm" onClick={() => syncXiaomiSpeakerVoices(true)}>
+                  同步当前模型音色
+                </Button>
+              )}
               <Button variant="outline" size="sm" onClick={addSpeaker}>+ 添加说话人</Button>
             </div>
+            {isXiaomiVoiceDesign && (
+              <p className="text-xs text-muted-foreground rounded-md bg-muted/50 p-2">
+                VoiceDesign 模式无法保证音色完全一致，如需固定音色建议选用小米内置声音（冰糖/茉莉/白桦/苏打）。
+              </p>
+            )}
             {automationOptions.voice_speakers.map((speaker) => (
               <div key={speaker.id} className="space-y-2 rounded-lg border bg-card p-3">
                 <div className="grid gap-2 sm:grid-cols-2">
                   <TextField label="说话人标签" value={speaker.label} onChange={(v) => updateSpeaker(speaker.id, { label: v })} />
-                  <SelectField
-                    label="音色预设"
-                    value={speaker.preset_id || ''}
-                    options={[['', '不绑定预设'], ...voicePresetOptions(automationOptions.voice_presets)]}
-                    onChange={(v) => v ? applyPresetToSpeaker(speaker.id, v) : updateSpeaker(speaker.id, { preset_id: '' })}
-                  />
                   {isXiaomiVoiceDesign ? (
                     <TextareaField
                       label="文字音色描述"
                       value={editableXiaomiVoiceDesignPrompt(speaker.voice)}
                       rows={2}
                       placeholder="例如：年轻女声，语气轻松，适合对话。"
-                      onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceDesign(v), preset_id: '' })}
+                      onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceDesign(v) })}
                     />
                   ) : isXiaomiVoiceClone ? (
                     <div className="space-y-2">
@@ -1067,7 +878,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                         label="克隆样本路径"
                         value={editableXiaomiVoiceClonePath(speaker.voice)}
                         placeholder="选择 mp3/wav 后自动填入"
-                        onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(v), preset_id: '' })}
+                        onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(v) })}
                       />
                       <input
                         type="file"
@@ -1075,23 +886,23 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                         className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
                         onChange={(event) => {
                           const file = event.target.files?.[0] || null
-                          void handleXiaomiCloneSampleChange(file, (path) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(path), preset_id: '' }))
+                          void handleXiaomiCloneSampleChange(file, (path) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(path) }))
                           event.currentTarget.value = ''
                         }}
                       />
                     </div>
                   ) : activeProvider === 'custom_tts' ? (
-                    <TextField label="voice id" value={speaker.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })} />
+                    <TextField label="voice id" value={speaker.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateSpeaker(speaker.id, { voice: v })} />
                   ) : (
                     <SelectField
                       label="voice id"
                       value={speaker.voice}
-                      options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, speaker.voice)}
-                      onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })}
+                      options={voiceOptionsWithCustom(voices, speaker.voice)}
+                      onChange={(v) => updateSpeaker(speaker.id, { voice: v })}
                     />
                   )}
                 </div>
-                <TextareaField label="风格提示" value={speaker.style_prompt || ''} rows={2} onChange={(v) => updateSpeaker(speaker.id, { style_prompt: v, preset_id: '' })} />
+                <TextareaField label="风格提示" value={speaker.style_prompt || ''} rows={2} placeholder="控制语气情绪，例如：兴奋时语速加快，危险时压低声音。" onChange={(v) => updateSpeaker(speaker.id, { style_prompt: v })} />
                 <TextField label="试听文本" value={speaker.sample_text} onChange={(v) => updateSpeaker(speaker.id, { sample_text: v })} />
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => handleSpeakerPreview(speaker)} disabled={isGenerating}>试听</Button>

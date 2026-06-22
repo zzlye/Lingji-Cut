@@ -450,10 +450,15 @@ class VoiceEngine:
                     tempo = source_duration_ms / duration_ms
                     if 0.35 <= tempo <= 2.8 and abs(tempo - 1.0) > 0.03:
                         filters_for_item.append(self._atempo_chain(tempo))
-                # 允许一点尾音，避免直接砍掉最后一个字；仍限制到字幕窗口附近，防止长句压住后续字幕。
-                duration_seconds = max(0.001, (duration_ms + 160) / 1000)
-                filters_for_item.append(f"atrim=0:{duration_seconds:.3f}")
-                filters_for_item.append("asetpts=PTS-STARTPTS")
+                # 放宽尾音余量：至少 300ms 或窗口时长的 15%，避免硬裁截断最后一个字
+                tail_margin_ms = max(300, int(duration_ms * 0.15))
+                duration_seconds = max(0.001, (duration_ms + tail_margin_ms) / 1000)
+                # 仅在实际音频明显超出窗口时才裁剪
+                if source_duration_ms > 0 and source_duration_ms <= duration_ms + tail_margin_ms:
+                    pass  # 音频在允许范围内，无需裁剪
+                else:
+                    filters_for_item.append(f"atrim=0:{duration_seconds:.3f}")
+                    filters_for_item.append("asetpts=PTS-STARTPTS")
             filters_for_item.append(f"adelay={delay}:all=1")
             filters.append(",".join(part for part in filters_for_item if part) + f"[{label}]")
             labels.append(f"[{label}]")
@@ -1183,10 +1188,8 @@ class VoiceEngine:
     def _settings_with_timing_prompt(self, settings: dict[str, Any], style_prompt: str, window_ms: int) -> dict[str, Any]:
         """给单条配音追加目标时长提示，让模型自行贴近字幕窗口而不是后期硬裁剪"""
         target_seconds = max(0.1, window_ms / 1000.0)
-        timing_prompt = (
-            f"这一句目标时长约 {target_seconds:.1f} 秒。请自然说完，"
-            "不要拖长尾音，也不要因为赶时间吞字或截断。"
-        )
+        # 弱化时长提示，避免压制用户设置的情绪风格
+        timing_prompt = f"（参考时长约 {target_seconds:.1f} 秒，自然说完即可，不必严格卡准。）"
         base_style = str(style_prompt or settings.get("style_prompt") or "").strip()
         merged = dict(settings)
         merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
@@ -1236,7 +1239,7 @@ class VoiceEngine:
         raw_value = settings.get("voice_min_gap_ms") if isinstance(settings, dict) else None
         if raw_value is None:
             raw_value = os.environ.get("YTV_VOICE_MIN_GAP_MS")
-        return max(0, min(2000, self._int(raw_value, 160)))
+        return max(0, min(2000, self._int(raw_value, 300)))
 
     def _apply_timed_audio_spacing(self, timed_audio_paths: list[dict[str, Any]], min_gap_ms: int) -> list[dict[str, Any]]:
         """按真实音频尾音顺延后续片段，避免逐条配音互相抢话"""
@@ -1262,6 +1265,9 @@ class VoiceEngine:
             if previous_audio_end_ms is not None:
                 adjusted_start_ms = max(adjusted_start_ms, previous_audio_end_ms + min_gap_ms)
             if adjusted_start_ms != current_start_ms:
+                shift_ms = adjusted_start_ms - current_start_ms
+                if shift_ms > 500:
+                    logger.warning(f"配音片段被顺延 {shift_ms}ms（原 {current_start_ms}ms → {adjusted_start_ms}ms），上条音频溢出较多")
                 next_item["original_start_ms"] = original_start_ms
                 next_item["start_ms"] = adjusted_start_ms
             else:

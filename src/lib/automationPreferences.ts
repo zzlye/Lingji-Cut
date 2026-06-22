@@ -56,21 +56,16 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   voice_batch_size: 16,
   voice_batch_chars: 1800,
   voice_concurrency: 2,
-  voice_min_gap_ms: 160,
+  voice_min_gap_ms: 300,
   voice_group_size: 6,
   voice_group_chars: 500,
   voice_group_max_seconds: 12,
   voice_group_gap_ms: 800,
   multi_speaker_enabled: false,
-  voice_presets: [
-    { id: 'preset_narrator', name: '旁白', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
-    { id: 'preset_speaker_a', name: '角色 A 女声', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，反应真实，情绪轻松但有变化；短句要像聊天，不要像念稿。', sample_text: '这是角色 A 的一句女声对话试听，带一点轻松反应。' },
-    { id: 'preset_speaker_b', name: '角色 B 男声', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确，关键字有重音；保持角色感，不要平铺直叙。', sample_text: '这是角色 B 的一句男声对话试听，语气要明确。' },
-  ],
   voice_speakers: [
-    { id: 'narrator', label: '旁白', preset_id: 'preset_narrator', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
-    { id: 'speaker_a', label: '角色 A', preset_id: 'preset_speaker_a', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，反应真实，情绪轻松但有变化；短句要像聊天，不要像念稿。', sample_text: '这是角色 A 的一句女声对话试听，带一点轻松反应。' },
-    { id: 'speaker_b', label: '角色 B', preset_id: 'preset_speaker_b', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确，关键字有重音；保持角色感，不要平铺直叙。', sample_text: '这是角色 B 的一句男声对话试听，语气要明确。' },
+    { id: 'narrator', label: '旁白', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
+    { id: 'speaker_a', label: '角色 A', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，反应真实，情绪轻松但有变化；短句要像聊天，不要像念稿。', sample_text: '这是角色 A 的一句女声对话试听，带一点轻松反应。' },
+    { id: 'speaker_b', label: '角色 B', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确，关键字有重音；保持角色感，不要平铺直叙。', sample_text: '这是角色 B 的一句男声对话试听，语气要明确。' },
   ],
   glossary_terms: [],
   banned_words: [],
@@ -81,11 +76,6 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
 function normalizeId(value: unknown): number | null {
   const id = Number(value)
   return Number.isFinite(id) && id > 0 ? id : null
-}
-
-/** 查找新版默认音色预设，供旧默认提示词迁移使用 */
-function defaultVoicePresetById(id: string): AutomationPreferences['voice_presets'][number] | undefined {
-  return DEFAULT_AUTOMATION_PREFERENCES.voice_presets.find((preset) => preset.id === id)
 }
 
 /** 查找新版默认说话人，供旧默认提示词迁移使用 */
@@ -112,15 +102,18 @@ function hasLegacyDefaultVoiceStylePrompts(value: unknown): boolean {
   })
 }
 
-/** 规范说话人音色映射，避免空标签或空音色进入自动化请求 */
-function normalizeVoiceSpeakers(value: unknown, presets: AutomationPreferences['voice_presets']): AutomationPreferences['voice_speakers'] {
+/** 规范说话人音色映射，避免空标签或空音色进入自动化请求；兼容旧 preset 数据迁移 */
+function normalizeVoiceSpeakers(value: unknown, legacyPresets?: unknown[]): AutomationPreferences['voice_speakers'] {
   const raw = Array.isArray(value) ? value : DEFAULT_AUTOMATION_PREFERENCES.voice_speakers
+  // 旧版 voice_presets 数据，用于将 preset_id 引用的音色信息内联到 speaker
+  const presetList = Array.isArray(legacyPresets) ? legacyPresets : []
   const speakers = raw
     .map((item, index) => {
       const data = item && typeof item === 'object' ? item as Record<string, unknown> : {}
       const label = String(data.label || '').trim()
       const presetId = String(data.preset_id || '').trim()
-      const preset = presets.find((candidate) => candidate.id === presetId)
+      // 从旧预设中查找对应音色，用于兼容迁移
+      const preset = presetList.find((p: any) => p && p.id === presetId) as Record<string, unknown> | undefined
       const voice = String(data.voice || preset?.voice || '').trim()
       if (!label || !voice) return null
       const id = String(data.id || `speaker_${index + 1}`)
@@ -128,37 +121,13 @@ function normalizeVoiceSpeakers(value: unknown, presets: AutomationPreferences['
       return {
         id,
         label,
-        preset_id: presetId || preset?.id || '',
         voice,
-        style_prompt: migrateLegacyVoiceStylePrompt(id, String(data.style_prompt || preset?.style_prompt || ''), defaultSpeaker?.style_prompt || preset?.style_prompt || ''),
+        style_prompt: migrateLegacyVoiceStylePrompt(id, String(data.style_prompt || preset?.style_prompt || ''), defaultSpeaker?.style_prompt || (preset?.style_prompt as string) || ''),
         sample_text: String(data.sample_text || '').trim() || `${label} 的配音试听。`,
       }
     })
     .filter(Boolean) as AutomationPreferences['voice_speakers']
   return speakers.length > 0 ? speakers : DEFAULT_AUTOMATION_PREFERENCES.voice_speakers
-}
-
-/** 规范音色预设，支持用户保存自定义 voice id 和风格提示 */
-function normalizeVoicePresets(value: unknown): AutomationPreferences['voice_presets'] {
-  const raw = Array.isArray(value) ? value : DEFAULT_AUTOMATION_PREFERENCES.voice_presets
-  const presets = raw
-    .map((item, index) => {
-      const data = item && typeof item === 'object' ? item as Record<string, unknown> : {}
-      const voice = String(data.voice || '').trim()
-      if (!voice) return null
-      const name = String(data.name || '').trim() || `音色 ${index + 1}`
-      const id = String(data.id || `voice_preset_${index + 1}`)
-      const defaultPreset = defaultVoicePresetById(id)
-      return {
-        id,
-        name,
-        voice,
-        style_prompt: migrateLegacyVoiceStylePrompt(id, String(data.style_prompt || ''), defaultPreset?.style_prompt || ''),
-        sample_text: String(data.sample_text || '').trim() || `${name} 的配音试听。`,
-      }
-    })
-    .filter(Boolean) as AutomationPreferences['voice_presets']
-  return presets.length > 0 ? presets : DEFAULT_AUTOMATION_PREFERENCES.voice_presets
 }
 
 /** 规范术语字库，空来源词不保存 */
@@ -257,8 +226,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const voiceMode = !voiceModeWasMigrated && normalizedVoiceMode === 'batched'
       ? 'grouped'
       : normalizedVoiceMode
-    const voicePresets = normalizeVoicePresets(parsed.voice_presets)
-    const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, voicePresets)
+    const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, parsed.voice_presets)
     const shouldPersistVoiceMigration = hasLegacyDefaultVoiceStylePrompts(parsed.voice_presets) || hasLegacyDefaultVoiceStylePrompts(parsed.voice_speakers)
     const preferences = {
       ...DEFAULT_AUTOMATION_PREFERENCES,
@@ -287,7 +255,6 @@ export function loadAutomationPreferences(): AutomationPreferences {
       voice_group_max_seconds: Math.min(30, Math.max(1, Number(parsed.voice_group_max_seconds ?? DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds) || DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds)),
       voice_group_gap_ms: normalizeVoiceNumber(parsed.voice_group_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_group_gap_ms, 0, 5000),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
-      voice_presets: voicePresets,
       voice_speakers: voiceSpeakers,
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),
       banned_words: normalizeBannedWords(parsed.banned_words),
