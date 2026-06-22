@@ -2240,13 +2240,13 @@ class AutomationJobTests(unittest.TestCase):
         ]
         voice_timeline = [
             {"start_ms": 0, "original_start_ms": 0, "duration_ms": 500, "source_duration_ms": 900, "audio_end_ms": 900},
-            {"start_ms": 1060, "original_start_ms": 600, "duration_ms": 500, "source_duration_ms": 300, "audio_end_ms": 1360},
+            {"start_ms": 1200, "original_start_ms": 600, "duration_ms": 500, "source_duration_ms": 300, "audio_end_ms": 1500},
         ]
 
         synced = _sync_subtitle_entries_to_voice_timeline(entries, voice_timeline)
 
-        self.assertEqual(synced[1]["start"], "00:00:01,060")
-        self.assertEqual(synced[1]["end"], "00:00:01,480")
+        self.assertEqual(synced[1]["start"], "00:00:01,200")
+        self.assertEqual(synced[1]["end"], "00:00:01,620")
 
     def test_combine_original_and_translated_entries_for_double_line_display(self):
         """双行翻译显示用译文加原文，但不改变译文时间轴"""

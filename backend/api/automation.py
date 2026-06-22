@@ -172,7 +172,7 @@ class AutomationRunRequest(BaseModel):
     voice_batch_size: int = 16
     voice_batch_chars: int = 1800
     voice_concurrency: int = 2
-    voice_min_gap_ms: int = 160
+    voice_min_gap_ms: int = 300
     voice_group_size: int = 6
     voice_group_chars: int = 500
     voice_group_max_seconds: float = 12.0
@@ -2942,7 +2942,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings["voice_batch_size"] = max(1, min(80, int(request.voice_batch_size or settings.get("voice_batch_size") or 16)))
             settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
-            settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 160)))
+            settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 300)))
             settings["voice_group_size"] = max(1, min(12, int(request.voice_group_size or settings.get("voice_group_size") or 6)))
             settings["voice_group_chars"] = max(80, min(2000, int(request.voice_group_chars or settings.get("voice_group_chars") or 500)))
             settings["voice_group_max_seconds"] = max(1.0, min(30.0, float(request.voice_group_max_seconds or settings.get("voice_group_max_seconds") or 12.0)))

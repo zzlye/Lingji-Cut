@@ -219,7 +219,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(metadata["segments"][0]["start_ms"], 1000)
         self.assertEqual(metadata["segments"][0]["duration_ms"], 1200)
         self.assertEqual(metadata["segments"][0]["source_duration_ms"], 1420)
-        self.assertIn("目标时长约 1.2 秒", generated_settings[0]["style_prompt"])
+        self.assertIn("参考时长约 1.2 秒", generated_settings[0]["style_prompt"])
 
     def test_batched_voice_chunks_segments_without_merging_text(self):
         """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
@@ -337,7 +337,55 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn({"text": "第一句，第二句", "speed": "1.25"}, generated_pairs)
         self.assertIn({"text": "第一句", "speed": "1.0"}, generated_pairs)
         self.assertIn({"text": "第二句", "speed": "1.0"}, generated_pairs)
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 860])
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 1000])
+        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
+
+    def test_grouped_timed_voice_splits_slightly_overlong_group(self):
+        """多句分组只要超过时间窗也要拆分，避免组尾压住下一组"""
+        output_audio = os.path.join(self.temp_dir, "grouped_strict_voice.wav")
+        generated: list[dict[str, str]] = []
+        mixed_items: list[dict] = []
+
+        async def fake_generate_voice(text: str, output_path: str, settings=None, **_kwargs):
+            generated.append({"text": text, "speed": str((settings or {}).get("speed"))})
+            with open(output_path, "wb") as file:
+                file.write(b"group")
+            return output_path
+
+        def fake_duration(path: str):
+            return 1.7 if "_try" in path and "_a_" not in path and "_b_" not in path else 0.7
+
+        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
+            mixed_items.extend(timed_audio_paths)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+        ):
+            asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
+                segments=[
+                    {"start_ms": 0, "end_ms": 800, "text": "第一句"},
+                    {"start_ms": 800, "end_ms": 1600, "text": "第二句"},
+                ],
+                output_path=output_audio,
+                voice="alloy",
+                settings={
+                    "voice_group_size": 6,
+                    "voice_group_chars": 500,
+                    "voice_group_max_seconds": 12,
+                    "voice_group_gap_ms": 800,
+                    "voice_group_max_speed": 1.0,
+                    "voice_group_duration_margin": 1.12,
+                    "voice_concurrency": 1,
+                },
+            ))
+
+        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第一句", "第二句"])
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 1000])
         self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
@@ -388,7 +436,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result_path, output_audio)
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
         self.assertIn("adelay=0:all=1", filter_arg)
-        self.assertIn("adelay=1060:all=1", filter_arg)
+        self.assertIn("adelay=1200:all=1", filter_arg)
 
     def test_timed_voice_mix_can_fit_segment_to_subtitle_window_when_enabled(self):
         """显式开启贴合字幕窗口时才允许变速和裁剪，作为兼容开关保留"""
@@ -411,7 +459,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result_path, output_audio)
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
         self.assertIn("atempo=0.500", filter_arg)
-        self.assertIn("atrim=0:0.960", filter_arg)
+        self.assertNotIn("atrim=", filter_arg)
 
     def test_background_audio_mode_uses_local_ai_no_vocals_before_mix(self):
         """保留背景声模式必须使用本地 AI 分离出的 no_vocals 轨再叠加配音"""

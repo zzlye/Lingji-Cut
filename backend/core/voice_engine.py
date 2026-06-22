@@ -1073,6 +1073,8 @@ class VoiceEngine:
         max_speed = max(1.0, min(2.0, self._float(settings.get("voice_group_max_speed"), 1.25)))
         retry_margin = max(1.0, min(1.5, self._float(settings.get("voice_group_duration_margin"), 1.12)))
         window_ms = max(1, int(group["end_ms"]) - int(group["start_ms"]))
+        # 多句分组一旦超出原时间窗就会压住下一组；单句无法再拆，才允许少量尾音溢出。
+        strict_window_ms = window_ms if len(segments) > 1 else max(1, int(window_ms * retry_margin))
         speed_values = [1.0]
         if max_speed > 1.0 and self._provider_supports_speed(provider_type):
             speed_values.extend([min(max_speed, 1.12), min(max_speed, 1.25), max_speed])
@@ -1103,7 +1105,7 @@ class VoiceEngine:
             duration_ms = int((duration_seconds or 0) * 1000)
             last_path = group_path
             last_duration_ms = duration_ms
-            if duration_ms <= max(1, int(window_ms * retry_margin)):
+            if duration_ms <= strict_window_ms:
                 return [{
                     "path": group_path,
                     "start_ms": int(group["start_ms"]),
