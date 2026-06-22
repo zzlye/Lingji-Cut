@@ -3,10 +3,10 @@
 // 交互重做：渠道/音色/试听露出，生成参数与多说话人收进高级折叠
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react'
-import { Pause, Play, Volume2 } from 'lucide-react'
+import { Pause, Play, Plus, Trash2, Volume2 } from 'lucide-react'
 import { BASE_URL, profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
+import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoicePresetProfile, VoiceSpeakerProfile } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -52,6 +52,21 @@ const BITRATE_OPTIONS: FieldOption[] = ['32000', '64000', '128000', '256000'].ma
 const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
+
+/** 根据预设构造下拉选项 */
+function voicePresetOptions(presets: VoicePresetProfile[]): FieldOption[] {
+  return presets.map((preset) => [preset.id, `${preset.name} · ${preset.voice}`] as FieldOption)
+}
+
+/** 合并音色目录、预设和当前值，避免下拉里丢失自定义 voice id */
+function voiceOptionsWithCustom(voices: VoiceOption[], presets: VoicePresetProfile[], currentVoice: string): FieldOption[] {
+  const options = [
+    ...voices.map((item) => [item.id, `${item.name} · ${item.style}`] as FieldOption),
+    ...presets.map((preset) => [preset.voice, `${preset.name} · ${preset.voice}`] as FieldOption),
+    currentVoice ? [currentVoice, currentVoice] as FieldOption : null,
+  ].filter(Boolean) as FieldOption[]
+  return options.filter((item, index, list) => list.findIndex((candidate) => candidate[0] === item[0]) === index)
+}
 
 /**
  * 配音配置面板
@@ -318,11 +333,44 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setAudioUrl('')
     setNotice({ type: 'info', message: `正在生成 ${speaker.label} 的试听...` })
     try {
-      const result = await voiceApi.preview({ text: speaker.sample_text || `${speaker.label} 的配音试听。`, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: speaker.voice, model: activeModel, settings })
+      const result = await voiceApi.preview({
+        text: speaker.sample_text || `${speaker.label} 的配音试听。`,
+        profile_id: selectedProfileId,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
+        voice: speaker.voice,
+        model: activeModel,
+        settings: { ...settings, style_prompt: speaker.style_prompt || settings.style_prompt },
+      })
       setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: `说话人 "${speaker.label}" 试听已生成。` })
     } catch (error) {
       const message = `说话人试听失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message }); addLog('error', message)
+    } finally { setIsGenerating(false) }
+  }
+
+  const handleVoicePresetPreview = async (preset: VoicePresetProfile) => {
+    if (!profileForm.base_url.trim() || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
+    setIsGenerating(true)
+    setAudioUrl('')
+    setNotice({ type: 'info', message: `正在生成 ${preset.name} 的试听...` })
+    try {
+      const result = await voiceApi.preview({
+        text: preset.sample_text || `${preset.name} 的配音试听。`,
+        profile_id: selectedProfileId,
+        provider_type: profileForm.provider_type,
+        base_url: profileForm.base_url,
+        api_key: profileForm.api_key || undefined,
+        voice: preset.voice,
+        model: activeModel,
+        settings: { ...settings, style_prompt: preset.style_prompt || settings.style_prompt },
+      })
+      setAudioUrl(`${BASE_URL}${result.audio_url}`)
+      setNotice({ type: 'success', message: `音色预设 "${preset.name}" 试听已生成。` })
+    } catch (error) {
+      const message = `音色预设试听失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message }); addLog('error', message)
     } finally { setIsGenerating(false) }
   }
@@ -349,9 +397,91 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const updateSpeaker = (id: string, patch: Partial<VoiceSpeakerProfile>) => {
     setAutomationOptions(saveAutomationPreferences({ voice_speakers: automationOptions.voice_speakers.map((s) => (s.id === id ? { ...s, ...patch } : s)) }))
   }
+
+  const updateVoicePreset = (id: string, patch: Partial<VoicePresetProfile>) => {
+    const presets = automationOptions.voice_presets.map((preset) => (preset.id === id ? { ...preset, ...patch } : preset))
+    setAutomationOptions(saveAutomationPreferences({
+      voice_presets: presets,
+      voice_speakers: automationOptions.voice_speakers.map((speaker) => (
+        speaker.preset_id === id
+          ? {
+              ...speaker,
+              voice: patch.voice ?? speaker.voice,
+              style_prompt: patch.style_prompt ?? speaker.style_prompt,
+              sample_text: patch.sample_text ?? speaker.sample_text,
+            }
+          : speaker
+      )),
+    }))
+  }
+
+  const addVoicePreset = () => {
+    const nextIndex = automationOptions.voice_presets.length + 1
+    const preset: VoicePresetProfile = {
+      id: `voice_preset_${Date.now()}`,
+      name: `音色 ${nextIndex}`,
+      voice: selectedVoice || 'Kore',
+      style_prompt: settings.style_prompt || '',
+      sample_text: previewText || DEFAULT_PREVIEW_TEXT,
+    }
+    setAutomationOptions(saveAutomationPreferences({ voice_presets: [...automationOptions.voice_presets, preset] }))
+    setNotice({ type: 'success', message: `已添加音色预设：${preset.name}` })
+  }
+
+  const saveCurrentAsVoicePreset = () => {
+    const nextIndex = automationOptions.voice_presets.length + 1
+    const preset: VoicePresetProfile = {
+      id: `voice_preset_${Date.now()}`,
+      name: `当前音色 ${nextIndex}`,
+      voice: selectedVoice,
+      style_prompt: settings.style_prompt,
+      sample_text: previewText || DEFAULT_PREVIEW_TEXT,
+    }
+    setAutomationOptions(saveAutomationPreferences({ voice_presets: [...automationOptions.voice_presets, preset] }))
+    setNotice({ type: 'success', message: `已把当前音色保存为预设：${preset.name}` })
+  }
+
+  const removeVoicePreset = (id: string) => {
+    if (automationOptions.voice_presets.length <= 1) {
+      setNotice({ type: 'warning', message: '至少保留一个音色预设' })
+      return
+    }
+    const preset = automationOptions.voice_presets.find((item) => item.id === id)
+    const nextPresets = automationOptions.voice_presets.filter((item) => item.id !== id)
+    const fallback = nextPresets[0]
+    setAutomationOptions(saveAutomationPreferences({
+      voice_presets: nextPresets,
+      voice_speakers: automationOptions.voice_speakers.map((speaker) => (
+        speaker.preset_id === id
+          ? { ...speaker, preset_id: fallback.id, voice: fallback.voice, style_prompt: fallback.style_prompt, sample_text: speaker.sample_text || fallback.sample_text }
+          : speaker
+      )),
+    }))
+    setNotice({ type: 'info', message: `已删除音色预设：${preset?.name || id}` })
+  }
+
+  const applyPresetToSpeaker = (speakerId: string, presetId: string) => {
+    const preset = automationOptions.voice_presets.find((item) => item.id === presetId)
+    if (!preset) return
+    updateSpeaker(speakerId, {
+      preset_id: preset.id,
+      voice: preset.voice,
+      style_prompt: preset.style_prompt,
+      sample_text: preset.sample_text,
+    })
+  }
+
   const addSpeaker = () => {
     const nextIndex = automationOptions.voice_speakers.length + 1
-    const nextSpeaker: VoiceSpeakerProfile = { id: `speaker_${Date.now()}`, label: `角色 ${nextIndex}`, voice: selectedVoice, sample_text: `这是角色 ${nextIndex} 的一句对话试听。` }
+    const preset = automationOptions.voice_presets[(nextIndex - 1) % Math.max(automationOptions.voice_presets.length, 1)]
+    const nextSpeaker: VoiceSpeakerProfile = {
+      id: `speaker_${Date.now()}`,
+      label: `角色 ${nextIndex}`,
+      preset_id: preset?.id || '',
+      voice: preset?.voice || selectedVoice,
+      style_prompt: preset?.style_prompt || '',
+      sample_text: preset?.sample_text || `这是角色 ${nextIndex} 的一句对话试听。`,
+    }
     setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: true, voice_speakers: [...automationOptions.voice_speakers, nextSpeaker] }))
   }
   const removeSpeaker = (id: string) => {
@@ -441,6 +571,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={handleLocalPreview} disabled={!previewText.trim()}>{isLocalSpeaking ? '停止本地试听' : '本地试听'}</Button>
             <Button onClick={handlePreview} disabled={isGenerating || !previewText.trim()}>{isGenerating ? '生成中…' : '生成试听'}</Button>
+            <Button variant="outline" onClick={saveCurrentAsVoicePreset} disabled={!selectedVoice.trim()}>保存为预设</Button>
             <span className="text-xs text-muted-foreground">当前音色：{selectedVoiceLabel}</span>
           </div>
           {audioUrl && (
@@ -457,6 +588,35 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               onPlayingChange={setIsAudioPlaying}
             />
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-sm">音色预设库</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex justify-end">
+            <Button variant="outline" size="sm" onClick={addVoicePreset}>
+              <Plus className="mr-1 size-4" />
+              添加音色
+            </Button>
+          </div>
+          {automationOptions.voice_presets.map((preset) => (
+            <div key={preset.id} className="space-y-3 rounded-lg border bg-card p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <TextField label="预设名称" value={preset.name} onChange={(v) => updateVoicePreset(preset.id, { name: v })} />
+                <TextField label="voice id" value={preset.voice} placeholder="例如 Kore、Puck、nova" onChange={(v) => updateVoicePreset(preset.id, { voice: v })} />
+              </div>
+              <TextareaField label="风格提示" value={preset.style_prompt} rows={2} placeholder="例如：用年轻自然的女声，语气轻松，适合对话。" onChange={(v) => updateVoicePreset(preset.id, { style_prompt: v })} />
+              <TextField label="试听文本" value={preset.sample_text} onChange={(v) => updateVoicePreset(preset.id, { sample_text: v })} />
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={() => handleVoicePresetPreview(preset)} disabled={isGenerating}>试听</Button>
+                <Button variant="outline" size="sm" className="text-destructive" onClick={() => removeVoicePreset(preset.id)} disabled={automationOptions.voice_presets.length <= 1}>
+                  <Trash2 className="mr-1 size-4" />
+                  删除
+                </Button>
+              </div>
+            </div>
+          ))}
         </CardContent>
       </Card>
 
@@ -518,12 +678,19 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <div className="grid gap-2 sm:grid-cols-2">
                   <TextField label="说话人标签" value={speaker.label} onChange={(v) => updateSpeaker(speaker.id, { label: v })} />
                   <SelectField
-                    label="音色"
+                    label="音色预设"
+                    value={speaker.preset_id || ''}
+                    options={[['', '不绑定预设'], ...voicePresetOptions(automationOptions.voice_presets)]}
+                    onChange={(v) => v ? applyPresetToSpeaker(speaker.id, v) : updateSpeaker(speaker.id, { preset_id: '' })}
+                  />
+                  <SelectField
+                    label="voice id"
                     value={speaker.voice}
-                    options={[...voices.map((item) => [item.id, `${item.name} · ${item.style}`] as FieldOption), [speaker.voice, speaker.voice] as FieldOption].filter((item, index, list) => list.findIndex((t) => t[0] === item[0]) === index)}
-                    onChange={(v) => updateSpeaker(speaker.id, { voice: v })}
+                    options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, speaker.voice)}
+                    onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })}
                   />
                 </div>
+                <TextareaField label="风格提示" value={speaker.style_prompt || ''} rows={2} onChange={(v) => updateSpeaker(speaker.id, { style_prompt: v, preset_id: '' })} />
                 <TextField label="试听文本" value={speaker.sample_text} onChange={(v) => updateSpeaker(speaker.id, { sample_text: v })} />
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => handleSpeakerPreview(speaker)} disabled={isGenerating}>试听</Button>

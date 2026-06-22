@@ -155,6 +155,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
             batch_size=2,
             max_chars=100,
             voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
+            style_selector=None,
             default_voice="alloy",
         )
 
@@ -162,6 +163,25 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([batch["voice"] for batch in batches], ["alloy", "nova", "nova"])
         self.assertEqual(batches[0]["start_ms"], 0)
         self.assertEqual(batches[1]["start_ms"], 1000)
+
+    def test_batched_voice_splits_when_style_prompt_changes(self):
+        """批量配音遇到不同角色风格提示时会切批，避免风格串到别的角色"""
+        segments = [
+            {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
+            {"start_ms": 500, "end_ms": 1000, "text": "第二句", "speaker": "角色A"},
+        ]
+
+        batches = self.voice_engine._batch_timed_segments(
+            segments,
+            batch_size=8,
+            max_chars=100,
+            voice_selector=lambda _segment: "Kore",
+            style_selector=lambda segment: "解说风格" if segment.get("speaker") == "旁白" else "对话风格",
+            default_voice="Kore",
+        )
+
+        self.assertEqual([batch["count"] for batch in batches], [1, 1])
+        self.assertEqual([batch["style_prompt"] for batch in batches], ["解说风格", "对话风格"])
 
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _build_auto_style_selector, _build_auto_voice_selector, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -2406,13 +2406,16 @@ class AutomationJobTests(unittest.TestCase):
                 self.segments: list[dict] = []
                 self.settings: dict = {}
                 self.voices: list[str] = []
+                self.styles: list[str] = []
 
-            async def generate_batched_timed_voice_track(self, segments, output_path, voice_selector=None, settings=None, progress_callback=None, **_kwargs):
+            async def generate_batched_timed_voice_track(self, segments, output_path, voice_selector=None, style_selector=None, settings=None, progress_callback=None, **_kwargs):
                 """模拟批量分段配音"""
                 self.segments = segments
                 self.settings = settings or {}
                 if voice_selector:
                     self.voices = [voice_selector(segment) for segment in segments]
+                if style_selector:
+                    self.styles = [style_selector(segment) for segment in segments]
                 if progress_callback:
                     progress_callback(100)
                 with open(output_path, "wb") as file:
@@ -2493,6 +2496,7 @@ class AutomationJobTests(unittest.TestCase):
                         output_format="mp4",
                         multi_speaker_enabled=True,
                         speaker_voice_map={"旁白": "alloy", "角色 A": "nova"},
+                        speaker_voice_styles={"旁白": "解说风格", "角色 A": "对话风格"},
                         voice_batch_size=8,
                         voice_batch_chars=900,
                         voice_concurrency=3,
@@ -2504,6 +2508,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(stage_by_key["voice"].status, "completed")
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["第一句", "第二句"])
         self.assertEqual(voice_engine.voices, ["alloy", "nova"])
+        self.assertEqual(voice_engine.styles, ["解说风格", "对话风格"])
         self.assertEqual(voice_engine.settings["voice_batch_size"], 8)
         self.assertEqual(voice_engine.settings["voice_batch_chars"], 900)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
@@ -3136,6 +3141,18 @@ Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,中文译文
 
         self.assertEqual(_voice_for_segment({"speaker": "角色 A"}, "onyx", speaker_map), "nova")
         self.assertEqual(_voice_for_segment({"speaker": "角色 B"}, "onyx", speaker_map), "onyx")
+
+    def test_auto_voice_selector_keeps_explicit_default_voice_mapping(self):
+        """自动多人音色不会把明确绑定默认音色的角色当成未知角色轮换"""
+        speaker_map = {"旁白": "alloy", "角色 A": "nova", "角色 B": "onyx"}
+        style_map = {"旁白": "解说风格", "角色 A": "年轻对话", "角色 B": "沉稳对话"}
+        voice_selector = _build_auto_voice_selector("alloy", speaker_map)
+        style_selector = _build_auto_style_selector(style_map, speaker_map, "alloy")
+
+        self.assertEqual(voice_selector({"speaker": "旁白"}), "alloy")
+        self.assertEqual(style_selector({"speaker": "旁白"}), "解说风格")
+        self.assertEqual(voice_selector({"speaker": "路人甲"}), "nova")
+        self.assertEqual(style_selector({"speaker": "路人甲"}), "年轻对话")
 
     def test_glossary_terms_and_banned_words(self):
         """术语字库会替换固定写法，禁词检测返回去重命中"""

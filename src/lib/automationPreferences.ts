@@ -41,10 +41,15 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   voice_batch_chars: 1800,
   voice_concurrency: 2,
   multi_speaker_enabled: false,
+  voice_presets: [
+    { id: 'preset_narrator', name: '旁白', voice: 'alloy', style_prompt: '用自然解说口吻，语气稳定，节奏清晰。', sample_text: '旁白负责解释画面和推进节奏。' },
+    { id: 'preset_speaker_a', name: '角色 A', voice: 'nova', style_prompt: '用年轻自然的对话口吻，表达轻松。', sample_text: '这是角色 A 的一句对话试听。' },
+    { id: 'preset_speaker_b', name: '角色 B', voice: 'onyx', style_prompt: '用沉稳有辨识度的对话口吻，语气明确。', sample_text: '这是角色 B 的一句对话试听。' },
+  ],
   voice_speakers: [
-    { id: 'narrator', label: '旁白', voice: 'alloy', sample_text: '旁白负责解释画面和推进节奏。' },
-    { id: 'speaker_a', label: '角色 A', voice: 'nova', sample_text: '这是角色 A 的一句对话试听。' },
-    { id: 'speaker_b', label: '角色 B', voice: 'onyx', sample_text: '这是角色 B 的一句对话试听。' },
+    { id: 'narrator', label: '旁白', preset_id: 'preset_narrator', voice: 'alloy', style_prompt: '用自然解说口吻，语气稳定，节奏清晰。', sample_text: '旁白负责解释画面和推进节奏。' },
+    { id: 'speaker_a', label: '角色 A', preset_id: 'preset_speaker_a', voice: 'nova', style_prompt: '用年轻自然的对话口吻，表达轻松。', sample_text: '这是角色 A 的一句对话试听。' },
+    { id: 'speaker_b', label: '角色 B', preset_id: 'preset_speaker_b', voice: 'onyx', style_prompt: '用沉稳有辨识度的对话口吻，语气明确。', sample_text: '这是角色 B 的一句对话试听。' },
   ],
   glossary_terms: [],
   banned_words: [],
@@ -58,23 +63,48 @@ function normalizeId(value: unknown): number | null {
 }
 
 /** 规范说话人音色映射，避免空标签或空音色进入自动化请求 */
-function normalizeVoiceSpeakers(value: unknown): AutomationPreferences['voice_speakers'] {
+function normalizeVoiceSpeakers(value: unknown, presets: AutomationPreferences['voice_presets']): AutomationPreferences['voice_speakers'] {
   const raw = Array.isArray(value) ? value : DEFAULT_AUTOMATION_PREFERENCES.voice_speakers
   const speakers = raw
     .map((item, index) => {
       const data = item && typeof item === 'object' ? item as Record<string, unknown> : {}
       const label = String(data.label || '').trim()
-      const voice = String(data.voice || '').trim()
+      const presetId = String(data.preset_id || '').trim()
+      const preset = presets.find((candidate) => candidate.id === presetId)
+      const voice = String(data.voice || preset?.voice || '').trim()
       if (!label || !voice) return null
       return {
         id: String(data.id || `speaker_${index + 1}`),
         label,
+        preset_id: presetId || preset?.id || '',
         voice,
+        style_prompt: String(data.style_prompt || preset?.style_prompt || '').trim(),
         sample_text: String(data.sample_text || '').trim() || `${label} 的配音试听。`,
       }
     })
     .filter(Boolean) as AutomationPreferences['voice_speakers']
   return speakers.length > 0 ? speakers : DEFAULT_AUTOMATION_PREFERENCES.voice_speakers
+}
+
+/** 规范音色预设，支持用户保存自定义 voice id 和风格提示 */
+function normalizeVoicePresets(value: unknown): AutomationPreferences['voice_presets'] {
+  const raw = Array.isArray(value) ? value : DEFAULT_AUTOMATION_PREFERENCES.voice_presets
+  const presets = raw
+    .map((item, index) => {
+      const data = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+      const voice = String(data.voice || '').trim()
+      if (!voice) return null
+      const name = String(data.name || '').trim() || `音色 ${index + 1}`
+      return {
+        id: String(data.id || `voice_preset_${index + 1}`),
+        name,
+        voice,
+        style_prompt: String(data.style_prompt || '').trim(),
+        sample_text: String(data.sample_text || '').trim() || `${name} 的配音试听。`,
+      }
+    })
+    .filter(Boolean) as AutomationPreferences['voice_presets']
+  return presets.length > 0 ? presets : DEFAULT_AUTOMATION_PREFERENCES.voice_presets
 }
 
 /** 规范术语字库，空来源词不保存 */
@@ -155,6 +185,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     }
     const parsed = saved ? JSON.parse(saved) : {}
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
+    const voicePresets = normalizeVoicePresets(parsed.voice_presets)
     return {
       ...DEFAULT_AUTOMATION_PREFERENCES,
       ...parsed,
@@ -176,7 +207,8 @@ export function loadAutomationPreferences(): AutomationPreferences {
       voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
       voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
-      voice_speakers: normalizeVoiceSpeakers(parsed.voice_speakers),
+      voice_presets: voicePresets,
+      voice_speakers: normalizeVoiceSpeakers(parsed.voice_speakers, voicePresets),
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),
       banned_words: normalizeBannedWords(parsed.banned_words),
       banned_word_action: parsed.banned_word_action === 'block' ? 'block' : 'warn',

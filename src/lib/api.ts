@@ -489,6 +489,7 @@ export type AutomationStartParams = {
   voice_concurrency?: number
   multi_speaker_enabled?: boolean
   speaker_voice_map?: Record<string, string>
+  speaker_voice_styles?: Record<string, string>
   glossary_terms?: import('@/types').GlossaryTerm[]
   banned_words?: string[]
   banned_word_action?: 'warn' | 'block'

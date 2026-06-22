@@ -153,6 +153,7 @@ class VoiceEngine:
         voice: str = "alloy",
         # 多人对话配音时按批次首段的说话人挑选音色；批次会避免跨音色合并。
         voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         api_key: str = "",
         base_url: str = "",
         model: str = "",
@@ -173,6 +174,7 @@ class VoiceEngine:
             batch_size=max(1, min(80, self._int(options.get("voice_batch_size"), 16))),
             max_chars=max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800))),
             voice_selector=voice_selector,
+            style_selector=style_selector,
             default_voice=voice,
         )
         if not batches:
@@ -196,7 +198,7 @@ class VoiceEngine:
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=options,
+                    settings=self._settings_with_style_prompt(options, str(batch.get("style_prompt") or "")),
                 )
                 return {
                     "path": batch_path,
@@ -228,6 +230,7 @@ class VoiceEngine:
         voice: str = "alloy",
         # 多人对话配音时按字幕分段的说话人挑选音色；为 None 时所有分段使用默认音色。
         voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         api_key: str = "",
         base_url: str = "",
         model: str = "",
@@ -255,6 +258,7 @@ class VoiceEngine:
                 segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
                 # 多人对话时按字幕分段里的说话人选择音色；未匹配则使用默认音色。
                 segment_voice = voice_selector(segment) if voice_selector else voice
+                segment_style = style_selector(segment) if style_selector else ""
                 await self.generate_voice(
                     text=str(segment["text"]),
                     output_path=segment_path,
@@ -263,7 +267,7 @@ class VoiceEngine:
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=options,
+                    settings=self._settings_with_style_prompt(options, segment_style),
                 )
                 timed_audio_paths.append({
                     "path": segment_path,
@@ -713,38 +717,44 @@ class VoiceEngine:
         batch_size: int,
         max_chars: int,
         voice_selector: Optional[Callable[[dict[str, Any]], str]],
+        style_selector: Optional[Callable[[dict[str, Any]], str]],
         default_voice: str,
     ) -> list[dict[str, Any]]:
-        """把相邻字幕合并成批次；不同音色不跨批，避免多人对话串音"""
+        """把相邻字幕合并成批次；不同音色或风格不跨批，避免多人对话串音"""
         batches: list[dict[str, Any]] = []
         current: list[dict[str, Any]] = []
         current_voice = ""
+        current_style = ""
         current_chars = 0
         safe_batch_size = max(1, batch_size)
         safe_max_chars = max(100, max_chars)
 
         def flush() -> None:
             """提交当前批次"""
-            nonlocal current, current_voice, current_chars
+            nonlocal current, current_voice, current_style, current_chars
             if not current:
                 return
             batches.append({
                 "text": "\n".join(str(item["text"]) for item in current if str(item.get("text") or "").strip()),
                 "voice": current_voice or default_voice,
+                "style_prompt": current_style,
                 "start_ms": int(current[0]["start_ms"]),
                 "end_ms": int(current[-1]["end_ms"]),
                 "count": len(current),
             })
             current = []
             current_voice = ""
+            current_style = ""
             current_chars = 0
 
         for segment in segments:
             segment_voice = voice_selector(segment) if voice_selector else default_voice
             segment_voice = str(segment_voice or default_voice)
+            segment_style = str(style_selector(segment) if style_selector else "").strip()
             text_len = len(str(segment.get("text") or ""))
             should_flush = bool(current) and (
                 segment_voice != current_voice
+                or segment_style != current_style
                 or len(current) >= safe_batch_size
                 or current_chars + text_len > safe_max_chars
             )
@@ -752,10 +762,20 @@ class VoiceEngine:
                 flush()
             current.append(segment)
             current_voice = segment_voice
+            current_style = segment_style
             current_chars += text_len
 
         flush()
         return [batch for batch in batches if str(batch.get("text") or "").strip()]
+
+    def _settings_with_style_prompt(self, settings: dict[str, Any], style_prompt: str) -> dict[str, Any]:
+        """按分段覆盖风格提示；没有角色风格时复用全局设置"""
+        normalized_style = str(style_prompt or "").strip()
+        if not normalized_style:
+            return settings
+        merged = dict(settings)
+        merged["style_prompt"] = normalized_style
+        return merged
 
     def _normalize_timed_audio_paths(self, timed_audio_paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """清理带时间轴的音频路径"""

@@ -151,6 +151,7 @@ class AutomationRunRequest(BaseModel):
     voice_concurrency: int = 2
     multi_speaker_enabled: bool = False
     speaker_voice_map: dict[str, str] = Field(default_factory=dict)
+    speaker_voice_styles: dict[str, str] = Field(default_factory=dict)
     glossary_terms: list[dict[str, Any]] = Field(default_factory=list)
     banned_words: list[str] = Field(default_factory=list)
     banned_word_action: str = "warn"
@@ -1834,6 +1835,28 @@ def _voice_for_segment(segment: dict[str, Any], default_voice: str, speaker_voic
     return default_voice
 
 
+def _speaker_value_for_segment(segment: dict[str, Any], value_map: dict[str, str]) -> str:
+    """按说话人标签读取映射值，用于角色风格提示等附加参数"""
+    speaker = str(segment.get("speaker") or "").strip()
+    if not speaker:
+        return ""
+    direct = value_map.get(speaker) or value_map.get(speaker.lower())
+    if direct:
+        return str(direct).strip()
+    speaker_key = _normalize_speaker_key(speaker)
+    normalized_map = {
+        _normalize_speaker_key(label): value
+        for label, value in value_map.items()
+        if _normalize_speaker_key(label) and str(value or "").strip()
+    }
+    if speaker_key in normalized_map:
+        return str(normalized_map[speaker_key]).strip()
+    best_label = max(normalized_map, key=lambda label: SequenceMatcher(None, speaker_key, label).ratio(), default="")
+    if best_label and SequenceMatcher(None, speaker_key, best_label).ratio() >= 0.82:
+        return str(normalized_map[best_label]).strip()
+    return ""
+
+
 def _segments_have_speakers(segments: list[dict[str, Any]]) -> bool:
     """判断字幕分段里是否出现说话人标签"""
     return any(str(segment.get("speaker") or "").strip() for segment in segments)
@@ -1855,8 +1878,8 @@ def _build_auto_voice_selector(default_voice: str, speaker_voice_map: dict[str, 
         speaker = str(segment.get("speaker") or "").strip()
         if not speaker:
             return fallback_voice
-        mapped_voice = _voice_for_segment(segment, fallback_voice, speaker_voice_map)
-        if mapped_voice != fallback_voice:
+        mapped_voice = _speaker_value_for_segment(segment, speaker_voice_map)
+        if mapped_voice:
             return mapped_voice
         speaker_key = _normalize_speaker_key(speaker)
         if not speaker_key:
@@ -1866,6 +1889,47 @@ def _build_auto_voice_selector(default_voice: str, speaker_voice_map: dict[str, 
         return assigned[speaker_key] or fallback_voice
 
     return select_voice
+
+
+def _build_auto_style_selector(speaker_style_map: dict[str, str], speaker_voice_map: dict[str, str], default_voice: str) -> Callable[[dict[str, Any]], str]:
+    """构造按说话人标签选择风格提示的函数，未知角色按音色池同步轮换"""
+    fallback_voice = str(default_voice or "alloy").strip() or "alloy"
+    configured_voices = [
+        str(voice or "").strip()
+        for voice in speaker_voice_map.values()
+        if str(voice or "").strip()
+    ]
+    voice_pool = list(dict.fromkeys([voice for voice in configured_voices if voice != fallback_voice] + [fallback_voice]))
+    style_by_voice: dict[str, str] = {}
+    for label, mapped_voice in speaker_voice_map.items():
+        voice = str(mapped_voice or "").strip()
+        if not voice or voice in style_by_voice:
+            continue
+        style = _speaker_value_for_segment({"speaker": label}, speaker_style_map)
+        if style:
+            style_by_voice[voice] = style
+    style_pool = [style_by_voice.get(voice, "") for voice in voice_pool]
+    assigned: dict[str, str] = {}
+
+    def select_style(segment: dict[str, Any]) -> str:
+        """返回当前字幕分段对应的风格提示"""
+        speaker = str(segment.get("speaker") or "").strip()
+        if not speaker:
+            return ""
+        mapped_style = _speaker_value_for_segment(segment, speaker_style_map)
+        if mapped_style:
+            return mapped_style
+        # 明确配置了音色但没有配置风格时，不给它套用别的角色风格。
+        if _speaker_value_for_segment(segment, speaker_voice_map):
+            return ""
+        speaker_key = _normalize_speaker_key(speaker)
+        if not speaker_key:
+            return ""
+        if speaker_key not in assigned:
+            assigned[speaker_key] = style_pool[len(assigned) % len(style_pool)] if style_pool else ""
+        return assigned[speaker_key]
+
+    return select_style
 
 
 def _voice_output_extension(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
@@ -2712,6 +2776,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             has_speakers = _segments_have_speakers(segments)
             should_use_speaker_map = bool(request.multi_speaker_enabled and has_speakers)
             voice_selector = _build_auto_voice_selector(voice, request.speaker_voice_map) if should_use_speaker_map else None
+            style_selector = _build_auto_style_selector(request.speaker_voice_styles, request.speaker_voice_map, voice) if should_use_speaker_map and request.speaker_voice_styles else None
             if voice_mode in {"segmented", "batched"} and segments and not request.voice_text:
                 try:
                     audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_{voice_mode}.{output_ext}")
@@ -2731,6 +2796,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             provider_type=voice_profile.provider_type,
                             voice=voice,
                             voice_selector=voice_selector,
+                            style_selector=style_selector,
                             api_key=api_key,
                             base_url=voice_profile.base_url,
                             model=model,
@@ -2744,6 +2810,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                             provider_type=voice_profile.provider_type,
                             voice=voice,
                             voice_selector=voice_selector,
+                            style_selector=style_selector,
                             api_key=api_key,
                             base_url=voice_profile.base_url,
                             model=model,

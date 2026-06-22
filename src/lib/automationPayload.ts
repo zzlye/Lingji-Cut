@@ -31,6 +31,13 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
         .map((speaker) => [speaker.label.trim(), speaker.voice.trim()]),
     )
     : undefined
+  const speakerVoiceStyles = preferences.enable_voice && preferences.multi_speaker_enabled
+    ? Object.fromEntries(
+      preferences.voice_speakers
+        .filter((speaker) => speaker.label.trim() && (speaker.style_prompt || '').trim())
+        .map((speaker) => [speaker.label.trim(), (speaker.style_prompt || '').trim()]),
+    )
+    : undefined
 
   return {
     url,
@@ -60,6 +67,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     voice_concurrency: preferences.enable_voice ? preferences.voice_concurrency : undefined,
     multi_speaker_enabled: preferences.enable_voice ? preferences.multi_speaker_enabled : undefined,
     speaker_voice_map: speakerVoiceMap,
+    speaker_voice_styles: speakerVoiceStyles,
     glossary_terms: preferences.glossary_terms,
     banned_words: preferences.banned_words,
     banned_word_action: preferences.banned_word_action,

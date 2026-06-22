@@ -316,7 +316,18 @@ export type SubtitleRecognitionMode = 'local' | 'gemini_full' | 'gemini_align'
 export interface VoiceSpeakerProfile {
   id: string
   label: string
+  preset_id?: string
   voice: string
+  style_prompt?: string
+  sample_text: string
+}
+
+/** 配音音色预设 */
+export interface VoicePresetProfile {
+  id: string
+  name: string
+  voice: string
+  style_prompt: string
   sample_text: string
 }
 
@@ -360,6 +371,7 @@ export interface AutomationPreferences {
   voice_batch_chars: number
   voice_concurrency: number
   multi_speaker_enabled: boolean
+  voice_presets: VoicePresetProfile[]
   voice_speakers: VoiceSpeakerProfile[]
   glossary_terms: GlossaryTerm[]
   banned_words: string[]
