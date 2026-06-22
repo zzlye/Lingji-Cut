@@ -185,6 +185,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const { addLog } = useTaskStore()
   const profileRequestRef = useRef(0)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const currentVoiceRef = useRef(voice)
+  const lastXiaomiPresetSyncRef = useRef('')
 
   const activeProvider = profileForm.provider_type
   const activeProviderMeta = VOICE_PROVIDERS.find((p) => p.id === activeProvider) || VOICE_PROVIDERS[0]
@@ -266,15 +268,17 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => { loadProfiles() }, [])
   useEffect(() => { loadVoices(activeProvider, activeModel) }, [activeProvider, activeModel])
+  useEffect(() => { currentVoiceRef.current = voice }, [voice])
 
   useEffect(() => {
     if (isXiaomiVoiceDesign) {
-      const catalogPrompt = decodeXiaomiVoiceDesign(voices.find((item) => item.id.startsWith('voice_design:'))?.id || '')
+      const catalogVoice = voices.find((item) => item.id.startsWith('voice_design:'))?.id || 'voice_design'
+      const catalogPrompt = decodeXiaomiVoiceDesign(catalogVoice)
       setCustomVoice('')
-      setVoice((current) => current.startsWith('voice_design') ? current : (voices.find((item) => item.id.startsWith('voice_design:'))?.id || 'voice_design'))
+      setVoice((current) => current.startsWith('voice_design') ? current : catalogVoice)
       setSettings((current) => {
         if ((current.xiaomi_voice_design_prompt || '').trim()) return current
-        const prompt = decodeXiaomiVoiceDesign(voice) || catalogPrompt
+        const prompt = decodeXiaomiVoiceDesign(currentVoiceRef.current) || catalogPrompt
         return prompt ? { ...current, xiaomi_voice_design_prompt: prompt } : current
       })
     } else if (isXiaomiVoiceClone) {
@@ -282,11 +286,11 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       setVoice((current) => current.startsWith('voice_clone') ? current : 'voice_clone')
       setSettings((current) => {
         if ((current.xiaomi_voice_clone_audio_path || '').trim()) return current
-        const samplePath = decodeXiaomiVoiceClonePath(voice)
+        const samplePath = decodeXiaomiVoiceClonePath(currentVoiceRef.current)
         return samplePath ? { ...current, xiaomi_voice_clone_audio_path: samplePath, xiaomi_voice_clone_audio_name: basenameFromPath(samplePath) } : current
       })
     }
-  }, [isXiaomiVoiceDesign, isXiaomiVoiceClone, voices, voice])
+  }, [isXiaomiVoiceDesign, isXiaomiVoiceClone, voices])
 
   useEffect(() => {
     return () => {
@@ -593,21 +597,26 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     const validVoiceIds = new Set(voices.map((item) => item.id))
     let changed = false
 
+    const markVoiceChange = (currentVoice: string, nextVoice: string) => {
+      if (nextVoice !== currentVoice) changed = true
+      return nextVoice
+    }
+
     const normalizeVoice = (currentVoice: string, label: string, style: string, index: number) => {
       const voiceValue = String(currentVoice || '').trim()
       if (isXiaomiVoiceDesign) {
         if (voiceValue.startsWith('voice_design:')) return voiceValue
-        changed = true
-        return encodeXiaomiVoiceDesign(defaultXiaomiDesignPrompt(label, style, index))
+        return markVoiceChange(voiceValue, encodeXiaomiVoiceDesign(defaultXiaomiDesignPrompt(label, style, index)))
       }
       if (isXiaomiVoiceClone) {
         if (voiceValue.startsWith('voice_clone')) return voiceValue
-        changed = true
-        return 'voice_clone'
+        return markVoiceChange(voiceValue, 'voice_clone')
       }
       if (validVoiceIds.has(voiceValue)) return voiceValue
-      changed = true
-      return defaultXiaomiBuiltinVoice(label, style, index)
+      const preferredVoice = defaultXiaomiBuiltinVoice(label, style, index)
+      // 当前模型的音色目录可能和旧缓存不一致，兜底必须落到已加载目录，避免反复写入同一个无效值。
+      const fallbackVoice = validVoiceIds.has(preferredVoice) ? preferredVoice : (voices[0]?.id || 'mimo_default')
+      return markVoiceChange(voiceValue, fallbackVoice)
     }
 
     const nextPresets = automationOptions.voice_presets.map((preset, index) => ({
@@ -625,6 +634,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           sample_text: speaker.sample_text || preset.sample_text,
         }
         if (nextSpeaker.voice !== speaker.voice || nextSpeaker.style_prompt !== speaker.style_prompt) changed = true
+        if (nextSpeaker.sample_text !== speaker.sample_text) changed = true
         return nextSpeaker
       }
       return {
@@ -638,10 +648,15 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     if (showNotice) setNotice({ type: 'success', message: '已按当前小米模型同步音色预设和多人说话人' })
   }
 
+  const voiceCatalogSignature = voices.map((item) => item.id).join('\u0001')
+
   useEffect(() => {
-    if (!isXiaomiMiMo || voices.length === 0) return
+    if (!isXiaomiMiMo || !voiceCatalogSignature) return
+    const syncKey = `${activeProvider}\u0001${activeModel}\u0001${voiceCatalogSignature}`
+    if (lastXiaomiPresetSyncRef.current === syncKey) return
+    lastXiaomiPresetSyncRef.current = syncKey
     syncXiaomiPresetVoices(false)
-  }, [isXiaomiMiMo, isXiaomiVoiceDesign, isXiaomiVoiceClone, activeModel, voices.length, automationOptions.voice_presets, automationOptions.voice_speakers])
+  }, [isXiaomiMiMo, activeProvider, activeModel, voiceCatalogSignature])
 
   const addVoicePreset = () => {
     const nextIndex = automationOptions.voice_presets.length + 1
