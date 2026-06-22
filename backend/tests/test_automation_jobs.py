@@ -2398,7 +2398,7 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_processor.merge_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
 
     def test_automation_voice_uses_batched_timeline_by_default(self):
-        """一键配音默认按字幕批量生成，减少逐句 TTS 请求"""
+        """一键配音默认按字幕时间轴并发生成，避免配音和字幕漂移"""
         class CapturingVoiceEngine:
             """记录批量配音输入，避免真实调用配音接口"""
 
@@ -2409,7 +2409,7 @@ class AutomationJobTests(unittest.TestCase):
                 self.styles: list[str] = []
 
             async def generate_batched_timed_voice_track(self, segments, output_path, voice_selector=None, style_selector=None, settings=None, progress_callback=None, **_kwargs):
-                """模拟批量分段配音"""
+                """模拟按字幕时间轴并发配音"""
                 self.segments = segments
                 self.settings = settings or {}
                 if voice_selector:
@@ -2423,12 +2423,12 @@ class AutomationJobTests(unittest.TestCase):
                 return output_path
 
             async def generate_timed_voice_track(self, *_args, **_kwargs):
-                """批量模式不应退回逐句分段"""
-                raise AssertionError("批量配音不应调用逐句分段接口")
+                """默认批量模式不应退回串行逐句接口"""
+                raise AssertionError("默认批量配音不应调用串行逐句接口")
 
             async def generate_voice(self, *_args, **_kwargs):
                 """字幕时间轴可用时不应退回整段配音"""
-                raise AssertionError("批量配音不应调用整段接口")
+                raise AssertionError("时间轴配音不应调用整段接口")
 
         with tempfile.TemporaryDirectory(prefix="automation_voice_batched_") as temp_dir:
             downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
@@ -2512,6 +2512,71 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.settings["voice_batch_size"], 8)
         self.assertEqual(voice_engine.settings["voice_batch_chars"], 900)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
+        self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
+        self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 0.25)
+
+    def test_automation_voice_invalid_audio_mode_falls_back_to_mix(self):
+        """一键配音遇到异常音频模式时默认混合原声，避免误静音 BGM 和游戏声音"""
+        with tempfile.TemporaryDirectory(prefix="automation_voice_audio_mode_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=1, platform="youtube", video_id="voice-audio-mode", url="https://example.test/video", title="配音混音")
+            voice_profile = VoiceProviderProfile(
+                id=8,
+                name="配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            task_ids = iter(range(130, 145))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-audio-mode",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation.VoiceEngine", return_value=FakeVoiceEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=True,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                        audio_mode="",
+                        original_volume=2,
+                    ),
+                    FakeDb([]),
+                )
+
+        self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
+        self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 1.0)
 
     def test_automation_voice_failure_stops_for_resume(self):
         """配音重试耗尽后停在配音阶段，不应导出无配音视频"""

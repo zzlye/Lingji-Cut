@@ -111,6 +111,21 @@ def _control_keys(job: Optional[AutomationJobRecord] = None, task: Optional[Down
     return keys
 
 
+def _normalize_audio_mode(value: Any) -> str:
+    """规范配音合成模式，默认保留原视频声音"""
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"mix", "replace"} else "mix"
+
+
+def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
+    """规范原声音量，避免异常参数导致混音失败"""
+    try:
+        volume = float(value)
+    except (TypeError, ValueError):
+        volume = default
+    return max(0.0, min(1.0, volume))
+
+
 def _check_control(db: Session, job: Optional[AutomationJobRecord] = None, task: Optional[DownloadTask] = None) -> None:
     """阶段边界检查暂停/取消请求"""
     if job:
@@ -2924,8 +2939,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             working_video = processor.merge_audio_video(
                 video_path=working_video,
                 audio_path=audio_path,
-                mode=request.audio_mode,
-                volume_ratio=request.original_volume,
+                mode=_normalize_audio_mode(request.audio_mode),
+                volume_ratio=_normalize_original_volume(request.original_volume),
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(80.0, 55.0 + progress * 0.25)),
             )
@@ -4084,8 +4099,8 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
         raise HTTPException(status_code=404, detail="指定的配音文件不存在或格式不支持")
     job_params = _get_job_params(job)
     output_format = str(request.output_format or job_params.get("output_format") or "mp4").strip().lower() or "mp4"
-    audio_mode = str(request.audio_mode or job_params.get("audio_mode") or "mix").strip() or "mix"
-    original_volume = float(request.original_volume if request.original_volume is not None else job_params.get("original_volume") or 0.25)
+    audio_mode = _normalize_audio_mode(request.audio_mode if request.audio_mode is not None else job_params.get("audio_mode"))
+    original_volume = _normalize_original_volume(request.original_volume if request.original_volume is not None else job_params.get("original_volume"))
     export_with_settings = request.export_with_settings if request.export_with_settings is not None else bool(job_params.get("export_with_settings", True))
     export_settings = request.export_settings or (job_params.get("export_settings") if isinstance(job_params.get("export_settings"), dict) else {})
     final_export_preset = build_final_export_preset(export_settings)

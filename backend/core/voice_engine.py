@@ -160,7 +160,7 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """按字幕批次生成配音，减少 TTS 请求次数并保留大致时间轴"""
+        """并发生成逐条字幕配音，再按字幕时间轴混合成完整音轨"""
         normalized_segments = self._normalize_timed_segments(segments)
         if not normalized_segments:
             raise ValueError("没有可生成配音的字幕分段")
@@ -169,50 +169,49 @@ class VoiceEngine:
         audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-        batches = self._batch_timed_segments(
-            normalized_segments,
-            batch_size=max(1, min(80, self._int(options.get("voice_batch_size"), 16))),
-            max_chars=max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800))),
-            voice_selector=voice_selector,
-            style_selector=style_selector,
-            default_voice=voice,
-        )
-        if not batches:
-            raise ValueError("没有可生成配音的字幕批次")
-
+        batch_size = max(1, min(80, self._int(options.get("voice_batch_size"), 16)))
+        max_chars = max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
         semaphore = asyncio.Semaphore(concurrency)
         temp_dir = tempfile.mkdtemp(prefix="voice_batches_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         completed = 0
         timed_audio_paths: list[dict[str, Any]] = []
 
-        async def generate_batch(index: int, batch: dict[str, Any]) -> dict[str, Any]:
-            """生成单个批次音频，外层负责并发调度"""
+        async def generate_segment(index: int, segment: dict[str, Any]) -> dict[str, Any]:
+            """生成单条字幕音频，保留字幕原始起止时间"""
             async with semaphore:
-                batch_path = os.path.join(temp_dir, f"batch_{index:04d}.{audio_format}")
+                segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
+                segment_voice = voice_selector(segment) if voice_selector else voice
+                segment_style = style_selector(segment) if style_selector else ""
                 await self.generate_voice(
-                    text=str(batch["text"]),
-                    output_path=batch_path,
+                    text=str(segment["text"]),
+                    output_path=segment_path,
                     provider_type=provider_type,
-                    voice=str(batch.get("voice") or voice),
+                    voice=str(segment_voice or voice),
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=self._settings_with_style_prompt(options, str(batch.get("style_prompt") or "")),
+                    settings=self._settings_with_style_prompt(options, str(segment_style or "")),
                 )
                 return {
-                    "path": batch_path,
-                    "start_ms": int(batch["start_ms"]),
-                    "duration_ms": max(1, int(batch["end_ms"]) - int(batch["start_ms"])),
+                    "path": segment_path,
+                    "start_ms": int(segment["start_ms"]),
+                    "duration_ms": max(1, int(segment["end_ms"]) - int(segment["start_ms"])),
                 }
 
         try:
-            tasks = [asyncio.create_task(generate_batch(index, batch)) for index, batch in enumerate(batches, 1)]
-            for task in asyncio.as_completed(tasks):
-                timed_audio_paths.append(await task)
-                completed += 1
-                if progress_callback:
-                    progress_callback(10 + completed / max(len(batches), 1) * 75)
+            index_offset = 0
+            for chunk in self._chunk_timed_segments(normalized_segments, batch_size, max_chars):
+                tasks = [
+                    asyncio.create_task(generate_segment(index_offset + index, segment))
+                    for index, segment in enumerate(chunk, 1)
+                ]
+                for task in asyncio.as_completed(tasks):
+                    timed_audio_paths.append(await task)
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(10 + completed / max(len(normalized_segments), 1) * 75)
+                index_offset += len(chunk)
 
             timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
             result = self.mix_timed_audio_files(timed_audio_paths, output_path)
@@ -321,11 +320,19 @@ class VoiceEngine:
             label = f"a{index}"
             delay = max(0, int(item["start_ms"]))
             duration_ms = int(item.get("duration_ms") or 0)
+            source_duration_ms = int(item.get("source_duration_ms") or 0)
+            filters_for_item = [f"[{index}:a]aresample=44100,asetpts=PTS-STARTPTS"]
             if duration_ms > 0:
-                duration_seconds = max(0.001, duration_ms / 1000)
-                filters.append(f"[{index}:a]aresample=44100,atrim=0:{duration_seconds:.3f},asetpts=PTS-STARTPTS,adelay={delay}:all=1[{label}]")
-            else:
-                filters.append(f"[{index}:a]aresample=44100,adelay={delay}:all=1[{label}]")
+                if source_duration_ms > 0:
+                    tempo = source_duration_ms / duration_ms
+                    if 0.35 <= tempo <= 2.8 and abs(tempo - 1.0) > 0.03:
+                        filters_for_item.append(self._atempo_chain(tempo))
+                # 允许一点尾音，避免直接砍掉最后一个字；仍限制到字幕窗口附近，防止长句压住后续字幕。
+                duration_seconds = max(0.001, (duration_ms + 160) / 1000)
+                filters_for_item.append(f"atrim=0:{duration_seconds:.3f}")
+                filters_for_item.append("asetpts=PTS-STARTPTS")
+            filters_for_item.append(f"adelay={delay}:all=1")
+            filters.append(",".join(part for part in filters_for_item if part) + f"[{label}]")
             labels.append(f"[{label}]")
 
         if len(labels) == 1:
@@ -711,6 +718,27 @@ class VoiceEngine:
             })
         return normalized
 
+    def _chunk_timed_segments(self, segments: list[dict[str, Any]], batch_size: int, max_chars: int) -> list[list[dict[str, Any]]]:
+        """把字幕拆成并发调度批次，但不合并文本，避免批次内部时间轴漂移"""
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_chars = 0
+        safe_batch_size = max(1, batch_size)
+        safe_max_chars = max(100, max_chars)
+
+        for segment in segments:
+            text_len = len(str(segment.get("text") or ""))
+            if current and (len(current) >= safe_batch_size or current_chars + text_len > safe_max_chars):
+                chunks.append(current)
+                current = []
+                current_chars = 0
+            current.append(segment)
+            current_chars += text_len
+
+        if current:
+            chunks.append(current)
+        return chunks
+
     def _batch_timed_segments(
         self,
         segments: list[dict[str, Any]],
@@ -784,12 +812,32 @@ class VoiceEngine:
             path = str(item.get("path") or "")
             if not path or not os.path.exists(path):
                 continue
+            source_duration = self._float(item.get("source_duration_ms"), 0)
+            if source_duration <= 0:
+                duration_seconds = self._audio_duration_seconds(path)
+                source_duration = duration_seconds * 1000 if duration_seconds else 0
             items.append({
                 "path": path,
                 "start_ms": max(0, self._int(item.get("start_ms"), 0)),
                 "duration_ms": max(0, self._int(item.get("duration_ms"), 0)),
+                "source_duration_ms": max(0, int(source_duration)),
             })
         return items
+
+    def _atempo_chain(self, factor: float) -> str:
+        """把变速倍率拆成 FFmpeg atempo 支持的稳定链路"""
+        if factor <= 0:
+            return ""
+        parts: list[str] = []
+        remaining = factor
+        while remaining > 2.0:
+            parts.append("atempo=2.000")
+            remaining /= 2.0
+        while remaining < 0.5:
+            parts.append("atempo=0.500")
+            remaining /= 0.5
+        parts.append(f"atempo={remaining:.3f}")
+        return ",".join(parts)
 
     def _audio_encoder_args(self, output_path: str) -> list[str]:
         """根据输出扩展名选择稳定的音频编码参数"""

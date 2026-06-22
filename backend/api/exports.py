@@ -25,7 +25,7 @@ class ExportRequest(BaseModel):
     output_format: str = "mp4"
     resolution: Optional[str] = None
     bitrate: Optional[str] = None
-    audio_mode: str = "replace"
+    audio_mode: str = "mix"
     original_volume: float = 0.25
 
 
@@ -59,6 +59,21 @@ def _prepare_subtitle_for_export_burn(subtitle_path: str, video_path: str, proce
     video_size = processor.media_video_size(video_path)
     engine.generate_ass(display_entries, output_path, {}, video_size=video_size)
     return output_path
+
+
+def _normalize_audio_mode(value: str) -> str:
+    """规范导出音频合成模式，默认保留原视频声音"""
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"mix", "replace"} else "mix"
+
+
+def _normalize_original_volume(value: float) -> float:
+    """限制原声音量范围，避免异常参数传入 ffmpeg"""
+    try:
+        volume = float(value)
+    except (TypeError, ValueError):
+        volume = 0.25
+    return max(0.0, min(1.0, volume))
 
 
 @router.post("/create", response_model=ExportResponse)
@@ -108,8 +123,8 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
             working_video = processor.merge_audio_video(
                 video_path=working_video,
                 audio_path=request.audio_path,
-                mode=request.audio_mode,
-                volume_ratio=request.original_volume,
+                mode=_normalize_audio_mode(request.audio_mode),
+                volume_ratio=_normalize_original_volume(request.original_volume),
                 control_keys=[f"task:{task.id}"],
                 progress_callback=lambda progress: on_progress(progress, 35, 0.35),
             )

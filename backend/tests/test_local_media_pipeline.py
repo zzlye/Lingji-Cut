@@ -140,8 +140,49 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(temp_dir_calls, [output_dir])
         self.assertTrue(os.path.exists(output_audio))
 
-    def test_batched_voice_groups_segments_by_size_and_voice(self):
-        """批量配音会按条数和音色切批，避免不同角色串到同一段音频"""
+    def test_batched_timed_voice_generates_each_subtitle_separately(self):
+        """批量时间轴配音逐条生成音频，最后再按字幕时间混合"""
+        output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
+        generated: list[dict[str, str]] = []
+        mixed_items: list[dict] = []
+
+        async def fake_generate_voice(text: str, output_path: str, voice: str = "", settings=None, **_kwargs):
+            generated.append({"text": text, "voice": voice, "style": str((settings or {}).get("style_prompt") or "")})
+            with open(output_path, "wb") as file:
+                file.write(b"segment")
+            return output_path
+
+        def fake_mix(timed_audio_paths, final_output_path: str):
+            mixed_items.extend(timed_audio_paths)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+        ):
+            result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
+                segments=[
+                    {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
+                    {"start_ms": 800, "end_ms": 1300, "text": "第二句", "speaker": "角色A"},
+                ],
+                output_path=output_audio,
+                voice="alloy",
+                voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
+                style_selector=lambda segment: "对话风格" if segment.get("speaker") == "角色A" else "解说风格",
+                settings={"voice_batch_size": 8, "voice_batch_chars": 900, "voice_concurrency": 1},
+            ))
+
+        self.assertEqual(result_path, output_audio)
+        self.assertEqual([item["text"] for item in generated], ["第一句", "第二句"])
+        self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
+        self.assertEqual([item["style"] for item in generated], ["解说风格", "对话风格"])
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
+        self.assertEqual([item["duration_ms"] for item in mixed_items], [500, 500])
+
+    def test_batched_voice_chunks_segments_without_merging_text(self):
+        """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
         segments = [
             {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
             {"start_ms": 500, "end_ms": 1000, "text": "第二句", "speaker": "旁白"},
@@ -150,38 +191,33 @@ class LocalMediaPipelineTest(unittest.TestCase):
             {"start_ms": 2000, "end_ms": 2500, "text": "第五句", "speaker": "角色A"},
         ]
 
-        batches = self.voice_engine._batch_timed_segments(
-            segments,
-            batch_size=2,
-            max_chars=100,
-            voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
-            style_selector=None,
-            default_voice="alloy",
-        )
+        chunks = self.voice_engine._chunk_timed_segments(segments, batch_size=2, max_chars=100)
 
-        self.assertEqual([batch["count"] for batch in batches], [2, 2, 1])
-        self.assertEqual([batch["voice"] for batch in batches], ["alloy", "nova", "nova"])
-        self.assertEqual(batches[0]["start_ms"], 0)
-        self.assertEqual(batches[1]["start_ms"], 1000)
+        self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
+        self.assertEqual([[segment["text"] for segment in chunk] for chunk in chunks], [["第一句", "第二句"], ["第三句", "第四句"], ["第五句"]])
 
-    def test_batched_voice_splits_when_style_prompt_changes(self):
-        """批量配音遇到不同角色风格提示时会切批，避免风格串到别的角色"""
-        segments = [
-            {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
-            {"start_ms": 500, "end_ms": 1000, "text": "第二句", "speaker": "角色A"},
-        ]
+    def test_timed_voice_mix_speeds_segment_to_subtitle_window(self):
+        """混合分段配音时按字幕窗口做温和变速，减少字幕和配音错位"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        calls: list[list[str]] = []
 
-        batches = self.voice_engine._batch_timed_segments(
-            segments,
-            batch_size=8,
-            max_chars=100,
-            voice_selector=lambda _segment: "Kore",
-            style_selector=lambda segment: "解说风格" if segment.get("speaker") == "旁白" else "对话风格",
-            default_voice="Kore",
-        )
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            with open(output_audio, "wb") as file:
+                file.write(b"voice")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        self.assertEqual([batch["count"] for batch in batches], [1, 1])
-        self.assertEqual([batch["style_prompt"] for batch in batches], ["解说风格", "对话风格"])
+        with patch("backend.core.voice_engine.subprocess.run", side_effect=fake_run):
+            result_path = self.voice_engine.mix_timed_audio_files([
+                {"path": first_audio, "start_ms": 1200, "duration_ms": 800, "source_duration_ms": 400},
+            ], output_audio)
+
+        self.assertEqual(result_path, output_audio)
+        filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
+        self.assertIn("atempo=0.500", filter_arg)
+        self.assertIn("adelay=1200:all=1", filter_arg)
 
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""

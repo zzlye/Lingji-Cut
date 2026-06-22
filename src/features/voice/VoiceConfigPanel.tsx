@@ -669,15 +669,15 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionTrigger className="text-sm">一键配音策略</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
-            <SwitchField label="同时导出无配音字幕版" description="开启配音时额外保留一个只有字幕、没有配音的视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
-            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['batched', '批量分段（推荐）'], ['full', '整段生成'], ['segmented', '逐句分段']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
+            <SwitchField label="额外导出无配音字幕版" description="开启后会多生成一个保留原声、没有配音的字幕版视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
+            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['batched', '按字幕时间轴并发生成（推荐）'], ['segmented', '逐句串行生成'], ['full', '整段生成（不保证时间轴）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
             <div className="grid gap-3 sm:grid-cols-3">
               <NumberField label="批次条数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
               <NumberField label="批次字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
               <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
             </div>
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
-            <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['mix', '保留原声并混合'], ['replace', '替换原声']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
+            <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['mix', '混合原视频声音'], ['replace', '仅保留配音（静音原视频）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             <SliderField label="原声音量" value={automationOptions.original_volume} min={0} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ original_volume: v }))} />
           </AccordionContent>
         </AccordionItem>

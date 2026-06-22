@@ -12,6 +12,9 @@ const LEGACY_AUTOMATION_PREFERENCES_STORAGE_KEY = 'youtube-video-processor:auto-
 /** 配音可选迁移标记，避免旧版本默认开启配音影响新流程 */
 const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
 
+/** 替换原声确认标记，避免旧缓存误把 BGM 和游戏声音静音 */
+const AUDIO_REPLACE_CONFIRMED_KEY = 'audio_replace_confirmed'
+
 /** 默认一键自动化偏好 */
 export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   output_format: 'mp4',
@@ -143,6 +146,15 @@ function normalizeVoiceMode(value: unknown): AutomationPreferences['voice_mode']
     : DEFAULT_AUTOMATION_PREFERENCES.voice_mode
 }
 
+/** 规范音频合成模式，旧版未确认的 replace 一律迁回混合原声 */
+function normalizeAudioMode(value: unknown, replaceConfirmed: boolean): AutomationPreferences['audio_mode'] {
+  const mode = String(value || '')
+  if (mode === 'replace') {
+    return replaceConfirmed ? 'replace' : DEFAULT_AUTOMATION_PREFERENCES.audio_mode
+  }
+  return mode === 'mix' ? 'mix' : DEFAULT_AUTOMATION_PREFERENCES.audio_mode
+}
+
 /** 规范配音批处理数值，避免缓存里写入过大值拖垮接口 */
 function normalizeVoiceNumber(value: unknown, defaultValue: number, min: number, max: number): number {
   const numberValue = Math.round(Number(value ?? defaultValue))
@@ -185,6 +197,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     }
     const parsed = saved ? JSON.parse(saved) : {}
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
+    const audioReplaceWasExplicitlyChosen = parsed[AUDIO_REPLACE_CONFIRMED_KEY] === true
     const voicePresets = normalizeVoicePresets(parsed.voice_presets)
     return {
       ...DEFAULT_AUTOMATION_PREFERENCES,
@@ -202,6 +215,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
       voice_mode: normalizeVoiceMode(parsed.voice_mode),
+      audio_mode: normalizeAudioMode(parsed.audio_mode, audioReplaceWasExplicitlyChosen),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
       voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
       voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
@@ -229,6 +243,7 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
     const persisted = {
       ...next,
       ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
+      ...(Object.prototype.hasOwnProperty.call(updates, 'audio_mode') ? { [AUDIO_REPLACE_CONFIRMED_KEY]: updates.audio_mode === 'replace' } : {}),
     }
     localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify(persisted))
   }

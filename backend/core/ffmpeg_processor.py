@@ -469,7 +469,8 @@ class FFmpegProcessor:
             output_root = workspace_paths["output_dir"] if workspace_paths else ensure_project_dirs()["output_dir"]
             output_path = os.path.join(output_root, f"{base_name}_voiced.mp4")
 
-        if mode == "replace":
+        normalized_mode = (mode or "mix").strip().lower()
+        if normalized_mode == "replace":
             # 替换原声
             duration_seconds = self._media_duration_seconds(video_path)
             cmd = [
@@ -486,14 +487,14 @@ class FFmpegProcessor:
                 "-y",
                 output_path
             ])
-        elif mode == "mix":
-            # 混合音频
+        elif normalized_mode == "mix":
+            # 混合音频，保留原视频的 BGM、游戏声音和环境声。
             cmd = [
                 self.ffmpeg_cmd,
                 "-i", video_path,
                 "-i", audio_path,
                 "-filter_complex",
-                f"[0:a]volume={volume_ratio}[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[out]",
+                f"[0:a:0]volume={volume_ratio}[a0];[1:a:0]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[out]",
                 "-map", "0:v:0",
                 "-map", "[out]",
                 "-c:v", "copy",
