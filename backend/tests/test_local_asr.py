@@ -113,7 +113,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
         cuda_free_memory_mib.cache_clear()
-        local_asr_module._CUDA_ASR_DISABLED = False
+        local_asr_module._clear_asr_cuda_process_cooldown()
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
         # 测试中关闭音频预处理，避免真实调用 ffmpeg
@@ -131,7 +131,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         cuda_device_count.cache_clear()
         cuda_memory_mib.cache_clear()
         cuda_free_memory_mib.cache_clear()
-        local_asr_module._CUDA_ASR_DISABLED = False
+        local_asr_module._clear_asr_cuda_process_cooldown()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_transcribe_video_uses_cpu_int8_defaults_and_returns_srt_entries(self):
@@ -274,13 +274,14 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[1]["model_name"], "base")
         self.assertEqual(FakeWhisperModel.init_calls[1]["compute_type"], "int8")
 
-    def test_cuda_runtime_failure_disables_auto_cuda_for_next_recognizer(self):
-        """CUDA 运行中崩溃后，后续自动本地识别默认改走 CPU，避免一键流程反复重启"""
+    def test_cuda_runtime_failure_cools_down_auto_cuda_temporarily(self):
+        """CUDA 运行中崩溃后短暂冷却自动 GPU，冷却结束后应重新尝试 CUDA"""
         fake_module = types.ModuleType("faster_whisper")
         fake_module.WhisperModel = FailingCudaRuntimeWhisperModel
 
         with (
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {"YTV_ASR_CUDA_COOLDOWN_SECONDS": "10"}),
             patch("backend.core.local_asr.cuda_device_count", return_value=1),
             patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
             patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
@@ -288,12 +289,15 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, language = recognizer.transcribe_video(self.video_path)
             next_recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            local_asr_module._CUDA_ASR_DISABLED_UNTIL = 0
+            recovered_recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
 
         self.assertEqual(language, "en")
         self.assertTrue(entries)
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
         self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
         self.assertEqual(next_recognizer.device, "cpu")
+        self.assertEqual(recovered_recognizer.device, "cuda")
 
     def test_cuda_iterator_failure_falls_back_to_cpu(self):
         """CUDA 在字幕段迭代阶段崩溃时也要回退 CPU，避免一键流程直接失败"""

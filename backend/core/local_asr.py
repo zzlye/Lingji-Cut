@@ -56,8 +56,10 @@ LEADING_FRAGMENT_WORDS = {
 
 # 模型缓存，避免同一轮任务重复加载模型。
 _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
-# CUDA 一旦出现运行级错误，当前进程内继续使用 CUDA 往往会反复失败。
+# CUDA 一旦出现运行级错误，短时间内继续使用 CUDA 往往会反复失败。
 _CUDA_ASR_DISABLED = False
+_CUDA_ASR_DISABLED_UNTIL = 0.0
+_CUDA_ASR_DISABLED_REASON = ""
 CUDA_DISABLED_FLAG_NAME = "asr-cuda-disabled.flag"
 ASR_WORKER_EVENT_PREFIX = "__YTV_ASR_WORKER__"
 ASR_INPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
@@ -109,6 +111,36 @@ def asr_cuda_disabled_by_marker() -> bool:
         return os.path.exists(asr_cuda_disabled_flag_path())
     except OSError:
         return False
+
+
+def _asr_cuda_process_cooldown_seconds() -> float:
+    """读取当前进程内 CUDA 失败后的冷却秒数，避免一次失败后永久走 CPU"""
+    try:
+        value = float(os.environ.get("YTV_ASR_CUDA_COOLDOWN_SECONDS", "60"))
+    except (TypeError, ValueError):
+        value = 180.0
+    return max(0.0, value)
+
+
+def _clear_asr_cuda_process_cooldown() -> None:
+    """清理当前进程内 CUDA 冷却状态"""
+    global _CUDA_ASR_DISABLED, _CUDA_ASR_DISABLED_UNTIL, _CUDA_ASR_DISABLED_REASON
+    _CUDA_ASR_DISABLED = False
+    _CUDA_ASR_DISABLED_UNTIL = 0.0
+    _CUDA_ASR_DISABLED_REASON = ""
+
+
+def _asr_cuda_process_cooldown_remaining() -> float:
+    """返回当前进程 CUDA 冷却剩余秒数，过期后自动恢复 GPU 尝试"""
+    global _CUDA_ASR_DISABLED
+    if _asr_force_cuda_enabled() or not _CUDA_ASR_DISABLED:
+        return 0.0
+    remaining = _CUDA_ASR_DISABLED_UNTIL - time.time()
+    if remaining <= 0:
+        _clear_asr_cuda_process_cooldown()
+        logger.info("本地识别 CUDA 当前进程冷却已结束，后续自动重新尝试 GPU")
+        return 0.0
+    return remaining
 
 
 def mark_asr_cuda_disabled(reason: str) -> None:
@@ -198,8 +230,9 @@ def default_asr_device() -> str:
     requested = (os.environ.get("YTV_ASR_DEVICE") or "auto").strip().lower()
     if requested and requested != "auto":
         return requested
-    if _CUDA_ASR_DISABLED:
-        logger.warning("本地识别 CUDA 已在当前进程内禁用，自动改用 CPU")
+    remaining = _asr_cuda_process_cooldown_remaining()
+    if remaining > 0:
+        logger.warning(f"本地识别 CUDA 正在当前进程冷却，剩余约 {remaining:.0f} 秒，自动改用 CPU: {_CUDA_ASR_DISABLED_REASON or '未记录'}")
         return "cpu"
     count = cuda_device_count()
     if count > 0:
@@ -1155,13 +1188,19 @@ class LocalSpeechRecognizer:
         return self.allow_cpu_fallback and self.device == "cuda"
 
     def _disable_cuda_asr_for_process(self, reason: Exception) -> None:
-        """当前进程内禁用后续自动 CUDA 识别，避免 CUDA 上下文损坏后反复重启"""
-        global _CUDA_ASR_DISABLED
-        _CUDA_ASR_DISABLED = True
+        """当前进程内短暂冷却自动 CUDA 识别，避免 CUDA 上下文损坏后反复重启"""
+        global _CUDA_ASR_DISABLED, _CUDA_ASR_DISABLED_UNTIL, _CUDA_ASR_DISABLED_REASON
+        cooldown_seconds = _asr_cuda_process_cooldown_seconds()
+        _CUDA_ASR_DISABLED = cooldown_seconds > 0
+        _CUDA_ASR_DISABLED_UNTIL = time.time() + cooldown_seconds if cooldown_seconds > 0 else 0.0
+        _CUDA_ASR_DISABLED_REASON = str(reason or "").strip()
         for key in list(_MODEL_CACHE):
             if len(key) >= 3 and key[2] == "cuda":
                 _MODEL_CACHE.pop(key, None)
-        logger.warning(f"后续本地识别将改用 CPU，原因: {reason}")
+        if cooldown_seconds > 0:
+            logger.warning(f"本地识别 CUDA 冷却 {cooldown_seconds:.0f} 秒后会自动重试，当前先改用 CPU，原因: {reason}")
+        else:
+            logger.warning(f"本地识别 CUDA 失败但未启用进程冷却，原因: {reason}")
 
     def _load_model(self):
         """延迟加载 faster-whisper 模型，缺依赖时给出明确提示"""
