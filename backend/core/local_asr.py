@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import site
 import tempfile
 import threading
 import time
@@ -60,9 +61,19 @@ _MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
 _CUDA_ASR_DISABLED = False
 _CUDA_ASR_DISABLED_UNTIL = 0.0
 _CUDA_ASR_DISABLED_REASON = ""
+_CUDA_DLL_HANDLES: list[Any] = []
+_CUDA_DLL_REGISTERED_DIRS: set[str] = set()
 CUDA_DISABLED_FLAG_NAME = "asr-cuda-disabled.flag"
 ASR_WORKER_EVENT_PREFIX = "__YTV_ASR_WORKER__"
 ASR_INPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
+CUDA_RUNTIME_DLL_NAMES = (
+    "cublas64_12.dll",
+    "cublasLt64_12.dll",
+    "cudnn64_9.dll",
+    "cudnn_ops64_9.dll",
+    "cudnn_cnn64_9.dll",
+    "nvrtc64_120_0.dll",
+)
 
 
 def default_asr_model_dir() -> str:
@@ -79,6 +90,127 @@ def default_asr_model_name() -> str:
 def default_data_root() -> str:
     """返回后端可写数据目录根路径，开发环境默认项目根目录"""
     return os.environ.get("YTV_DATA_ROOT") or os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
+
+def _site_package_roots() -> tuple[str, ...]:
+    """收集当前 Python 的 site-packages 目录，用来查找 NVIDIA 官方 wheel 带的 CUDA DLL"""
+    roots: list[str] = []
+
+    def add(path: str) -> None:
+        """加入存在的目录并去重"""
+        if not path:
+            return
+        normalized = os.path.abspath(os.path.expanduser(str(path)))
+        if normalized and os.path.isdir(normalized) and normalized not in roots:
+            roots.append(normalized)
+
+    try:
+        for path in site.getsitepackages():
+            add(path)
+    except Exception:
+        pass
+    try:
+        add(site.getusersitepackages())
+    except Exception:
+        pass
+    add(os.path.join(os.path.dirname(sys.executable), "Lib", "site-packages"))
+    for path in sys.path:
+        if str(path or "").lower().endswith("site-packages"):
+            add(path)
+    return tuple(roots)
+
+
+@lru_cache(maxsize=1)
+def cuda_dll_search_dirs() -> tuple[str, ...]:
+    """返回 CTranslate2 CUDA 运行时 DLL 目录，兼容 pip NVIDIA 包和系统 CUDA 安装"""
+    dirs: list[str] = []
+
+    def add(path: str) -> None:
+        """加入存在的 DLL 目录并去重"""
+        if not path:
+            return
+        normalized = os.path.abspath(os.path.expanduser(str(path)))
+        if normalized and os.path.isdir(normalized) and normalized not in dirs:
+            dirs.append(normalized)
+
+    extra_dirs = str(os.environ.get("YTV_ASR_CUDA_DLL_DIRS") or "")
+    for path in extra_dirs.split(os.pathsep):
+        add(path)
+
+    for root in _site_package_roots():
+        add(os.path.join(root, "ctranslate2"))
+        add(os.path.join(root, "nvidia", "cublas", "bin"))
+        add(os.path.join(root, "nvidia", "cudnn", "bin"))
+        add(os.path.join(root, "nvidia", "cuda_nvrtc", "bin"))
+
+    cuda_path = os.environ.get("CUDA_PATH") or os.environ.get("CUDA_HOME")
+    if cuda_path:
+        add(os.path.join(cuda_path, "bin"))
+    return tuple(dirs)
+
+
+def _prepend_env_paths(env: dict[str, str], paths: tuple[str, ...]) -> None:
+    """把 CUDA DLL 目录前置到 PATH，保证子进程按同一套依赖启动"""
+    if not paths:
+        return
+    path_key = "PATH"
+    if os.name == "nt":
+        for key in ("PATH", "Path", "path"):
+            if key in env:
+                path_key = key
+                break
+    current = str(env.get(path_key) or env.get("PATH") or env.get("Path") or "")
+    existing = {
+        os.path.normcase(os.path.abspath(part))
+        for part in current.split(os.pathsep)
+        if part
+    }
+    prepend = [
+        path
+        for path in paths
+        if os.path.normcase(os.path.abspath(path)) not in existing
+    ]
+    if not prepend:
+        return
+    env[path_key] = os.pathsep.join(prepend + ([current] if current else []))
+    if os.name == "nt" and path_key != "PATH":
+        env["PATH"] = env[path_key]
+
+
+def configure_cuda_dll_search_paths(env: Optional[dict[str, str]] = None) -> tuple[str, ...]:
+    """注册 CUDA DLL 搜索路径，并可同步写入子进程环境变量"""
+    dirs = cuda_dll_search_dirs()
+    if os.name == "nt":
+        for directory in dirs:
+            if directory in _CUDA_DLL_REGISTERED_DIRS:
+                continue
+            try:
+                if hasattr(os, "add_dll_directory"):
+                    _CUDA_DLL_HANDLES.append(os.add_dll_directory(directory))
+                _CUDA_DLL_REGISTERED_DIRS.add(directory)
+            except OSError as exc:
+                logger.warning(f"注册 CUDA DLL 目录失败: {directory}, {exc}")
+    _prepend_env_paths(os.environ, dirs)
+    if env is not None:
+        _prepend_env_paths(env, dirs)
+    return dirs
+
+
+def cuda_runtime_dependency_report() -> dict[str, Any]:
+    """返回 CUDA 运行时 DLL 查找结果，方便用户从日志判断 GPU 为什么不能用"""
+    dirs = configure_cuda_dll_search_paths()
+    found: dict[str, str] = {}
+    missing: list[str] = []
+    for dll_name in CUDA_RUNTIME_DLL_NAMES:
+        dll_path = next(
+            (os.path.join(directory, dll_name) for directory in dirs if os.path.exists(os.path.join(directory, dll_name))),
+            "",
+        )
+        if dll_path:
+            found[dll_name] = dll_path
+        else:
+            missing.append(dll_name)
+    return {"dirs": list(dirs), "found": found, "missing": missing}
 
 
 def asr_cuda_disabled_flag_path() -> str:
@@ -245,6 +377,7 @@ def default_gpu_asr_model_name() -> str:
 def cuda_device_count() -> int:
     """返回 CTranslate2 可用的 CUDA 设备数量"""
     try:
+        configure_cuda_dll_search_paths()
         import ctranslate2
         return int(ctranslate2.get_cuda_device_count())
     except Exception:
@@ -354,8 +487,14 @@ class LocalSpeechRecognizer:
         video_path = self._validate_input_media_path(video_path)
 
         if self._should_use_cuda_worker():
+            worker_input_path, worker_temp_audio_path = self._prepare_audio(video_path)
             try:
-                return self._transcribe_video_in_worker(video_path, language, progress_callback)
+                return self._transcribe_video_with_cuda_worker_retries(
+                    worker_input_path,
+                    language,
+                    progress_callback,
+                    preprocessed_input=bool(worker_temp_audio_path),
+                )
             except Exception as exc:
                 if not self._should_fallback_to_cpu():
                     raise
@@ -366,6 +505,12 @@ class LocalSpeechRecognizer:
                     extra={"activity_message": summary},
                 )
                 self._switch_to_cpu_after_cuda_failure(exc)
+            finally:
+                if worker_temp_audio_path:
+                    try:
+                        os.remove(worker_temp_audio_path)
+                    except OSError:
+                        pass
 
         # 预处理音频：响度归一化让低声说话更容易被识别，时间轴保持不变。
         audio_path, temp_audio_path = self._prepare_audio(video_path)
@@ -447,11 +592,101 @@ class LocalSpeechRecognizer:
             return False
         return self.device == "cuda"
 
+    def _transcribe_video_with_cuda_worker_retries(
+        self,
+        audio_path: str,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+        preprocessed_input: bool,
+    ) -> tuple[list[dict], str]:
+        """CUDA 子进程失败时先尝试更稳的 GPU 档位，全部失败后才交给 CPU 回退"""
+        original_model = self.model_name
+        original_compute = self.compute_type
+        original_beam = self.beam_size
+        errors: list[str] = []
+        emit_progress = self._monotonic_progress_callback(progress_callback)
+        profiles = self._cuda_worker_retry_profiles()
+
+        for index, profile in enumerate(profiles, 1):
+            self.model_name = str(profile["model_name"])
+            self.compute_type = str(profile["compute_type"])
+            self.beam_size = int(profile["beam_size"])
+            logger.info(
+                "本地识别 CUDA 尝试: "
+                f"{index}/{len(profiles)}, "
+                f"model={self.model_name}, compute={self.compute_type}, beam={self.beam_size}, "
+                f"reason={profile['reason']}"
+            )
+            try:
+                return self._transcribe_video_in_worker(
+                    audio_path,
+                    language,
+                    emit_progress,
+                    preprocessed_input=preprocessed_input,
+                    mark_native_failure=False,
+                )
+            except Exception as exc:
+                errors.append(f"{self.model_name}/{self.compute_type}/beam{self.beam_size}: {exc}")
+                logger.warning(f"本地识别 CUDA 档位失败，继续尝试下一个 GPU 档位: {errors[-1]}")
+
+        self.model_name = original_model
+        self.compute_type = original_compute
+        self.beam_size = original_beam
+        reason = "；".join(errors[-4:]) or "未知错误"
+        mark_asr_cuda_disabled(f"本地识别 CUDA 子进程所有 GPU 档位均失败，{reason}")
+        raise RuntimeError(f"本地识别 CUDA 子进程所有 GPU 档位均失败: {reason}")
+
+    def _cuda_worker_retry_profiles(self) -> list[dict[str, Any]]:
+        """生成 CUDA 子进程重试档位：先保准确率，再用 int8_float16 和降模型降低显存压力"""
+        original_model = self.model_name
+        original_compute = self.compute_type
+        original_beam = self._beam_size()
+        profiles: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int]] = set()
+
+        def add(model_name: str, compute_type: str, beam_size: int, reason: str) -> None:
+            """加入一个未重复的 CUDA 尝试档位"""
+            normalized = (model_name, compute_type, max(1, min(8, int(beam_size))))
+            if normalized in seen:
+                return
+            seen.add(normalized)
+            profiles.append({
+                "model_name": normalized[0],
+                "compute_type": normalized[1],
+                "beam_size": normalized[2],
+                "reason": reason,
+            })
+
+        add(original_model, original_compute, original_beam, "原始配置")
+        if original_compute != "int8_float16":
+            add(original_model, "int8_float16", min(original_beam, 3), "省显存精度")
+        if original_beam > 1:
+            add(original_model, original_compute, 1, "降低 beam 减少瞬时显存")
+        lower_model = self._next_smaller_cuda_model(original_model)
+        if lower_model:
+            add(lower_model, original_compute, min(original_beam, 3), "降低模型保留 GPU")
+            if original_compute != "int8_float16":
+                add(lower_model, "int8_float16", min(original_beam, 3), "降低模型并省显存")
+        return profiles
+
+    def _next_smaller_cuda_model(self, model_name: str) -> str:
+        """根据当前模型选择下一个更稳的 GPU 模型，避免直接退到 CPU"""
+        order = ["large-v3", "large-v3-turbo", "medium", "small", "base", "tiny"]
+        normalized = str(model_name or "").strip().lower()
+        if normalized not in order:
+            return ""
+        index = order.index(normalized)
+        if index >= len(order) - 1:
+            return ""
+        return order[index + 1]
+
     def _transcribe_video_in_worker(
         self,
         video_path: str,
         language: Optional[str],
         progress_callback: Optional[Callable[[float], None]],
+        preprocessed_input: bool = False,
+        mark_native_failure: bool = True,
     ) -> tuple[list[dict], str]:
         """在独立 Python 子进程中执行 CUDA 识别，子进程崩溃时主后端仍可回退 CPU"""
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -460,6 +695,10 @@ class LocalSpeechRecognizer:
         env["YTV_ASR_CHILD_WORKER"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = os.pathsep.join([project_root, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+        if preprocessed_input:
+            # 父进程已经生成 16k WAV，子进程只跑 CUDA 推理，减少崩溃面和重复 ffmpeg 开销。
+            env["YTV_ASR_PREPROCESS"] = "0"
+        cuda_dirs = configure_cuda_dll_search_paths(env)
         command = [
             sys.executable,
             worker_path,
@@ -478,7 +717,11 @@ class LocalSpeechRecognizer:
         if self._gap_rescue_override is not None:
             command.extend(["--gap-rescue", "1" if self._gap_rescue_override else "0"])
 
-        logger.info(f"本地识别 CUDA 子进程启动: model={self.model_name}, compute={self.compute_type}")
+        logger.info(
+            "本地识别 CUDA 子进程启动: "
+            f"model={self.model_name}, compute={self.compute_type}, beam={self._beam_size()}, "
+            f"dll_dirs={list(cuda_dirs)}"
+        )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = subprocess.Popen(
             command,
@@ -512,13 +755,15 @@ class LocalSpeechRecognizer:
                     result_payload = event
                 elif event_type == "error":
                     error_message = str(event.get("message") or event.get("error_type") or "")
+                elif event_type == "diagnostic":
+                    logger.info(f"本地识别子进程诊断: {event}")
                 continue
             logger.info(f"本地识别子进程: {line}")
 
         return_code = process.wait()
         if return_code != 0:
             reason = error_message or f"退出码 {return_code}"
-            if return_code != 1:
+            if mark_native_failure and return_code != 1:
                 mark_asr_cuda_disabled(f"本地识别 CUDA 子进程异常退出，{reason}")
             raise RuntimeError(f"本地识别 CUDA 子进程失败: {reason}")
         if not result_payload:

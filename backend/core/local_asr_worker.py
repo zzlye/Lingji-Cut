@@ -13,9 +13,13 @@ if __package__ in {None, ""}:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if PROJECT_ROOT not in sys.path:
         sys.path.insert(0, PROJECT_ROOT)
-    from backend.core.local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer
+    from backend.core.local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer, configure_cuda_dll_search_paths, cuda_runtime_dependency_report
 else:
-    from .local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer
+    from .local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer, configure_cuda_dll_search_paths, cuda_runtime_dependency_report
+
+
+# 子进程独立注册 CUDA DLL 目录，避免 Windows 动态加载 cuBLAS/cuDNN 时只依赖父进程 PATH。
+configure_cuda_dll_search_paths()
 
 
 def _emit(event: dict[str, Any]) -> None:
@@ -42,6 +46,8 @@ def main() -> int:
     """执行一次本地识别，并把结果通过 stdout 返回给父进程"""
     args = _build_parser().parse_args()
     try:
+        if args.device == "cuda":
+            _emit({"type": "diagnostic", "cuda_runtime": cuda_runtime_dependency_report()})
         recognizer = LocalSpeechRecognizer(
             model_name=args.model_name,
             model_dir=args.model_dir,

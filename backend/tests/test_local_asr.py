@@ -347,11 +347,12 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
         self.assertEqual(FakeWhisperModel.init_calls[1]["device"], "cpu")
 
-    def test_cuda_worker_native_crash_marks_cuda_disabled_and_falls_back_to_cpu(self):
-        """CUDA 子进程原生崩溃时写入熔断标记，并在主进程回退 CPU 完成识别"""
+    def test_cuda_worker_native_crash_retries_gpu_profiles_before_cpu_fallback(self):
+        """CUDA 子进程原生崩溃时先重试多个 GPU 档位，全部失败后才回退 CPU"""
         fake_module = types.ModuleType("faster_whisper")
         fake_module.WhisperModel = FakeWhisperModel
         marker_path = os.path.join(self.temp_dir, "cuda-worker-disabled.flag")
+        commands: list[list[str]] = []
 
         class CrashingWorkerProcess:
             """测试用子进程，模拟 CUDA native 层直接崩溃"""
@@ -362,6 +363,11 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
                 """返回 Windows 原生崩溃退出码"""
                 return 3221226505
 
+        def fake_popen(command, **kwargs):
+            """记录每次 CUDA 子进程启动参数"""
+            commands.append(command)
+            return CrashingWorkerProcess()
+
         with (
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
             patch.dict(os.environ, {
@@ -371,17 +377,19 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
             patch("backend.core.local_asr.cuda_device_count", return_value=1),
             patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
             patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
-            patch("backend.core.local_asr.subprocess.Popen", return_value=CrashingWorkerProcess()),
+            patch("backend.core.local_asr.subprocess.Popen", side_effect=fake_popen),
         ):
             recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
             entries, language = recognizer.transcribe_video(self.video_path)
 
         self.assertEqual(language, "en")
         self.assertTrue(entries)
+        self.assertGreaterEqual(len(commands), 3)
         self.assertTrue(os.path.exists(marker_path))
         with open(marker_path, "r", encoding="utf-8") as file:
             marker_content = file.read()
-        self.assertIn("CUDA 子进程异常退出", marker_content)
+        self.assertIn("所有 GPU 档位均失败", marker_content)
+        self.assertIn("int8_float16", " ".join(" ".join(command) for command in commands))
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
 
     def test_explicit_cuda_worker_failure_can_fallback_to_cpu(self):
@@ -417,6 +425,55 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertTrue(entries)
         self.assertTrue(os.path.exists(marker_path))
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
+
+    def test_cuda_worker_env_prepends_nvidia_dll_dirs(self):
+        """CUDA worker 环境必须前置 NVIDIA DLL 目录，避免 Windows 子进程找不到 cuBLAS/cuDNN"""
+        fake_site = os.path.join(self.temp_dir, "site-packages")
+        cublas_bin = os.path.join(fake_site, "nvidia", "cublas", "bin")
+        cudnn_bin = os.path.join(fake_site, "nvidia", "cudnn", "bin")
+        nvrtc_bin = os.path.join(fake_site, "nvidia", "cuda_nvrtc", "bin")
+        ctranslate2_dir = os.path.join(fake_site, "ctranslate2")
+        for path in (cublas_bin, cudnn_bin, nvrtc_bin, ctranslate2_dir):
+            os.makedirs(path, exist_ok=True)
+        captured: dict[str, object] = {}
+
+        class FakeStdout:
+            """模拟子进程 stdout，返回成功识别结果"""
+
+            def __iter__(self):
+                payload = '{"type":"result","language":"zh","entries":[{"text":"测试","start":"00:00:00,000","end":"00:00:01,000"}]}'
+                return iter([f"__YTV_ASR_WORKER__{payload}\n"])
+
+        class FakeProcess:
+            """模拟成功退出的 CUDA worker 子进程"""
+
+            stdout = FakeStdout()
+
+            def wait(self):
+                return 0
+
+        def fake_popen(command, **kwargs):
+            """记录 worker 启动环境"""
+            captured["env"] = kwargs["env"]
+            return FakeProcess()
+
+        local_asr_module.cuda_dll_search_dirs.cache_clear()
+        with (
+            patch("backend.core.local_asr._site_package_roots", return_value=(fake_site,)),
+            patch("backend.core.local_asr.subprocess.Popen", side_effect=fake_popen),
+        ):
+            recognizer = LocalSpeechRecognizer(model_name="base", device="cuda", compute_type="float16")
+            entries, language = recognizer._transcribe_video_in_worker(self.video_path, None, None)
+
+        env = captured["env"]
+        self.assertEqual(language, "zh")
+        self.assertEqual(entries[0]["text"], "测试")
+        path_value = str(env.get("PATH") or env.get("Path") or "")
+        path_parts = path_value.split(os.pathsep)
+        self.assertLess(path_parts.index(cublas_bin), 4)
+        self.assertLess(path_parts.index(cudnn_bin), 4)
+        self.assertIn(ctranslate2_dir, path_parts)
+        local_asr_module.cuda_dll_search_dirs.cache_clear()
 
     def test_missing_video_raises_clear_error(self):
         """视频文件不存在时给出本地识别错误"""
