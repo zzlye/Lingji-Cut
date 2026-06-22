@@ -840,6 +840,89 @@ class AutomationJobTests(unittest.TestCase):
             with open(os.path.join(temp_dir, "youtube_link.txt"), "r", encoding="utf-8") as file:
                 self.assertEqual(file.read().strip(), video.url)
 
+    def test_automation_updates_subtitle_stage_during_burn(self):
+        """字幕烧录时应同步 ffmpeg 进度，避免长视频界面一直停在 70%"""
+        with tempfile.TemporaryDirectory(prefix="automation_burn_progress_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            job = AutomationJobRecord(
+                id="auto-burn-progress",
+                source_url="https://example.test/video",
+                title="字幕烧录进度",
+                status="pending",
+                stages=json.dumps(_default_stages(), ensure_ascii=False),
+            )
+
+            class ProgressBurnProcessor(FakeAutomationProcessor):
+                """测试用处理器，模拟 ffmpeg 烧录过程回传 50%"""
+
+                def __init__(self, temp_dir: str, observed_job: AutomationJobRecord):
+                    super().__init__(temp_dir)
+                    self.observed_job = observed_job
+                    self.observed_stage_progress = None
+                    self.received_progress_callback = False
+
+                def burn_subtitles(self, **kwargs):
+                    """触发烧录进度回调并记录阶段进度"""
+                    callback = kwargs.get("progress_callback")
+                    self.received_progress_callback = callable(callback)
+                    if callback:
+                        callback(50)
+                        stages = json.loads(self.observed_job.stages or "[]")
+                        subtitle_stage = next(stage for stage in stages if stage.get("key") == "subtitle")
+                        self.observed_stage_progress = float(subtitle_stage.get("progress") or 0)
+                    return super().burn_subtitles(**kwargs)
+
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = ProgressBurnProcessor(temp_dir, job)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=45, platform="youtube", video_id="burn-progress", url=job.source_url, title=job.title)
+            db = FakeTaskDb([job], [], [video])
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "burn-progress",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+            task_ids = iter(range(130, 140))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        processing_preset={},
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    db,
+                    job,
+                )
+
+        self.assertTrue(fake_processor.received_progress_callback)
+        self.assertEqual(fake_processor.observed_stage_progress, 82.5)
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["subtitle"].status, "completed")
+
     def test_resume_reuses_cached_video_when_youtube_parse_requires_auth(self):
         """断点续跑已有下载结果时不应重新解析 YouTube，避免卡在机器人验证"""
         with tempfile.TemporaryDirectory(prefix="automation_resume_cached_") as temp_dir:

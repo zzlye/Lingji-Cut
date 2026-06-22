@@ -1120,6 +1120,11 @@ def _subtitle_text_stage_progress(recognition_mode: str, progress: float) -> flo
     return min(65.0, 35.0 + normalized * 0.30)
 
 
+def _subtitle_burn_stage_progress(progress: float) -> float:
+    """把 ffmpeg 字幕烧录进度映射到字幕阶段进度，完成前保留收尾空间"""
+    return min(95.0, 70.0 + max(0.0, min(100.0, float(progress or 0))) * 0.25)
+
+
 def _update_subtitle_asr_progress(db: Session, job: Optional[AutomationJobRecord], task: DownloadTask, progress: float, recognition_mode: str = "local") -> None:
     """同步字幕识别进度，允许 ASR 心跳线程使用独立会话安全更新"""
     task_progress = _subtitle_recognition_stage_progress(recognition_mode, progress)
@@ -2772,11 +2777,20 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             video_size = processor.media_video_size(effects_path)
             engine.generate_ass(display_entries, subtitle_ass_path, preset_dict, video_size=video_size)
             if request.burn_subtitles:
+                def on_burn_progress(progress: float) -> None:
+                    """同步 ffmpeg 字幕烧录进度，避免长视频烧录时停在 70%"""
+                    _check_control(db, job, subtitle_task)
+                    subtitle_task.progress = _subtitle_burn_stage_progress(progress)
+                    db.commit()
+                    if job:
+                        _update_job_stage(db, job, "subtitle", "running", progress=subtitle_task.progress, task_id=subtitle_task.id)
+
                 video_for_export = processor.burn_subtitles(
                     video_path=effects_path,
                     subtitle_path=subtitle_ass_path,
                     preset=subtitle_burn_preset,
                     control_keys=_control_keys(job, subtitle_task),
+                    progress_callback=on_burn_progress,
                 )
             _check_control(db, job, subtitle_task)
             _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
