@@ -3,8 +3,10 @@
 
 import base64
 import asyncio
+import json
 import wave
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -37,6 +39,25 @@ def provider_audio_format(provider_type: str, settings: dict[str, Any], model: s
 
 class VoiceEngine:
     """配音引擎"""
+
+    @staticmethod
+    def timeline_metadata_path(output_path: str) -> str:
+        """返回配音时间轴元数据路径，和音频文件放在一起便于导出阶段复用"""
+        return f"{output_path}.timeline.json"
+
+    @classmethod
+    def load_timeline_metadata(cls, output_path: str) -> list[dict[str, Any]]:
+        """读取配音真实时长元数据，缺失或损坏时返回空列表"""
+        metadata_path = cls.timeline_metadata_path(output_path)
+        if not os.path.isfile(metadata_path):
+            return []
+        try:
+            with open(metadata_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return []
+        segments = data.get("segments") if isinstance(data, dict) else None
+        return [item for item in segments if isinstance(item, dict)] if isinstance(segments, list) else []
 
     def __init__(self):
         """初始化配音引擎"""
@@ -183,6 +204,7 @@ class VoiceEngine:
                 segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
                 segment_voice = voice_selector(segment) if voice_selector else voice
                 segment_style = style_selector(segment) if style_selector else ""
+                segment_duration_ms = max(1, int(segment["end_ms"]) - int(segment["start_ms"]))
                 await self.generate_voice(
                     text=str(segment["text"]),
                     output_path=segment_path,
@@ -191,12 +213,16 @@ class VoiceEngine:
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=self._settings_with_style_prompt(options, str(segment_style or "")),
+                    settings=self._settings_with_timing_prompt(options, str(segment_style or ""), segment_duration_ms),
                 )
+                source_duration_seconds = self._audio_duration_seconds(segment_path)
                 return {
                     "path": segment_path,
                     "start_ms": int(segment["start_ms"]),
-                    "duration_ms": max(1, int(segment["end_ms"]) - int(segment["start_ms"])),
+                    "duration_ms": segment_duration_ms,
+                    "source_duration_ms": int((source_duration_seconds or 0) * 1000),
+                    "text": str(segment.get("text") or ""),
+                    "speaker": str(segment.get("speaker") or ""),
                 }
 
         try:
@@ -215,6 +241,7 @@ class VoiceEngine:
 
             timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
             result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
             return result
@@ -292,6 +319,7 @@ class VoiceEngine:
 
             timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
             result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
             return result
@@ -335,6 +363,7 @@ class VoiceEngine:
                 # 多人对话时按字幕分段里的说话人选择音色；未匹配则使用默认音色。
                 segment_voice = voice_selector(segment) if voice_selector else voice
                 segment_style = style_selector(segment) if style_selector else ""
+                segment_duration_ms = max(1, int(segment["end_ms"]) - int(segment["start_ms"]))
                 await self.generate_voice(
                     text=str(segment["text"]),
                     output_path=segment_path,
@@ -343,17 +372,22 @@ class VoiceEngine:
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=self._settings_with_style_prompt(options, segment_style),
+                    settings=self._settings_with_timing_prompt(options, segment_style, segment_duration_ms),
                 )
+                source_duration_seconds = self._audio_duration_seconds(segment_path)
                 timed_audio_paths.append({
                     "path": segment_path,
                     "start_ms": int(segment["start_ms"]),
-                    "duration_ms": max(1, int(segment["end_ms"]) - int(segment["start_ms"])),
+                    "duration_ms": segment_duration_ms,
+                    "source_duration_ms": int((source_duration_seconds or 0) * 1000),
+                    "text": str(segment.get("text") or ""),
+                    "speaker": str(segment.get("speaker") or ""),
                 })
                 if progress_callback:
                     progress_callback(10 + index / max(total, 1) * 75)
 
             result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
             return result
@@ -1060,6 +1094,8 @@ class VoiceEngine:
                     "start_ms": int(group["start_ms"]),
                     "duration_ms": window_ms,
                     "source_duration_ms": duration_ms,
+                    "text": str(group.get("text") or ""),
+                    "segments": segments,
                 }]
 
         if len(segments) <= 1:
@@ -1068,6 +1104,8 @@ class VoiceEngine:
                 "start_ms": int(group["start_ms"]),
                 "duration_ms": window_ms,
                 "source_duration_ms": last_duration_ms,
+                "text": str(group.get("text") or ""),
+                "segments": segments,
             }]
 
         middle = max(1, len(segments) // 2)
@@ -1132,6 +1170,18 @@ class VoiceEngine:
         merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
         return merged
 
+    def _settings_with_timing_prompt(self, settings: dict[str, Any], style_prompt: str, window_ms: int) -> dict[str, Any]:
+        """给单条配音追加目标时长提示，让模型自行贴近字幕窗口而不是后期硬裁剪"""
+        target_seconds = max(0.1, window_ms / 1000.0)
+        timing_prompt = (
+            f"这一句目标时长约 {target_seconds:.1f} 秒。请自然说完，"
+            "不要拖长尾音，也不要因为赶时间吞字或截断。"
+        )
+        base_style = str(style_prompt or settings.get("style_prompt") or "").strip()
+        merged = dict(settings)
+        merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
+        return merged
+
     def _join_prompt_parts(self, parts: list[str]) -> str:
         """合并多段提示词，过滤空值"""
         return "\n".join(part.strip() for part in parts if str(part or "").strip())
@@ -1169,6 +1219,38 @@ class VoiceEngine:
                 "source_duration_ms": max(0, int(source_duration)),
             })
         return items
+
+    def _write_timeline_metadata(self, output_path: str, timed_audio_paths: list[dict[str, Any]]) -> None:
+        """保存每段配音真实时长，供最终字幕烧录按配音尾音校准"""
+        segments: list[dict[str, Any]] = []
+        for item in timed_audio_paths:
+            path = str(item.get("path") or "")
+            start_ms = max(0, self._int(item.get("start_ms"), 0))
+            duration_ms = max(0, self._int(item.get("duration_ms"), 0))
+            source_duration_ms = max(0, self._int(item.get("source_duration_ms"), 0))
+            if source_duration_ms <= 0 and path and os.path.exists(path):
+                duration_seconds = self._audio_duration_seconds(path)
+                source_duration_ms = int((duration_seconds or 0) * 1000)
+            segment = {
+                "start_ms": start_ms,
+                "duration_ms": duration_ms,
+                "source_duration_ms": source_duration_ms,
+                "audio_end_ms": start_ms + source_duration_ms if source_duration_ms > 0 else start_ms + duration_ms,
+                "text": str(item.get("text") or ""),
+                "speaker": str(item.get("speaker") or ""),
+            }
+            if isinstance(item.get("segments"), list):
+                segment["segments"] = item["segments"]
+            segments.append(segment)
+
+        metadata = {"version": 1, "segments": segments}
+        metadata_path = self.timeline_metadata_path(output_path)
+        try:
+            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+            with open(metadata_path, "w", encoding="utf-8") as file:
+                json.dump(metadata, file, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            logger.warning(f"保存配音时间轴元数据失败: {exc}")
 
     def _atempo_chain(self, factor: float) -> str:
         """把变速倍率拆成 FFmpeg atempo 支持的稳定链路"""
@@ -1250,6 +1332,10 @@ class VoiceEngine:
         except Exception:
             pass
 
+        ffmpeg_duration = self._audio_duration_from_ffmpeg(output_path)
+        if ffmpeg_duration is not None:
+            return ffmpeg_duration
+
         if os.path.splitext(output_path)[1].lower() != ".wav":
             return None
         try:
@@ -1258,6 +1344,26 @@ class VoiceEngine:
                 return wav_file.getnframes() / rate if rate else None
         except Exception:
             return None
+
+    def _audio_duration_from_ffmpeg(self, output_path: str) -> Optional[float]:
+        """没有 ffprobe 时从 ffmpeg 探测输出解析音频时长，兼容 MP3/OPUS 等格式"""
+        try:
+            result = subprocess.run(
+                [self._ffmpeg_cmd(), "-hide_banner", "-i", output_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                check=False,
+            )
+        except Exception:
+            return None
+        output = f"{result.stdout}\n{result.stderr}"
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+        if not match:
+            return None
+        return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
 
     def _is_probably_silent_wav(self, output_path: str) -> bool:
         """检测 WAV 是否全静音，避免 0:00 或空白试听被误判为成功"""

@@ -527,9 +527,11 @@ class FFmpegProcessor:
                 "-i", audio_path,
                 "-filter_complex",
                 (
-                    f"[1:a:0]volume={background_volume}[bg];"
-                    "[2:a:0]volume=1.0[voice];"
-                    "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0[out]"
+                    f"[1:a:0]aresample=44100,volume={background_volume},highpass=f=45,lowpass=f=16000[bg];"
+                    "[2:a:0]aresample=44100,loudnorm=I=-16:TP=-1.5:LRA=11,volume=1.05,asplit=2[voice][voice_key];"
+                    "[bg][voice_key]sidechaincompress=threshold=0.045:ratio=8:attack=18:release=280:makeup=1[bg_ducked];"
+                    "[bg_ducked][voice]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+                    "alimiter=limit=0.97[out]"
                 ),
                 "-map", "0:v:0",
                 "-map", "[out]",

@@ -26,7 +26,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
-from ..core.voice_engine import provider_audio_format
+from ..core.voice_engine import VoiceEngine as CoreVoiceEngine, provider_audio_format
 from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
@@ -1986,6 +1986,16 @@ def _srt_time_to_milliseconds(value: str) -> int:
     return int(round((hours * 3600 + minutes * 60 + seconds) * 1000))
 
 
+def _milliseconds_to_srt_time(total_ms: int) -> str:
+    """把毫秒转换成 SRT 时间码"""
+    safe_ms = max(0, int(total_ms))
+    hours = safe_ms // 3600000
+    minutes = (safe_ms % 3600000) // 60000
+    seconds = (safe_ms % 60000) // 1000
+    millis = safe_ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
 def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_per_segment: int = 220) -> list[dict[str, Any]]:
     """把字幕条目转换为配音分段，保留每段在视频里的起止时间"""
     segments: list[dict[str, Any]] = []
@@ -2043,6 +2053,73 @@ def _load_voice_entries_from_subtitle_file(subtitle_path: Optional[str]) -> list
         return []
     engine = SubtitleEngine()
     return _voice_entries_from_subtitle_entries(_parse_subtitle_entries(engine, path))
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """安全转换整数，兼容 JSON 里的字符串数值"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _sync_subtitle_entries_to_voice_timeline(
+    entries: list[dict[str, Any]],
+    voice_timeline: list[dict[str, Any]],
+    max_extension_ms: int = 1200,
+    tail_padding_ms: int = 120,
+    min_gap_ms: int = 60,
+) -> list[dict[str, Any]]:
+    """按真实配音尾音延长字幕显示时间，避免话还没说完字幕先消失"""
+    if not entries or not voice_timeline:
+        return [dict(entry) for entry in entries]
+
+    segments: list[dict[str, int]] = []
+    for item in voice_timeline:
+        start_ms = max(0, _safe_int(item.get("start_ms"), 0))
+        source_duration_ms = max(0, _safe_int(item.get("source_duration_ms"), 0))
+        window_duration_ms = max(0, _safe_int(item.get("duration_ms"), 0))
+        audio_end_ms = max(0, _safe_int(item.get("audio_end_ms"), 0))
+        if audio_end_ms <= start_ms:
+            audio_end_ms = start_ms + (source_duration_ms or window_duration_ms)
+        if audio_end_ms <= start_ms:
+            continue
+        segments.append({"start_ms": start_ms, "audio_end_ms": audio_end_ms})
+    if not segments:
+        return [dict(entry) for entry in entries]
+    segments.sort(key=lambda item: item["start_ms"])
+
+    synced: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        start_ms = _srt_time_to_milliseconds(str(entry.get("start") or "00:00:00,000"))
+        end_ms = _srt_time_to_milliseconds(str(entry.get("end") or entry.get("start") or "00:00:00,000"))
+        if end_ms <= start_ms:
+            end_ms = start_ms + 1000
+        next_start_ms = (
+            _srt_time_to_milliseconds(str(entries[index + 1].get("start") or "00:00:00,000"))
+            if index + 1 < len(entries)
+            else None
+        )
+        desired_end_ms = end_ms
+        for segment in segments:
+            segment_start_ms = segment["start_ms"]
+            if segment_start_ms < start_ms - 80:
+                continue
+            if segment_start_ms > end_ms + 80:
+                break
+            desired_end_ms = max(desired_end_ms, segment["audio_end_ms"] + tail_padding_ms)
+
+        if desired_end_ms > end_ms:
+            desired_end_ms = min(desired_end_ms, end_ms + max_extension_ms)
+            if next_start_ms is not None and next_start_ms > start_ms:
+                desired_end_ms = min(desired_end_ms, max(end_ms, next_start_ms - min_gap_ms))
+
+        next_entry = dict(entry)
+        next_entry["index"] = len(synced) + 1
+        next_entry["start"] = _milliseconds_to_srt_time(start_ms)
+        next_entry["end"] = _milliseconds_to_srt_time(max(start_ms + 1, desired_end_ms))
+        synced.append(next_entry)
+    return synced
 
 
 def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[dict[str, str | int]]:
@@ -2406,7 +2483,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     subtitle_text = ""
     subtitle_entries: list[dict[str, Any]] = []
     voice_subtitle_entries: list[dict[str, Any]] = []
+    display_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
+    voice_synced_subtitle_path: Optional[str] = None
     subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
     final_export_preset: dict[str, Any] = build_final_export_preset(request.export_settings)
     audio_path: Optional[str] = None
@@ -2561,6 +2640,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             raise
 
     video_for_export = effects_path
+    defer_subtitle_burn_for_voice = bool(request.burn_subtitles and request.enable_voice)
     skip_subtitle_stage = _skips_subtitle_stage(request)
     subtitle_processing_disabled = _uses_original_subtitles_without_burn(request)
     voice_needs_original_subtitles = _voice_needs_original_subtitles(request)
@@ -2621,10 +2701,17 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(resumable_error))
             raise resumable_error from exc
     elif reusable_subtitle_path:
-        video_for_export = reusable_subtitle_path if request.burn_subtitles else video_for_export
-        subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else None
-        voice_subtitle_entries = _load_voice_entries_from_subtitle_file(_find_job_editable_subtitle_path(job, db) if job else reusable_subtitle_path)
+        reusable_editable_path = _find_job_editable_subtitle_path(job, db) if job else reusable_subtitle_path
+        if request.burn_subtitles and not defer_subtitle_burn_for_voice and os.path.splitext(reusable_subtitle_path)[1].lower() not in EDITABLE_SUBTITLE_EXTENSIONS:
+            video_for_export = reusable_subtitle_path
+        subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else _existing_file(str(reusable_editable_path or ""), EDITABLE_SUBTITLE_EXTENSIONS)
+        voice_subtitle_entries = _load_voice_entries_from_subtitle_file(reusable_editable_path)
         subtitle_entries = voice_subtitle_entries
+        if subtitle_ass_path:
+            try:
+                display_entries = SubtitleEngine().normalize_entries_for_display(_parse_subtitle_entries(SubtitleEngine(), subtitle_ass_path), preset_dict)
+            except Exception:
+                display_entries = [dict(entry) for entry in voice_subtitle_entries]
         subtitle_text = entries_to_plain_text(voice_subtitle_entries) or (job.subtitle_text if job else "") or ""
         _mark_stage_reused(db, job, "subtitle", reusable_subtitle_path)
         stages.append(AutomationStageResult(key="subtitle", status="completed", progress=100, output_path=reusable_subtitle_path))
@@ -2776,7 +2863,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             subtitle_ass_path = os.path.join(paths["output_dir"], f"{base_name}_{language}.ass")
             video_size = processor.media_video_size(effects_path)
             engine.generate_ass(display_entries, subtitle_ass_path, preset_dict, video_size=video_size)
-            if request.burn_subtitles:
+            should_burn_subtitles_now = bool(request.burn_subtitles and not defer_subtitle_burn_for_voice)
+            if should_burn_subtitles_now:
                 def on_burn_progress(progress: float) -> None:
                     """同步 ffmpeg 字幕烧录进度，避免长视频烧录时停在 70%"""
                     _check_control(db, job, subtitle_task)
@@ -2793,7 +2881,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     progress_callback=on_burn_progress,
                 )
             _check_control(db, job, subtitle_task)
-            _complete_task(db, subtitle_task, video_for_export if request.burn_subtitles else subtitle_ass_path)
+            _complete_task(db, subtitle_task, video_for_export if should_burn_subtitles_now else subtitle_ass_path)
             if warning_messages:
                 subtitle_task.error_message = "；".join(warning_messages)
                 db.commit()
@@ -2803,7 +2891,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 "comparison_subtitle_path": comparison_subtitle_path,
                 "editable_subtitle_path": comparison_subtitle_path or subtitle_ass_path,
                 "subtitle_ass_path": subtitle_ass_path,
-                "rendered_video_path": video_for_export if request.burn_subtitles else None,
+                "rendered_video_path": video_for_export if should_burn_subtitles_now else None,
+                "burn_deferred_for_voice": defer_subtitle_burn_for_voice,
                 "subtitle_language": language,
                 "recognition_mode": (request.subtitle_recognition_mode or "local").strip().lower(),
             }, ensure_ascii=False)
@@ -2976,6 +3065,15 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             try:
                 subtitle_only_stem = f"{_safe_cover_base_name(video.title or video.video_id or 'video')}_subtitle_only"
                 subtitle_only_working_video = working_video
+                if defer_subtitle_burn_for_voice:
+                    subtitle_only_working_video = processor.burn_subtitles(
+                        video_path=subtitle_only_working_video,
+                        subtitle_path=subtitle_ass_path,
+                        preset=subtitle_burn_preset,
+                        control_keys=_control_keys(job, export_task),
+                        progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(48.0, 15.0 + progress * 0.33)),
+                    )
+                    _check_control(db, job, export_task)
                 if should_apply_final_export_settings(request.export_with_settings, request.export_settings):
                     subtitle_only_working_video = processor.apply_effects(
                         video_path=subtitle_only_working_video,
@@ -3030,6 +3128,47 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             db.commit()
             if job:
                 _update_job_stage(db, job, "export", "running", progress=70, task_id=export_task.id)
+        if defer_subtitle_burn_for_voice and request.burn_subtitles and subtitle_ass_path:
+            subtitle_for_voice_burn = subtitle_ass_path
+            if audio_path:
+                voice_timeline = CoreVoiceEngine.load_timeline_metadata(audio_path)
+                entries_for_voice_burn = display_entries
+                if not entries_for_voice_burn:
+                    entries_for_voice_burn = SubtitleEngine().normalize_entries_for_display(
+                        _parse_subtitle_entries(SubtitleEngine(), subtitle_ass_path),
+                        preset_dict,
+                    )
+                synced_entries = _sync_subtitle_entries_to_voice_timeline(entries_for_voice_burn, voice_timeline)
+                if voice_timeline and synced_entries:
+                    synced_stem = os.path.splitext(os.path.basename(subtitle_ass_path))[0]
+                    voice_synced_subtitle_path = os.path.join(paths["output_dir"], f"{synced_stem}_voice_synced.ass")
+                    SubtitleEngine().generate_ass(
+                        synced_entries,
+                        voice_synced_subtitle_path,
+                        preset_dict,
+                        video_size=processor.media_video_size(working_video),
+                    )
+                    subtitle_for_voice_burn = voice_synced_subtitle_path
+                    export_params = _read_task_params(export_task)
+                    export_params["voice_synced_subtitle_path"] = voice_synced_subtitle_path
+                    export_task.params = json.dumps(export_params, ensure_ascii=False)
+                    if job:
+                        job_params = _get_job_params(job)
+                        job_params["voice_synced_subtitle_path"] = voice_synced_subtitle_path
+                        _set_job_params(job, job_params)
+                    db.commit()
+            working_video = processor.burn_subtitles(
+                video_path=working_video,
+                subtitle_path=subtitle_for_voice_burn,
+                preset=subtitle_burn_preset,
+                control_keys=_control_keys(job, export_task),
+                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(88.0, 70.0 + progress * 0.18)),
+            )
+            _check_control(db, job, export_task)
+            export_task.progress = max(float(export_task.progress or 0), 82.0)
+            db.commit()
+            if job:
+                _update_job_stage(db, job, "export", "running", progress=export_task.progress, task_id=export_task.id)
         if should_apply_final_export_settings(request.export_with_settings, request.export_settings):
             render_start = max(15.0, float(export_task.progress or 15.0))
             working_video = processor.apply_effects(

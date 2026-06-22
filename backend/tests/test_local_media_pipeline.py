@@ -2,6 +2,7 @@
 # 本地媒体管线测试 - 不依赖 YouTube 或外部 API，验证 ffmpeg 画面、字幕和导出链路
 
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -177,9 +178,47 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result_path, output_audio)
         self.assertEqual([item["text"] for item in generated], ["第一句", "第二句"])
         self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
-        self.assertEqual([item["style"] for item in generated], ["解说风格", "对话风格"])
+        self.assertTrue(generated[0]["style"].startswith("解说风格"))
+        self.assertTrue(generated[1]["style"].startswith("对话风格"))
         self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
         self.assertEqual([item["duration_ms"] for item in mixed_items], [500, 500])
+
+    def test_batched_timed_voice_writes_timeline_metadata(self):
+        """批量配音完成后保存真实片段时长，供最终字幕按配音尾音同步"""
+        output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
+        generated_settings: list[dict] = []
+
+        async def fake_generate_voice(text: str, output_path: str, settings=None, **_kwargs):
+            generated_settings.append(settings or {})
+            with open(output_path, "wb") as file:
+                file.write(f"voice:{text}".encode("utf-8"))
+            return output_path
+
+        def fake_mix(_timed_audio_paths, final_output_path: str):
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch.object(self.voice_engine, "_audio_duration_seconds", return_value=1.42),
+        ):
+            result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
+                segments=[{"start_ms": 1000, "end_ms": 2200, "text": "测试配音"}],
+                output_path=output_audio,
+                settings={"style_prompt": "自然男声"},
+            ))
+
+        metadata_path = VoiceEngine.timeline_metadata_path(result_path)
+        self.assertTrue(os.path.isfile(metadata_path))
+        with open(metadata_path, "r", encoding="utf-8") as file:
+            metadata = json.load(file)
+
+        self.assertEqual(metadata["segments"][0]["start_ms"], 1000)
+        self.assertEqual(metadata["segments"][0]["duration_ms"], 1200)
+        self.assertEqual(metadata["segments"][0]["source_duration_ms"], 1420)
+        self.assertIn("目标时长约 1.2 秒", generated_settings[0]["style_prompt"])
 
     def test_batched_voice_chunks_segments_without_merging_text(self):
         """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
@@ -378,9 +417,10 @@ class LocalMediaPipelineTest(unittest.TestCase):
         separate_background.assert_called_once()
         self.assertIn(background_audio, calls[0])
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
-        self.assertIn("[1:a:0]volume=0.35[bg]", filter_arg)
-        self.assertIn("[2:a:0]volume=1.0[voice]", filter_arg)
-        self.assertIn("[bg][voice]amix", filter_arg)
+        self.assertIn("volume=0.35", filter_arg)
+        self.assertIn("loudnorm=I=-16", filter_arg)
+        self.assertIn("sidechaincompress", filter_arg)
+        self.assertIn("[bg_ducked][voice]amix", filter_arg)
 
     def test_background_audio_mode_requires_local_ai_separator(self):
         """保留背景声模式找不到本地 AI 分离模型时直接报错，不再退回声道抵消"""
