@@ -227,6 +227,14 @@ class FakeAutomationRecognizer:
 class FakeVoiceEngine:
     """测试用配音引擎，返回假音频文件"""
 
+    async def generate_grouped_timed_voice_track(self, output_path, progress_callback=None, **_kwargs):
+        """模拟按时间轴分组合成配音"""
+        if progress_callback:
+            progress_callback(100)
+        with open(output_path, "wb") as file:
+            file.write(b"voice")
+        return output_path
+
     async def generate_batched_timed_voice_track(self, output_path, progress_callback=None, **_kwargs):
         """模拟按字幕批量分段生成配音"""
         if progress_callback:
@@ -265,6 +273,10 @@ class FailingTextEngine:
 class FailingVoiceEngine:
     """测试用配音引擎，模拟分段和整段配音都失败"""
 
+    async def generate_grouped_timed_voice_track(self, *_args, **_kwargs):
+        """模拟分组配音失败"""
+        raise RuntimeError("配音 API 重试次数已用完")
+
     async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
         """模拟批量配音失败"""
         raise RuntimeError("配音 API 重试次数已用完")
@@ -280,6 +292,10 @@ class FailingVoiceEngine:
 
 class FailingSegmentVoiceEngine:
     """测试用配音引擎，分段失败但整段接口不应被回退调用"""
+
+    async def generate_grouped_timed_voice_track(self, *_args, **_kwargs):
+        """模拟分组配音失败"""
+        raise RuntimeError("分组配音失败")
 
     async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
         """模拟按时间轴配音失败"""
@@ -2643,6 +2659,108 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 0.25)
+
+    def test_automation_voice_grouped_mode_uses_grouped_timeline(self):
+        """一键配音分组模式会走时间轴分组合成，并传入分组参数"""
+        class CapturingGroupedVoiceEngine:
+            """记录分组配音输入，避免真实调用配音接口"""
+
+            def __init__(self):
+                self.segments: list[dict] = []
+                self.settings: dict = {}
+
+            async def generate_grouped_timed_voice_track(self, segments, output_path, settings=None, progress_callback=None, **_kwargs):
+                """模拟时间轴分组合成配音"""
+                self.segments = segments
+                self.settings = settings or {}
+                if progress_callback:
+                    progress_callback(100)
+                with open(output_path, "wb") as file:
+                    file.write(b"voice")
+                return output_path
+
+            async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
+                """分组模式不应调用逐条并发接口"""
+                raise AssertionError("分组模式不应调用逐条并发接口")
+
+            async def generate_timed_voice_track(self, *_args, **_kwargs):
+                """分组模式不应调用串行逐句接口"""
+                raise AssertionError("分组模式不应调用串行逐句接口")
+
+            async def generate_voice(self, *_args, **_kwargs):
+                """分组模式有时间轴时不应调用整段配音"""
+                raise AssertionError("分组模式不应调用整段接口")
+
+        with tempfile.TemporaryDirectory(prefix="automation_voice_grouped_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            voice_engine = CapturingGroupedVoiceEngine()
+            video = VideoSource(id=1, platform="youtube", video_id="voice-grouped", url="https://example.test/video", title="分组配音")
+            voice_profile = VoiceProviderProfile(
+                id=16,
+                name="配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            task_ids = iter(range(195, 210))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-grouped",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FakeAutomationRecognizer()),
+                patch("backend.api.automation.VoiceEngine", return_value=voice_engine),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=True,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                        voice_mode="grouped",
+                        voice_group_size=5,
+                        voice_group_chars=360,
+                        voice_group_max_seconds=9,
+                        voice_group_gap_ms=600,
+                        voice_concurrency=3,
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["voice"].status, "completed")
+        self.assertEqual([segment["text"] for segment in voice_engine.segments], ["本地识别字幕"])
+        self.assertEqual(voice_engine.settings["voice_group_size"], 5)
+        self.assertEqual(voice_engine.settings["voice_group_chars"], 360)
+        self.assertEqual(voice_engine.settings["voice_group_max_seconds"], 9)
+        self.assertEqual(voice_engine.settings["voice_group_gap_ms"], 600)
+        self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
 
     def test_automation_voice_invalid_audio_mode_falls_back_to_mix(self):
         """一键配音遇到异常音频模式时默认混合原声，避免误静音 BGM 和游戏声音"""

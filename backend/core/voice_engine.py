@@ -221,6 +221,83 @@ class VoiceEngine:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    async def generate_grouped_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """按短时间轴分组合成配音，自动提速或拆分超长分组"""
+        normalized_segments = self._normalize_timed_segments(segments)
+        if not normalized_segments:
+            raise ValueError("没有可生成配音的字幕分段")
+
+        options = settings or {}
+        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        group_size = max(1, min(12, self._int(options.get("voice_group_size"), 6)))
+        group_chars = max(80, min(2000, self._int(options.get("voice_group_chars"), 500)))
+        group_window_ms = max(1000, min(30000, int(self._float(options.get("voice_group_max_seconds"), 12.0) * 1000)))
+        group_gap_ms = max(0, min(5000, self._int(options.get("voice_group_gap_ms"), 800)))
+        concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
+        semaphore = asyncio.Semaphore(concurrency)
+        groups = self._group_timed_segments(
+            normalized_segments,
+            group_size=group_size,
+            max_chars=group_chars,
+            max_window_ms=group_window_ms,
+            max_gap_ms=group_gap_ms,
+            voice_selector=voice_selector,
+            style_selector=style_selector,
+            default_voice=voice,
+        )
+        if not groups:
+            raise ValueError("没有可生成配音的字幕分组")
+
+        temp_dir = tempfile.mkdtemp(prefix="voice_groups_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
+        completed = 0
+        timed_audio_paths: list[dict[str, Any]] = []
+
+        async def generate_group(index: int, group: dict[str, Any]) -> list[dict[str, Any]]:
+            """生成单个分组，必要时在组内自动拆分"""
+            async with semaphore:
+                return await self._generate_grouped_voice_items(
+                    group=group,
+                    temp_dir=temp_dir,
+                    file_stem=f"group_{index:04d}",
+                    audio_format=audio_format,
+                    provider_type=provider_type,
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    settings=options,
+                )
+
+        try:
+            tasks = [asyncio.create_task(generate_group(index, group)) for index, group in enumerate(groups, 1)]
+            for task in asyncio.as_completed(tasks):
+                timed_audio_paths.extend(await task)
+                completed += 1
+                if progress_callback:
+                    progress_callback(10 + completed / max(len(groups), 1) * 75)
+
+            timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            if progress_callback:
+                progress_callback(95)
+            return result
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     async def generate_timed_voice_track(
         self,
         segments: list[dict[str, Any]],
@@ -797,6 +874,178 @@ class VoiceEngine:
 
         flush()
         return [batch for batch in batches if str(batch.get("text") or "").strip()]
+
+    def _group_timed_segments(
+        self,
+        segments: list[dict[str, Any]],
+        group_size: int,
+        max_chars: int,
+        max_window_ms: int,
+        max_gap_ms: int,
+        voice_selector: Optional[Callable[[dict[str, Any]], str]],
+        style_selector: Optional[Callable[[dict[str, Any]], str]],
+        default_voice: str,
+    ) -> list[dict[str, Any]]:
+        """按时间窗口合并字幕；不同音色、长停顿或过长窗口不合并"""
+        groups: list[dict[str, Any]] = []
+        current: list[dict[str, Any]] = []
+        current_voice = ""
+        current_style = ""
+        current_chars = 0
+        safe_group_size = max(1, group_size)
+        safe_max_chars = max(1, max_chars)
+        safe_max_window_ms = max(1, max_window_ms)
+        safe_max_gap_ms = max(0, max_gap_ms)
+
+        def flush() -> None:
+            """提交当前分组"""
+            nonlocal current, current_voice, current_style, current_chars
+            if not current:
+                return
+            groups.append(self._build_voice_group(current, current_voice or default_voice, current_style))
+            current = []
+            current_voice = ""
+            current_style = ""
+            current_chars = 0
+
+        for segment in segments:
+            selected_voice = voice_selector(segment) if voice_selector else default_voice
+            segment_voice = str(selected_voice or default_voice).strip() or default_voice
+            segment_style = str(style_selector(segment) if style_selector else "").strip()
+            text_len = len(str(segment.get("text") or ""))
+            next_window_ms = int(segment["end_ms"]) - int(current[0]["start_ms"]) if current else int(segment["end_ms"]) - int(segment["start_ms"])
+            gap_ms = int(segment["start_ms"]) - int(current[-1]["end_ms"]) if current else 0
+            should_flush = bool(current) and (
+                segment_voice != current_voice
+                or segment_style != current_style
+                or len(current) >= safe_group_size
+                or current_chars + text_len > safe_max_chars
+                or next_window_ms > safe_max_window_ms
+                or gap_ms > safe_max_gap_ms
+            )
+            if should_flush:
+                flush()
+            current.append(segment)
+            current_voice = segment_voice
+            current_style = segment_style
+            current_chars += text_len
+
+        flush()
+        return [group for group in groups if str(group.get("text") or "").strip()]
+
+    def _build_voice_group(self, segments: list[dict[str, Any]], voice: str, style_prompt: str) -> dict[str, Any]:
+        """把字幕分段包装成一次 TTS 分组请求"""
+        return {
+            "segments": [dict(segment) for segment in segments],
+            "text": "\n".join(str(item["text"]) for item in segments if str(item.get("text") or "").strip()),
+            "voice": voice,
+            "style_prompt": style_prompt,
+            "start_ms": int(segments[0]["start_ms"]),
+            "end_ms": int(segments[-1]["end_ms"]),
+        }
+
+    async def _generate_grouped_voice_items(
+        self,
+        group: dict[str, Any],
+        temp_dir: str,
+        file_stem: str,
+        audio_format: str,
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """生成分组音频；超出窗口时自动提速，仍失败则递归拆分"""
+        segments = list(group.get("segments") or [])
+        if not segments:
+            return []
+
+        max_speed = max(1.0, min(2.0, self._float(settings.get("voice_group_max_speed"), 1.25)))
+        retry_margin = max(1.0, min(1.5, self._float(settings.get("voice_group_duration_margin"), 1.12)))
+        window_ms = max(1, int(group["end_ms"]) - int(group["start_ms"]))
+        speed_values = [1.0]
+        if max_speed > 1.0 and self._provider_supports_speed(provider_type):
+            speed_values.extend([min(max_speed, 1.12), min(max_speed, 1.25), max_speed])
+        speed_values = self._unique_speeds(speed_values)
+        last_path = ""
+        last_duration_ms = 0
+
+        for attempt, speed in enumerate(speed_values, 1):
+            group_path = os.path.join(temp_dir, f"{file_stem}_try{attempt}.{audio_format}")
+            group_settings = self._settings_with_style_prompt(settings, str(group.get("style_prompt") or ""))
+            group_settings = dict(group_settings)
+            group_settings["speed"] = speed
+            await self.generate_voice(
+                text=str(group["text"]),
+                output_path=group_path,
+                provider_type=provider_type,
+                voice=str(group.get("voice") or ""),
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                settings=group_settings,
+            )
+            duration_seconds = self._audio_duration_seconds(group_path)
+            duration_ms = int((duration_seconds or 0) * 1000)
+            last_path = group_path
+            last_duration_ms = duration_ms
+            if duration_ms <= max(1, int(window_ms * retry_margin)):
+                return [{
+                    "path": group_path,
+                    "start_ms": int(group["start_ms"]),
+                    "duration_ms": window_ms,
+                    "source_duration_ms": duration_ms,
+                }]
+
+        if len(segments) <= 1:
+            return [{
+                "path": last_path,
+                "start_ms": int(group["start_ms"]),
+                "duration_ms": window_ms,
+                "source_duration_ms": last_duration_ms,
+            }]
+
+        middle = max(1, len(segments) // 2)
+        left = self._build_voice_group(segments[:middle], str(group.get("voice") or ""), str(group.get("style_prompt") or ""))
+        right = self._build_voice_group(segments[middle:], str(group.get("voice") or ""), str(group.get("style_prompt") or ""))
+        left_items = await self._generate_grouped_voice_items(
+            group=left,
+            temp_dir=temp_dir,
+            file_stem=f"{file_stem}_a",
+            audio_format=audio_format,
+            provider_type=provider_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+        )
+        right_items = await self._generate_grouped_voice_items(
+            group=right,
+            temp_dir=temp_dir,
+            file_stem=f"{file_stem}_b",
+            audio_format=audio_format,
+            provider_type=provider_type,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+        )
+        return left_items + right_items
+
+    def _unique_speeds(self, speeds: list[float]) -> list[float]:
+        """清理重复语速，避免同一速度重复请求接口"""
+        unique: list[float] = []
+        for speed in speeds:
+            normalized = round(max(0.5, min(2.0, float(speed))), 3)
+            if all(abs(normalized - existing) > 0.01 for existing in unique):
+                unique.append(normalized)
+        return unique
+
+    def _provider_supports_speed(self, provider_type: str) -> bool:
+        """判断渠道是否支持请求级语速；不支持时直接拆分，减少无效重试"""
+        normalized = self.resolve_provider_type(provider_type)
+        return normalized in {"openai_tts", "custom_tts", "minimax_tts"}
 
     def _settings_with_style_prompt(self, settings: dict[str, Any], style_prompt: str) -> dict[str, Any]:
         """按分段覆盖风格提示；没有角色风格时复用全局设置"""

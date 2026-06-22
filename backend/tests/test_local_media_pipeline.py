@@ -196,6 +196,101 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
         self.assertEqual([[segment["text"] for segment in chunk] for chunk in chunks], [["第一句", "第二句"], ["第三句", "第四句"], ["第五句"]])
 
+    def test_grouped_timed_voice_merges_safe_adjacent_subtitles(self):
+        """时间轴分组合成会把安全相邻字幕合成一次请求，减少 API 调用次数"""
+        output_audio = os.path.join(self.temp_dir, "grouped_voice.wav")
+        generated: list[dict[str, str]] = []
+        mixed_items: list[dict] = []
+
+        async def fake_generate_voice(text: str, output_path: str, voice: str = "", settings=None, **_kwargs):
+            generated.append({"text": text, "voice": voice, "speed": str((settings or {}).get("speed"))})
+            with open(output_path, "wb") as file:
+                file.write(b"group")
+            return output_path
+
+        def fake_duration(path: str):
+            _ = path
+            return 1.4
+
+        def fake_mix(timed_audio_paths, final_output_path: str):
+            mixed_items.extend(timed_audio_paths)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+        ):
+            result_path = asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
+                segments=[
+                    {"start_ms": 0, "end_ms": 800, "text": "第一句", "speaker": "旁白"},
+                    {"start_ms": 800, "end_ms": 1600, "text": "第二句", "speaker": "旁白"},
+                    {"start_ms": 2000, "end_ms": 3600, "text": "第三句", "speaker": "角色A"},
+                ],
+                output_path=output_audio,
+                voice="alloy",
+                voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
+                settings={"voice_group_size": 6, "voice_group_chars": 500, "voice_group_max_seconds": 12, "voice_group_gap_ms": 800, "voice_concurrency": 1},
+            ))
+
+        self.assertEqual(result_path, output_audio)
+        self.assertEqual([item["text"] for item in generated], ["第一句\n第二句", "第三句"])
+        self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 2000])
+        self.assertEqual([item["duration_ms"] for item in mixed_items], [1600, 1600])
+
+    def test_grouped_timed_voice_speeds_up_then_splits_when_too_long(self):
+        """分组音频超出窗口时先自动提速，仍超时再拆成更小组"""
+        output_audio = os.path.join(self.temp_dir, "grouped_retry_voice.wav")
+        generated: list[dict[str, str]] = []
+        mixed_items: list[dict] = []
+
+        async def fake_generate_voice(text: str, output_path: str, settings=None, **_kwargs):
+            generated.append({"text": text, "speed": str((settings or {}).get("speed"))})
+            with open(output_path, "wb") as file:
+                file.write(b"group")
+            return output_path
+
+        def fake_duration(path: str):
+            return 5.0 if "_try" in path and "_a_" not in path and "_b_" not in path else 0.7
+
+        def fake_mix(timed_audio_paths, final_output_path: str):
+            mixed_items.extend(timed_audio_paths)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
+            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+        ):
+            asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
+                segments=[
+                    {"start_ms": 0, "end_ms": 800, "text": "第一句"},
+                    {"start_ms": 800, "end_ms": 1600, "text": "第二句"},
+                ],
+                output_path=output_audio,
+                voice="alloy",
+                settings={
+                    "voice_group_size": 6,
+                    "voice_group_chars": 500,
+                    "voice_group_max_seconds": 12,
+                    "voice_group_gap_ms": 800,
+                    "voice_group_max_speed": 1.25,
+                    "voice_group_duration_margin": 1.05,
+                    "voice_concurrency": 1,
+                },
+            ))
+
+        self.assertIn({"text": "第一句\n第二句", "speed": "1.0"}, generated)
+        self.assertIn({"text": "第一句\n第二句", "speed": "1.25"}, generated)
+        self.assertIn({"text": "第一句", "speed": "1.0"}, generated)
+        self.assertIn({"text": "第二句", "speed": "1.0"}, generated)
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
+
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
         """默认只按字幕开始时间放置配音，不再强制变速或裁剪尾音"""
         first_audio = os.path.join(self.temp_dir, "first.wav")

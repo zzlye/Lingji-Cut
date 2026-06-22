@@ -43,6 +43,10 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   voice_batch_size: 16,
   voice_batch_chars: 1800,
   voice_concurrency: 2,
+  voice_group_size: 6,
+  voice_group_chars: 500,
+  voice_group_max_seconds: 12,
+  voice_group_gap_ms: 800,
   multi_speaker_enabled: false,
   voice_presets: [
     { id: 'preset_narrator', name: '旁白', voice: 'alloy', style_prompt: '用中性自然解说口吻，语气稳定，节奏清晰。', sample_text: '旁白负责解释画面和推进节奏。' },
@@ -141,7 +145,7 @@ function normalizeBannedWords(value: unknown): string[] {
 /** 规范一键配音生成模式，旧版 segmented 继续保留 */
 function normalizeVoiceMode(value: unknown): AutomationPreferences['voice_mode'] {
   const mode = String(value || '')
-  return ['full', 'batched', 'segmented'].includes(mode)
+  return ['full', 'batched', 'segmented', 'grouped'].includes(mode)
     ? mode as AutomationPreferences['voice_mode']
     : DEFAULT_AUTOMATION_PREFERENCES.voice_mode
 }
@@ -223,6 +227,10 @@ export function loadAutomationPreferences(): AutomationPreferences {
       voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
       voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
       voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
+      voice_group_size: normalizeVoiceNumber(parsed.voice_group_size, DEFAULT_AUTOMATION_PREFERENCES.voice_group_size, 1, 12),
+      voice_group_chars: normalizeVoiceNumber(parsed.voice_group_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_group_chars, 80, 2000),
+      voice_group_max_seconds: Math.min(30, Math.max(1, Number(parsed.voice_group_max_seconds ?? DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds) || DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds)),
+      voice_group_gap_ms: normalizeVoiceNumber(parsed.voice_group_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_group_gap_ms, 0, 5000),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
       voice_presets: voicePresets,
       voice_speakers: normalizeVoiceSpeakers(parsed.voice_speakers, voicePresets),

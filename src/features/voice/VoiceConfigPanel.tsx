@@ -640,7 +640,9 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         <AccordionItem value="params" className="rounded-lg border px-4">
           <AccordionTrigger className="text-sm">配音参数（语速 / 音量 / 格式等）</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
-            <SliderField label="语速" value={settings.speed} min={0.5} max={2} step={0.05} format={(v) => v.toFixed(2)} suffix="x" onChange={(v) => updateSetting('speed', v)} />
+            {automationOptions.voice_mode !== 'grouped' && (
+              <SliderField label="语速" value={settings.speed} min={0.5} max={2} step={0.05} format={(v) => v.toFixed(2)} suffix="x" onChange={(v) => updateSetting('speed', v)} />
+            )}
             <SliderField label="音量" value={settings.volume} min={0.1} max={10} step={0.1} format={(v) => v.toFixed(1)} onChange={(v) => updateSetting('volume', v)} />
             <SliderField label="音调" value={settings.pitch} min={-12} max={12} step={1} onChange={(v) => updateSetting('pitch', v)} />
             <div className="grid gap-3 sm:grid-cols-2">
@@ -670,10 +672,26 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
             <SwitchField label="额外导出无配音字幕版" description="开启后会多生成一个保留原声、没有配音的字幕版视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
-            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['batched', '按字幕时间轴并发生成（推荐）'], ['segmented', '逐句串行生成'], ['full', '整段生成（不保证时间轴）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
+            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['grouped', '时间轴分组合成（更快，自动调速）'], ['batched', '逐条按时间轴并发生成（最稳）'], ['segmented', '逐条按时间轴串行生成'], ['full', '整段生成（不保证同步）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
+            {automationOptions.voice_mode === 'grouped' && (
+              <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
+                分组合成会把相邻字幕合成一次请求，按整组时间窗自动判断语速；上方语速参数不会参与该模式。如果生成音频过长，会自动提速重试，仍超时再拆成更小组。
+              </p>
+            )}
             <div className="grid gap-3 sm:grid-cols-3">
-              <NumberField label="批次条数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
-              <NumberField label="批次字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
+              {automationOptions.voice_mode === 'grouped' ? (
+                <>
+                  <NumberField label="每组最大行数" value={automationOptions.voice_group_size} min={1} max={12} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_size: Math.max(1, Math.round(v)) }))} />
+                  <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
+                  <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
+                  <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
+                </>
+              ) : (
+                <>
+                  <NumberField label="每轮调度条数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" description="只控制并发调度，不会把多行合成一次 API 请求" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
+                  <NumberField label="每轮调度字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
+                </>
+              )}
               <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
             </div>
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
