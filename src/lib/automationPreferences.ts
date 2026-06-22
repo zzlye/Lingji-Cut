@@ -18,6 +18,9 @@ const AUDIO_REPLACE_CONFIRMED_KEY = 'audio_replace_confirmed'
 /** 自然分组模式迁移标记，避免旧版逐条并发继续造成抢话听感 */
 const VOICE_NATURAL_MODE_MIGRATED_KEY = 'voice_natural_mode_migrated'
 
+/** 严格时间轴模式迁移标记，避免旧版自然分组继续造成逐行字幕错位 */
+const VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY = 'voice_strict_timeline_mode_migrated'
+
 /** 尾音避让默认值迁移标记，避免旧缓存继续把 160ms 发给后端 */
 const VOICE_GAP_300_MIGRATED_KEY = 'voice_gap_300_migrated'
 
@@ -53,7 +56,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   enable_voice: false,
   export_subtitle_only_when_voice: false,
   voice_profile_id: null,
-  voice_mode: 'grouped',
+  voice_mode: 'batched',
   audio_mode: 'mix',
   original_volume: 0.25,
   voice_batch_size: 16,
@@ -235,10 +238,11 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
     const audioReplaceWasExplicitlyChosen = parsed[AUDIO_REPLACE_CONFIRMED_KEY] === true
     const voiceModeWasMigrated = parsed[VOICE_NATURAL_MODE_MIGRATED_KEY] === true
+    const strictTimelineModeWasMigrated = parsed[VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY] === true
     const voiceGapWasMigrated = parsed[VOICE_GAP_300_MIGRATED_KEY] === true
     const normalizedVoiceMode = normalizeVoiceMode(parsed.voice_mode)
-    const voiceMode = !voiceModeWasMigrated && normalizedVoiceMode === 'batched'
-      ? 'grouped'
+    const voiceMode = !strictTimelineModeWasMigrated && normalizedVoiceMode === 'grouped'
+      ? 'batched'
       : normalizedVoiceMode
     const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, parsed.voice_presets)
     const shouldPersistVoiceMigration = hasLegacyDefaultVoiceStylePrompts(parsed.voice_presets) || hasLegacyDefaultVoiceStylePrompts(parsed.voice_speakers)
@@ -274,10 +278,11 @@ export function loadAutomationPreferences(): AutomationPreferences {
       banned_words: normalizeBannedWords(parsed.banned_words),
       banned_word_action: parsed.banned_word_action === 'block' ? 'block' : 'warn',
     }
-    if (saved && (!voiceModeWasMigrated || !voiceGapWasMigrated || shouldPersistVoiceMigration) && typeof localStorage !== 'undefined') {
+    if (saved && (!voiceModeWasMigrated || !strictTimelineModeWasMigrated || !voiceGapWasMigrated || shouldPersistVoiceMigration) && typeof localStorage !== 'undefined') {
       localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify({
         ...preferences,
         [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
+        [VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY]: true,
         [VOICE_GAP_300_MIGRATED_KEY]: true,
       }))
     }
@@ -298,6 +303,7 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
     const persisted = {
       ...next,
       [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
+      [VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY]: true,
       [VOICE_GAP_300_MIGRATED_KEY]: true,
       ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
       ...(Object.prototype.hasOwnProperty.call(updates, 'audio_mode') ? { [AUDIO_REPLACE_CONFIRMED_KEY]: updates.audio_mode === 'replace' } : {}),

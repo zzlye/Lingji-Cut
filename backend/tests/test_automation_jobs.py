@@ -2716,10 +2716,10 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
             self.assertEqual(fake_processor.burn_calls[1]["video_path"], os.path.join(temp_dir, "merged.mp4"))
 
-    def test_automation_voice_uses_grouped_timeline_by_default(self):
-        """一键配音默认使用自然分组，减少逐条配音的抢话和机械感"""
+    def test_automation_voice_uses_batched_timeline_by_default(self):
+        """一键配音默认使用严格时间轴逐条并发，避免分组配音和逐行字幕错位"""
         class CapturingVoiceEngine:
-            """记录默认分组配音输入，避免真实调用配音接口"""
+            """记录默认批量配音输入，避免真实调用配音接口"""
 
             def __init__(self):
                 self.segments: list[dict] = []
@@ -2727,8 +2727,12 @@ class AutomationJobTests(unittest.TestCase):
                 self.voices: list[str] = []
                 self.styles: list[str] = []
 
-            async def generate_grouped_timed_voice_track(self, segments, output_path, voice_selector=None, style_selector=None, settings=None, progress_callback=None, **_kwargs):
-                """模拟默认时间轴分组配音"""
+            async def generate_grouped_timed_voice_track(self, *_args, **_kwargs):
+                """默认严格时间轴不应调用自然分组接口"""
+                raise AssertionError("默认严格时间轴不应调用自然分组接口")
+
+            async def generate_batched_timed_voice_track(self, segments, output_path, voice_selector=None, style_selector=None, settings=None, progress_callback=None, **_kwargs):
+                """模拟默认时间轴批量配音"""
                 self.segments = segments
                 self.settings = settings or {}
                 if voice_selector:
@@ -2741,13 +2745,9 @@ class AutomationJobTests(unittest.TestCase):
                     file.write(b"voice")
                 return output_path
 
-            async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
-                """默认自然分组不应调用逐条并发接口"""
-                raise AssertionError("默认自然分组不应调用逐条并发接口")
-
             async def generate_timed_voice_track(self, *_args, **_kwargs):
-                """默认自然分组不应退回串行逐句接口"""
-                raise AssertionError("默认自然分组不应调用串行逐句接口")
+                """默认严格时间轴不应退回串行逐句接口"""
+                raise AssertionError("默认严格时间轴不应调用串行逐句接口")
 
             async def generate_voice(self, *_args, **_kwargs):
                 """字幕时间轴可用时不应退回整段配音"""
@@ -2760,7 +2760,7 @@ class AutomationJobTests(unittest.TestCase):
             fake_downloader = FakeAutomationDownloader(downloaded_path)
             fake_processor = FakeAutomationProcessor(temp_dir)
             voice_engine = CapturingVoiceEngine()
-            video = VideoSource(id=1, platform="youtube", video_id="voice-grouped-default", url="https://example.test/video", title="默认分组配音")
+            video = VideoSource(id=1, platform="youtube", video_id="voice-batched-default", url="https://example.test/video", title="默认批量配音")
             voice_profile = VoiceProviderProfile(
                 id=6,
                 name="配音",
@@ -2773,7 +2773,7 @@ class AutomationJobTests(unittest.TestCase):
             task_ids = iter(range(95, 110))
             workspace_paths = {
                 "workspace_dir": temp_dir,
-                "workspace_name": "voice-grouped-default",
+                "workspace_name": "voice-batched-default",
                 "downloads_dir": temp_dir,
                 "output_dir": temp_dir,
                 "exports_dir": temp_dir,
@@ -2821,10 +2821,8 @@ class AutomationJobTests(unittest.TestCase):
                         multi_speaker_enabled=True,
                         speaker_voice_map={"旁白": "alloy", "角色 A": "nova"},
                         speaker_voice_styles={"旁白": "解说风格", "角色 A": "对话风格"},
-                        voice_group_size=5,
-                        voice_group_chars=900,
-                        voice_group_max_seconds=10,
-                        voice_group_gap_ms=700,
+                        voice_batch_size=5,
+                        voice_batch_chars=900,
                         voice_concurrency=3,
                     ),
                     FakeDb([]),
@@ -2835,10 +2833,8 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["第一句", "第二句"])
         self.assertEqual(voice_engine.voices, ["alloy", "nova"])
         self.assertEqual(voice_engine.styles, ["解说风格", "对话风格"])
-        self.assertEqual(voice_engine.settings["voice_group_size"], 5)
-        self.assertEqual(voice_engine.settings["voice_group_chars"], 900)
-        self.assertEqual(voice_engine.settings["voice_group_max_seconds"], 10)
-        self.assertEqual(voice_engine.settings["voice_group_gap_ms"], 700)
+        self.assertEqual(voice_engine.settings["voice_batch_size"], 5)
+        self.assertEqual(voice_engine.settings["voice_batch_chars"], 900)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
         self.assertEqual(voice_engine.settings["speed"], 1.0)
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")

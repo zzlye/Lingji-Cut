@@ -438,6 +438,56 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn("adelay=0:all=1", filter_arg)
         self.assertIn("adelay=1200:all=1", filter_arg)
 
+    def test_timed_voice_mix_zero_gap_still_prevents_overlap(self):
+        """0ms 只表示不额外留空，不能允许两段配音同时响"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        second_audio = os.path.join(self.temp_dir, "second.wav")
+        output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        self._create_test_audio(second_audio, 880)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            with open(output_audio, "wb") as file:
+                file.write(b"voice")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("backend.core.voice_engine.subprocess.run", side_effect=fake_run):
+            result_path = self.voice_engine.mix_timed_audio_files([
+                {"path": first_audio, "start_ms": 0, "duration_ms": 500, "source_duration_ms": 900},
+                {"path": second_audio, "start_ms": 600, "duration_ms": 500, "source_duration_ms": 300},
+            ], output_audio, min_gap_ms=0)
+
+        self.assertEqual(result_path, output_audio)
+        filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
+        self.assertIn("adelay=0:all=1", filter_arg)
+        self.assertIn("adelay=900:all=1", filter_arg)
+
+    def test_grouped_voice_timeline_metadata_expands_nested_segments(self):
+        """分组配音元数据按组内字幕展开，避免第一条字幕吃掉整组配音时长"""
+        output_audio = os.path.join(self.temp_dir, "grouped_voice.wav")
+        self.voice_engine._write_timeline_metadata(output_audio, [{
+            "path": output_audio,
+            "start_ms": 1000,
+            "original_start_ms": 800,
+            "duration_ms": 2000,
+            "source_duration_ms": 2400,
+            "text": "第一句，第二句",
+            "segments": [
+                {"start_ms": 800, "end_ms": 1800, "text": "第一句", "speaker": "旁白"},
+                {"start_ms": 1800, "end_ms": 2800, "text": "第二句", "speaker": "旁白"},
+            ],
+        }])
+
+        with open(VoiceEngine.timeline_metadata_path(output_audio), "r", encoding="utf-8") as file:
+            metadata = json.load(file)
+
+        self.assertEqual([item["text"] for item in metadata["segments"]], ["第一句", "第二句"])
+        self.assertEqual([item["original_start_ms"] for item in metadata["segments"]], [800, 1800])
+        self.assertEqual(metadata["segments"][0]["audio_end_ms"], metadata["segments"][1]["start_ms"])
+        self.assertEqual(metadata["segments"][1]["audio_end_ms"], 3400)
+
     def test_timed_voice_mix_can_fit_segment_to_subtitle_window_when_enabled(self):
         """显式开启贴合字幕窗口时才允许变速和裁剪，作为兼容开关保留"""
         first_audio = os.path.join(self.temp_dir, "first.wav")

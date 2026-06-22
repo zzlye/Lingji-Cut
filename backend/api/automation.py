@@ -166,7 +166,7 @@ class AutomationRunRequest(BaseModel):
     export_subtitle_only_when_voice: bool = False
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
-    voice_mode: str = "grouped"
+    voice_mode: str = "batched"
     audio_mode: str = "mix"
     original_volume: float = 0.25
     voice_batch_size: int = 16
@@ -1397,7 +1397,7 @@ def _uses_original_subtitles_without_burn(request: "AutomationRunRequest") -> bo
 
 def _voice_needs_original_subtitles(request: "AutomationRunRequest") -> bool:
     """配音需要字幕时间轴或没有手写文案时，才读取原字幕"""
-    voice_mode = str(request.voice_mode or "grouped").strip().lower()
+    voice_mode = str(request.voice_mode or "batched").strip().lower()
     uses_timeline = voice_mode in {"segmented", "batched", "grouped"}
     return bool(request.enable_voice and (uses_timeline or not str(request.voice_text or "").strip()))
 
@@ -2948,9 +2948,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings["voice_group_max_seconds"] = max(1.0, min(30.0, float(request.voice_group_max_seconds or settings.get("voice_group_max_seconds") or 12.0)))
             settings["voice_group_gap_ms"] = max(0, min(5000, int(request.voice_group_gap_ms or settings.get("voice_group_gap_ms") or 800)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
-            voice_mode = str(request.voice_mode or "grouped").strip().lower()
+            voice_mode = str(request.voice_mode or "batched").strip().lower()
             if voice_mode not in {"full", "segmented", "batched", "grouped"}:
-                voice_mode = "grouped"
+                voice_mode = "batched"
             voice_text_source = request.voice_text if voice_mode == "full" and str(request.voice_text or "").strip() else subtitle_text
             voice_text = (voice_text_source or _fallback_voice_text(video)).strip()
             voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text

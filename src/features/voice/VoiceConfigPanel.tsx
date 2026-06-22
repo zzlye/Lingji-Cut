@@ -54,8 +54,8 @@ const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
 const VOICE_MODE_OPTIONS: FieldOption[] = [
-  ['grouped', '自然分组（推荐，连贯、有停顿）'],
-  ['batched', '逐条并发（最快，容易像念稿）'],
+  ['batched', '严格时间轴（推荐，不重叠）'],
+  ['grouped', '自然分组（实验，可能逐行不同步）'],
   ['segmented', '逐条串行（慢，便于排查）'],
   ['full', '整段生成（自然但不保证同步）'],
 ]
@@ -806,12 +806,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <SelectField label="生成方式" value={automationOptions.voice_mode} options={VOICE_MODE_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
             {automationOptions.voice_mode === 'grouped' && (
               <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-                推荐给成片使用。它会把相邻字幕合成一段，让模型一次性处理语气、停顿和情绪；比逐条更不容易像念稿，也更少出现上一句没收尾下一句就进来的感觉。
+                实验模式。它会把相邻字幕合成一段来提升连贯度，但组内没有每行真实发声时间点，成片可能出现声音还在上一句、字幕已切到下一句。
               </p>
             )}
             {automationOptions.voice_mode === 'batched' && (
-              <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
-                逐条并发速度最快，但每句都是单独生成，情绪和换气会更碎；只建议接口很慢或需要快速预览时使用。
+              <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
+                成片推荐。每条字幕独立生成，批次只控制调度数量，不合并文本；最终按真实音频时长排到时间轴上，0ms 间隔也不会互相覆盖。
               </p>
             )}
             {automationOptions.voice_mode === 'grouped' ? (
@@ -820,15 +820,19 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
                 <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
                 <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
-                <NumberField label="尾音避让" description="默认 300ms。数值越大越不容易抢话，但整体配音会更靠后。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
                 <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
               </div>
-            ) : automationOptions.voice_mode === 'batched' || automationOptions.voice_mode === 'segmented' ? (
+            ) : automationOptions.voice_mode === 'batched' ? (
               <div className="grid gap-3 sm:grid-cols-3">
-                {automationOptions.voice_mode === 'batched' && (
-                  <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
-                )}
-                <NumberField label="尾音避让" description="默认 300ms。数值越大越不容易抢话，但整体配音会更靠后。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="每批最大行数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
+                <NumberField label="每批字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
+                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+              </div>
+            ) : automationOptions.voice_mode === 'segmented' ? (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
               </div>
             ) : null}
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
