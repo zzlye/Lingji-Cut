@@ -203,7 +203,12 @@ class LocalMediaPipelineTest(unittest.TestCase):
         mixed_items: list[dict] = []
 
         async def fake_generate_voice(text: str, output_path: str, voice: str = "", settings=None, **_kwargs):
-            generated.append({"text": text, "voice": voice, "speed": str((settings or {}).get("speed"))})
+            generated.append({
+                "text": text,
+                "voice": voice,
+                "speed": str((settings or {}).get("speed")),
+                "style": str((settings or {}).get("style_prompt") or ""),
+            })
             with open(output_path, "wb") as file:
                 file.write(b"group")
             return output_path
@@ -236,8 +241,10 @@ class LocalMediaPipelineTest(unittest.TestCase):
             ))
 
         self.assertEqual(result_path, output_audio)
-        self.assertEqual([item["text"] for item in generated], ["第一句\n第二句", "第三句"])
+        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第三句"])
         self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
+        self.assertIn("不要在每句字幕之间刻意停顿", generated[0]["style"])
+        self.assertIn("整段目标时长约 1.6 秒", generated[0]["style"])
         self.assertEqual([item["start_ms"] for item in mixed_items], [0, 2000])
         self.assertEqual([item["duration_ms"] for item in mixed_items], [1600, 1600])
 
@@ -285,10 +292,11 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 },
             ))
 
-        self.assertIn({"text": "第一句\n第二句", "speed": "1.0"}, generated)
-        self.assertIn({"text": "第一句\n第二句", "speed": "1.25"}, generated)
-        self.assertIn({"text": "第一句", "speed": "1.0"}, generated)
-        self.assertIn({"text": "第二句", "speed": "1.0"}, generated)
+        generated_pairs = [{"text": item["text"], "speed": item["speed"]} for item in generated]
+        self.assertIn({"text": "第一句，第二句", "speed": "1.0"}, generated_pairs)
+        self.assertIn({"text": "第一句，第二句", "speed": "1.25"}, generated_pairs)
+        self.assertIn({"text": "第一句", "speed": "1.0"}, generated_pairs)
+        self.assertIn({"text": "第二句", "speed": "1.0"}, generated_pairs)
         self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):

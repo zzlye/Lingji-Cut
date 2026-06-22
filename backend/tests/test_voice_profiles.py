@@ -2,6 +2,7 @@
 # 配音配置测试 - 验证配音模型获取和真实连接测试入口
 
 import asyncio
+import base64
 import os
 import sys
 import tempfile
@@ -23,6 +24,48 @@ from backend.models import VoiceProviderProfile  # noqa: E402
 
 class VoiceProfileTests(unittest.TestCase):
     """配音配置接口单元测试"""
+
+    def _capture_xiaomi_payload(self, model: str, voice: str, settings: dict) -> dict:
+        """捕获小米 MiMo TTS 请求体，避免单测真实访问外部接口"""
+        captured_payloads: list[dict] = []
+
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                """模拟小米返回 base64 音频"""
+                return {"choices": [{"message": {"audio": {"data": base64.b64encode(b"audio").decode("ascii")}}}]}
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *_args, **kwargs):
+                captured_payloads.append(kwargs["json"])
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory(prefix="xiaomi_payload_") as temp_dir:
+            output_path = os.path.join(temp_dir, "voice.wav")
+            with patch("httpx.AsyncClient", FakeClient):
+                asyncio.run(VoiceEngine()._generate_xiaomi_mimo_tts(
+                    text="小米配音测试",
+                    output_path=output_path,
+                    voice=voice,
+                    api_key="key",
+                    base_url="https://api.xiaomimimo.com/v1",
+                    model=model,
+                    settings=settings,
+                ))
+
+        self.assertEqual(len(captured_payloads), 1)
+        return captured_payloads[0]
 
     def test_fetch_voice_models_filters_remote_tts_models(self):
         """配音模型获取会优先使用远程模型并过滤 TTS 相关项"""
@@ -132,6 +175,90 @@ class VoiceProfileTests(unittest.TestCase):
             VoiceEngine()._provider_audio_format("custom_tts", {"format": "mp3"}, "gemini-3.1-flash-tts-preview"),
             "mp3",
         )
+
+    def test_xiaomi_mimo_voice_catalog_follows_selected_tts_model(self):
+        """小米 MiMo 不同 TTS 模型展示不同音色入口，避免把预置、设计和克隆混在一起"""
+        built_in = asyncio.run(get_voice_catalog(VoiceCatalogRequest(provider_type="xiaomi_mimo_tts", model="mimo-v2.5-tts")))
+        voice_design = asyncio.run(get_voice_catalog(VoiceCatalogRequest(provider_type="xiaomi_mimo_tts", model="mimo-v2.5-tts-voicedesign")))
+        voice_clone = asyncio.run(get_voice_catalog(VoiceCatalogRequest(provider_type="xiaomi_mimo_tts", model="mimo-v2.5-tts-voiceclone")))
+
+        self.assertIn("白桦", [voice["id"] for voice in built_in["voices"]])
+        self.assertEqual(next(voice for voice in built_in["voices"] if voice["id"] == "苏打")["gender"], "male")
+        self.assertTrue(any(str(voice["id"]).startswith("voice_design:") for voice in voice_design["voices"]))
+        self.assertEqual([voice["id"] for voice in voice_clone["voices"]], ["voice_clone"])
+
+    def test_xiaomi_mimo_v25_builtin_voice_uses_audio_voice(self):
+        """mimo-v2.5-tts 预置音色按官方格式写入 audio.voice"""
+        payload = self._capture_xiaomi_payload(
+            model="mimo-v2.5-tts",
+            voice="白桦",
+            settings={"format": "wav", "style_prompt": "自然朗读。"},
+        )
+
+        self.assertEqual(payload["model"], "mimo-v2.5-tts")
+        self.assertEqual(payload["audio"]["voice"], "白桦")
+        self.assertEqual(payload["audio"]["format"], "wav")
+        self.assertNotIn("modalities", payload)
+        self.assertEqual(payload["messages"][1]["content"], "小米配音测试")
+
+    def test_xiaomi_mimo_voice_design_uses_prompt_without_audio_voice(self):
+        """VoiceDesign 使用文字音色描述，不再把描述塞进 audio.voice"""
+        payload = self._capture_xiaomi_payload(
+            model="mimo-v2.5-tts-voicedesign",
+            voice="voice_design:年轻男声，普通话标准。",
+            settings={"format": "mp3", "style_prompt": "不要夸张换气。"},
+        )
+
+        self.assertEqual(payload["model"], "mimo-v2.5-tts-voicedesign")
+        self.assertEqual(payload["audio"]["format"], "mp3")
+        self.assertNotIn("voice", payload["audio"])
+        self.assertIn("年轻男声", payload["messages"][0]["content"])
+        self.assertIn("不要夸张换气", payload["messages"][0]["content"])
+
+    def test_xiaomi_mimo_voice_design_voice_overrides_global_prompt(self):
+        """多人配音时 voice_design: 音色描述应覆盖全局描述，避免所有角色同一个音色"""
+        payload = self._capture_xiaomi_payload(
+            model="mimo-v2.5-tts-voicedesign",
+            voice="voice_design:沉稳男声，适合旁白。",
+            settings={"format": "wav", "xiaomi_voice_design_prompt": "年轻女声。"},
+        )
+
+        self.assertIn("沉稳男声", payload["messages"][0]["content"])
+        self.assertNotIn("年轻女声", payload["messages"][0]["content"])
+
+    def test_xiaomi_mimo_voice_clone_uses_audio_sample_data_uri(self):
+        """VoiceClone 按官方要求把 mp3/wav 样本转为 data URI 放入 audio.voice"""
+        with tempfile.TemporaryDirectory(prefix="xiaomi_clone_") as temp_dir:
+            sample_path = os.path.join(temp_dir, "sample.wav")
+            with open(sample_path, "wb") as file:
+                file.write(b"sample-audio")
+            payload = self._capture_xiaomi_payload(
+                model="mimo-v2.5-tts-voiceclone",
+                voice="voice_clone",
+                settings={"format": "wav", "xiaomi_voice_clone_audio_path": sample_path},
+            )
+
+        self.assertEqual(payload["model"], "mimo-v2.5-tts-voiceclone")
+        self.assertTrue(payload["audio"]["voice"].startswith("data:audio/wav;base64,"))
+        self.assertEqual(base64.b64decode(payload["audio"]["voice"].split(",", 1)[1]), b"sample-audio")
+
+    def test_xiaomi_mimo_voice_clone_voice_path_overrides_global_sample(self):
+        """多人配音时 voice_clone_path: 应使用当前角色样本，而不是全局样本"""
+        with tempfile.TemporaryDirectory(prefix="xiaomi_clone_override_") as temp_dir:
+            global_path = os.path.join(temp_dir, "global.wav")
+            role_path = os.path.join(temp_dir, "role.mp3")
+            with open(global_path, "wb") as file:
+                file.write(b"global-audio")
+            with open(role_path, "wb") as file:
+                file.write(b"role-audio")
+            payload = self._capture_xiaomi_payload(
+                model="mimo-v2.5-tts-voiceclone",
+                voice=f"voice_clone_path:{role_path}",
+                settings={"format": "wav", "xiaomi_voice_clone_audio_path": global_path},
+            )
+
+        self.assertTrue(payload["audio"]["voice"].startswith("data:audio/mpeg;base64,"))
+        self.assertEqual(base64.b64decode(payload["audio"]["voice"].split(",", 1)[1]), b"role-audio")
 
     def test_openai_compatible_gemini_model_keeps_requested_format(self):
         """OpenAI 兼容渠道由渠道决定协议，不能因为模型名包含 Gemini 就强行改格式"""

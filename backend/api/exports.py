@@ -76,6 +76,14 @@ def _normalize_original_volume(value: float) -> float:
     return max(0.0, min(1.0, volume))
 
 
+def _audio_merge_volume(mode: str, original_volume: float) -> float:
+    """background 模式混的是 AI 背景轨，默认不再按原声音量压低"""
+    normalized_mode = _normalize_audio_mode(mode)
+    if normalized_mode == "background":
+        return 1.0
+    return _normalize_original_volume(original_volume)
+
+
 @router.post("/create", response_model=ExportResponse)
 def create_export(request: ExportRequest, db: Session = Depends(get_db)):
     """创建并执行导出任务"""
@@ -120,11 +128,12 @@ def create_export(request: ExportRequest, db: Session = Depends(get_db)):
             db.commit()
 
         if request.audio_path:
+            audio_mode = _normalize_audio_mode(request.audio_mode)
             working_video = processor.merge_audio_video(
                 video_path=working_video,
                 audio_path=request.audio_path,
-                mode=_normalize_audio_mode(request.audio_mode),
-                volume_ratio=_normalize_original_volume(request.original_volume),
+                mode=audio_mode,
+                volume_ratio=_audio_merge_volume(audio_mode, request.original_volume),
                 control_keys=[f"task:{task.id}"],
                 progress_callback=lambda progress: on_progress(progress, 35, 0.35),
             )

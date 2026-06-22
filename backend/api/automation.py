@@ -126,6 +126,14 @@ def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
     return max(0.0, min(1.0, volume))
 
 
+def _audio_merge_volume(mode: str, original_volume: Any) -> float:
+    """按合成模式返回音量；AI 去人声背景轨默认完整保留"""
+    normalized_mode = _normalize_audio_mode(mode)
+    if normalized_mode == "background":
+        return 1.0
+    return _normalize_original_volume(original_volume)
+
+
 def _check_control(db: Session, job: Optional[AutomationJobRecord] = None, task: Optional[DownloadTask] = None) -> None:
     """阶段边界检查暂停/取消请求"""
     if job:
@@ -2991,11 +2999,12 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 # 额外字幕版是附加产物，失败时保留主成片继续导出。
                 subtitle_only_warning = f"无配音字幕版导出失败: {subtitle_only_exc}"
         if audio_path:
+            audio_mode = _normalize_audio_mode(request.audio_mode)
             working_video = processor.merge_audio_video(
                 video_path=working_video,
                 audio_path=audio_path,
-                mode=_normalize_audio_mode(request.audio_mode),
-                volume_ratio=_normalize_original_volume(request.original_volume),
+                mode=audio_mode,
+                volume_ratio=_audio_merge_volume(audio_mode, request.original_volume),
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(80.0, 55.0 + progress * 0.25)),
             )
@@ -4227,7 +4236,7 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
                 video_path=working_video,
                 audio_path=audio_path,
                 mode=audio_mode,
-                volume_ratio=original_volume,
+                volume_ratio=_audio_merge_volume(audio_mode, original_volume),
                 control_keys=_control_keys(job, export_task),
                 progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(80.0, 35.0 + progress * 0.45)),
             )

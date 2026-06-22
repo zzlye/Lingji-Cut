@@ -408,6 +408,9 @@ export interface VoiceGenerateSettings {
   timbre: number
   voice_pitch: number
   sound_effects: string
+  xiaomi_voice_design_prompt?: string
+  xiaomi_voice_clone_audio_path?: string
+  xiaomi_voice_clone_audio_name?: string
   retry_count: number
   retry_interval_ms: number
 }

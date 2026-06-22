@@ -412,6 +412,13 @@ export const voiceApi = {
       body: JSON.stringify({ provider_type: providerType, model }),
     }),
 
+  /** 保存小米音色克隆参考音频 */
+  saveXiaomiVoiceCloneSample: (params: { filename: string; data_uri: string }) =>
+    request<{ message: string; path: string; size: number }>('/voice/xiaomi/voice-clone-sample', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
   /** 生成配音 */
   generate: (params: {
     text: string

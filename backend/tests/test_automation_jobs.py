@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _build_auto_style_selector, _build_auto_voice_selector, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _audio_merge_volume, _build_auto_style_selector, _build_auto_voice_selector, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -2824,6 +2824,12 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 1.0)
+
+    def test_background_audio_mode_keeps_ai_background_at_full_volume(self):
+        """AI 去人声模式混的是 no_vocals 背景轨，不再复用原声音量把背景压低"""
+        self.assertEqual(_audio_merge_volume("background", 0.25), 1.0)
+        self.assertEqual(_audio_merge_volume("background", 0), 1.0)
+        self.assertEqual(_audio_merge_volume("mix", 0.25), 0.25)
 
     def test_automation_voice_failure_stops_for_resume(self):
         """配音重试耗尽后停在配音阶段，不应导出无配音视频"""

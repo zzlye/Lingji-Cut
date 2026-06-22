@@ -30,7 +30,7 @@ def provider_audio_format(provider_type: str, settings: dict[str, Any], model: s
         return "wav"
     if normalized_provider == "xiaomi_mimo_tts":
         value = str((settings or {}).get("format") or "wav").lower()
-        return value if value in {"wav", "pcm16"} else "wav"
+        return value if value in {"wav", "mp3", "pcm", "pcm16"} else "wav"
     value = str((settings or {}).get("format") or "mp3").lower()
     return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
 
@@ -641,18 +641,27 @@ class VoiceEngine:
         if not base_url:
             base_url = "https://api.xiaomimimo.com/v1"
 
-        style_prompt = settings.get("style_prompt") or "请将文本自然地转换为配音音频。"
+        resolved_model = str(model or "mimo-v2.5-tts").strip()
+        style_prompt = str(settings.get("style_prompt") or "请将文本自然地转换为配音音频。").strip()
+        audio: dict[str, Any] = {
+            "format": self._provider_audio_format("xiaomi_mimo_tts", settings),
+        }
+        messages = [
+            {"role": "user", "content": style_prompt},
+            {"role": "assistant", "content": text},
+        ]
+        if "voicedesign" in resolved_model.lower():
+            design_prompt = self._xiaomi_voice_design_prompt(voice, settings)
+            messages[0]["content"] = self._join_prompt_parts([design_prompt, style_prompt])
+        elif "voiceclone" in resolved_model.lower():
+            audio["voice"] = self._xiaomi_voice_clone_data_uri(voice, settings)
+        else:
+            audio["voice"] = voice or "mimo_default"
+
         payload = {
-            "model": model or "mimo-v2-tts",
-            "modalities": ["text", "audio"],
-            "audio": {
-                "voice": voice,
-                "format": self._provider_audio_format("xiaomi_mimo_tts", settings),
-            },
-            "messages": [
-                {"role": "user", "content": style_prompt},
-                {"role": "assistant", "content": text},
-            ],
+            "model": resolved_model,
+            "messages": messages,
+            "audio": audio,
         }
 
         async with httpx.AsyncClient(timeout=120) as client:
@@ -677,6 +686,57 @@ class VoiceEngine:
 
         logger.info(f"小米 MiMo TTS 生成完成: {output_path}")
         return output_path
+
+    def _xiaomi_voice_design_prompt(self, voice: str, settings: dict[str, Any]) -> str:
+        """读取小米文字定制音色提示，优先使用专用字段，其次解析音色预设"""
+        normalized_voice = str(voice or "").strip()
+        if normalized_voice.startswith("voice_design:"):
+            prompt = normalized_voice.split(":", 1)[1].strip()
+            if prompt:
+                return prompt
+        configured = str(settings.get("xiaomi_voice_design_prompt") or "").strip()
+        if configured:
+            return configured
+        if normalized_voice and normalized_voice != "voice_design":
+            return normalized_voice
+        raise ValueError("小米 VoiceDesign 模型需要填写文字定制音色描述")
+
+    def _xiaomi_voice_clone_data_uri(self, voice: str, settings: dict[str, Any]) -> str:
+        """把小米音色克隆样本转换为官方要求的 data:audio/...;base64 格式"""
+        data_uri = str(settings.get("xiaomi_voice_clone_audio_data") or "").strip()
+        if data_uri.startswith("data:audio/"):
+            return data_uri
+        voice_value = str(voice or "").strip()
+        if voice_value.startswith("data:audio/"):
+            return voice_value
+        sample_path = ""
+        for prefix in ("voice_clone_path:", "voice_clone:"):
+            if voice_value.startswith(prefix):
+                sample_path = voice_value.split(":", 1)[1].strip()
+                break
+        if not sample_path and voice_value and os.path.exists(os.path.expanduser(voice_value)):
+            sample_path = voice_value
+
+        sample_path = sample_path or str(settings.get("xiaomi_voice_clone_audio_path") or "").strip()
+        if not sample_path:
+            raise ValueError("小米 VoiceClone 模型需要先上传 mp3 或 wav 参考音频")
+        sample_path = os.path.abspath(os.path.expanduser(sample_path))
+        if not os.path.exists(sample_path):
+            raise FileNotFoundError(f"小米 VoiceClone 参考音频不存在: {sample_path}")
+
+        extension = os.path.splitext(sample_path)[1].lower()
+        mime_type = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+        }.get(extension)
+        if not mime_type:
+            raise ValueError("小米 VoiceClone 参考音频只支持 mp3 或 wav")
+        size_bytes = os.path.getsize(sample_path)
+        if size_bytes > 10 * 1024 * 1024:
+            raise ValueError("小米 VoiceClone 参考音频不能超过 10MB")
+        with open(sample_path, "rb") as file:
+            encoded = base64.b64encode(file.read()).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
 
     def _xiaomi_mimo_headers(self, api_key: str) -> dict[str, str]:
         """同时兼容 NewAPI Bearer 鉴权和小米原生 api-key 鉴权"""
@@ -937,7 +997,7 @@ class VoiceEngine:
         """把字幕分段包装成一次 TTS 分组请求"""
         return {
             "segments": [dict(segment) for segment in segments],
-            "text": "\n".join(str(item["text"]) for item in segments if str(item.get("text") or "").strip()),
+            "text": self._join_voice_group_text(segments),
             "voice": voice,
             "style_prompt": style_prompt,
             "start_ms": int(segments[0]["start_ms"]),
@@ -973,7 +1033,11 @@ class VoiceEngine:
 
         for attempt, speed in enumerate(speed_values, 1):
             group_path = os.path.join(temp_dir, f"{file_stem}_try{attempt}.{audio_format}")
-            group_settings = self._settings_with_style_prompt(settings, str(group.get("style_prompt") or ""))
+            group_settings = self._settings_with_group_prompt(
+                settings,
+                str(group.get("style_prompt") or ""),
+                window_ms,
+            )
             group_settings = dict(group_settings)
             group_settings["speed"] = speed
             await self.generate_voice(
@@ -1055,6 +1119,37 @@ class VoiceEngine:
         merged = dict(settings)
         merged["style_prompt"] = normalized_style
         return merged
+
+    def _settings_with_group_prompt(self, settings: dict[str, Any], style_prompt: str, window_ms: int) -> dict[str, Any]:
+        """给分组配音追加自然连贯朗读提示，减少逐行换气和机械停顿"""
+        target_seconds = max(0.1, window_ms / 1000.0)
+        timing_prompt = (
+            f"请自然连贯朗读，不要在每句字幕之间刻意停顿、换气或拖长尾音。"
+            f"整段目标时长约 {target_seconds:.1f} 秒，语速由你自然判断，尽量贴合这个时长。"
+        )
+        base_style = str(style_prompt or settings.get("style_prompt") or "").strip()
+        merged = dict(settings)
+        merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
+        return merged
+
+    def _join_prompt_parts(self, parts: list[str]) -> str:
+        """合并多段提示词，过滤空值"""
+        return "\n".join(part.strip() for part in parts if str(part or "").strip())
+
+    def _join_voice_group_text(self, segments: list[dict[str, Any]]) -> str:
+        """把同一时间窗内的字幕合成自然朗读文本，避免换行触发强停顿"""
+        texts = [str(item.get("text") or "").strip() for item in segments]
+        texts = [text for text in texts if text]
+        if not texts:
+            return ""
+        result = texts[0]
+        end_punctuation = set("。！？!?；;：:，,、")
+        for text in texts[1:]:
+            if result[-1] in end_punctuation:
+                result += text
+            else:
+                result += "，" + text
+        return result
 
     def _normalize_timed_audio_paths(self, timed_audio_paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """清理带时间轴的音频路径"""

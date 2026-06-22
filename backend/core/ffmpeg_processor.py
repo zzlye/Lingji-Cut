@@ -141,6 +141,13 @@ class FFmpegProcessor:
         self.ffmpeg_cmd = get_ffmpeg_command()
         logger.info(f"ffmpeg 路径: {self.ffmpeg_cmd}")
 
+    def _float(self, value: Any, default: float) -> float:
+        """安全读取浮点数"""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def apply_effects(
         self,
         video_path: str,
@@ -458,7 +465,7 @@ class FFmpegProcessor:
         """
         合并音频和视频
         mode: replace（替换原声）/ mix（混合）/ background（尽量保留背景声并削弱人声）
-        volume_ratio: 原声音量比例（0.0-1.0）
+        volume_ratio: mix 模式为原声音量比例；background 模式为 AI 背景轨音量比例
         """
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"视频文件不存在: {video_path}")
@@ -506,6 +513,7 @@ class FFmpegProcessor:
             ]
         elif normalized_mode == "background":
             # 保留背景声必须走本地 AI 分离模型，避免声道抵消把 BGM、游戏音效一起破坏。
+            background_volume = max(0.0, min(2.0, self._float(volume_ratio, 1.0)))
             background_audio_path = self._separate_background_audio_with_local_ai(
                 video_path=video_path,
                 output_path=output_path,
@@ -519,7 +527,7 @@ class FFmpegProcessor:
                 "-i", audio_path,
                 "-filter_complex",
                 (
-                    f"[1:a:0]volume={volume_ratio}[bg];"
+                    f"[1:a:0]volume={background_volume}[bg];"
                     "[2:a:0]volume=1.0[voice];"
                     "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0[out]"
                 ),

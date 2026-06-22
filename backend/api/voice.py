@@ -3,6 +3,7 @@
 
 import json
 import os
+import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,6 +15,7 @@ from typing import Any, Optional
 from ..models import get_db, VoiceProviderProfile
 from ..utils import decrypt_api_key
 from ..core import VoiceEngine
+from ..core.paths import ensure_project_dirs
 from ..core.voice_engine import provider_audio_format
 
 # 创建路由器
@@ -46,6 +48,12 @@ class VoiceCatalogRequest(BaseModel):
     """获取音色目录请求"""
     provider_type: str
     model: Optional[str] = None
+
+
+class XiaomiVoiceCloneSampleRequest(BaseModel):
+    """小米音色克隆样本保存请求"""
+    filename: str
+    data_uri: str
 
 
 VOICE_CATALOGS = {
@@ -102,9 +110,26 @@ VOICE_CATALOGS = {
         {"id": "English_Graceful_Lady", "name": "English Graceful Lady", "language": "英文", "style": "女声、优雅", "gender": "female"},
     ],
     "xiaomi_mimo_tts": [
-        {"id": "mimo_default", "name": "MiMo 默认", "language": "中文/英文", "style": "中性、默认", "gender": "neutral"},
-        {"id": "default_zh", "name": "MiMo 中文女声", "language": "中文", "style": "女声", "gender": "female"},
-        {"id": "default_en", "name": "MiMo 英文女声", "language": "英文", "style": "女声", "gender": "female"},
+        {"id": "mimo_default", "name": "MiMo 默认", "language": "中文/英文", "style": "按集群自动选择默认音色", "gender": "neutral"},
+        {"id": "冰糖", "name": "冰糖", "language": "中文", "style": "中文预置音色", "gender": "female"},
+        {"id": "茉莉", "name": "茉莉", "language": "中文", "style": "中文预置音色", "gender": "female"},
+        {"id": "苏打", "name": "苏打", "language": "中文", "style": "中文预置音色", "gender": "male"},
+        {"id": "白桦", "name": "白桦", "language": "中文", "style": "中文预置音色", "gender": "male"},
+        {"id": "Mia", "name": "Mia", "language": "英文", "style": "英文预置音色", "gender": "female"},
+        {"id": "Chloe", "name": "Chloe", "language": "英文", "style": "英文预置音色", "gender": "female"},
+        {"id": "Milo", "name": "Milo", "language": "英文", "style": "英文预置音色", "gender": "male"},
+        {"id": "Dean", "name": "Dean", "language": "英文", "style": "英文预置音色", "gender": "male"},
+        {"id": "default_zh", "name": "V2 中文女声", "language": "中文", "style": "旧 V2 模型兼容音色", "gender": "female"},
+        {"id": "default_en", "name": "V2 英文女声", "language": "英文", "style": "旧 V2 模型兼容音色", "gender": "female"},
+    ],
+    "xiaomi_mimo_tts_voicedesign": [
+        {"id": "voice_design:年轻男声，普通话标准，音色清爽自然，语速中等，适合游戏解说和对话。", "name": "文字定制：年轻男声", "language": "中文", "style": "男声、自然、解说", "gender": "male"},
+        {"id": "voice_design:低沉男声，普通话标准，声音稳重有辨识度，语速中等，适合旁白。", "name": "文字定制：低沉男声", "language": "中文", "style": "男声、低沉、旁白", "gender": "male"},
+        {"id": "voice_design:年轻女声，普通话标准，声音自然明亮，语气轻松，适合多人对话。", "name": "文字定制：年轻女声", "language": "中文", "style": "女声、明亮、对话", "gender": "female"},
+        {"id": "voice_design:中性少年声，普通话标准，声音轻快自然，语速中等偏快，适合游戏角色。", "name": "文字定制：少年声", "language": "中文", "style": "中性、轻快、角色", "gender": "neutral"},
+    ],
+    "xiaomi_mimo_tts_voiceclone": [
+        {"id": "voice_clone", "name": "上传样本克隆", "language": "中文/英文", "style": "使用 mp3/wav 参考音频", "gender": "neutral"},
     ],
     "custom_tts": [
         {"id": "custom", "name": "自定义 voice id", "language": "自定义", "style": "中性、手动填写", "gender": "neutral"},
@@ -119,7 +144,14 @@ def _audio_format_for_preview(provider_type: str, settings: dict[str, Any], mode
 
 def _voice_catalog_key(provider_type: str, model: str = "") -> str:
     """音色目录只按用户选择的渠道展示，避免模型名隐式改协议"""
-    return VoiceEngine.resolve_provider_type(provider_type, model)
+    resolved = VoiceEngine.resolve_provider_type(provider_type, model)
+    if resolved == "xiaomi_mimo_tts":
+        normalized_model = str(model or "").lower()
+        if "voicedesign" in normalized_model:
+            return "xiaomi_mimo_tts_voicedesign"
+        if "voiceclone" in normalized_model:
+            return "xiaomi_mimo_tts_voiceclone"
+    return resolved
 
 
 def _preview_output_path(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
@@ -171,6 +203,35 @@ async def get_voice_catalog(request: VoiceCatalogRequest):
     """获取内置音色目录"""
     catalog_key = _voice_catalog_key(request.provider_type, request.model or "")
     return {"voices": VOICE_CATALOGS.get(catalog_key, VOICE_CATALOGS["custom_tts"])}
+
+
+@router.post("/xiaomi/voice-clone-sample")
+async def save_xiaomi_voice_clone_sample(request: XiaomiVoiceCloneSampleRequest):
+    """保存小米 VoiceClone 参考音频，保存路径供后续 TTS 请求读取"""
+    import base64
+
+    filename = request.filename or "sample.wav"
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in {".mp3", ".wav"}:
+        raise HTTPException(status_code=400, detail="参考音频只支持 mp3 或 wav")
+    data_uri = str(request.data_uri or "").strip()
+    marker = ";base64,"
+    if not data_uri.startswith("data:audio/") or marker not in data_uri:
+        raise HTTPException(status_code=400, detail="参考音频数据格式不正确")
+    try:
+        audio_bytes = base64.b64decode(data_uri.split(marker, 1)[1], validate=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="参考音频 base64 解码失败") from exc
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="参考音频不能超过 10MB")
+
+    upload_dir = os.path.join(ensure_project_dirs()["data_dir"], "voice_clone_samples")
+    os.makedirs(upload_dir, exist_ok=True)
+    output_path = os.path.join(upload_dir, f"xiaomi_clone_{uuid.uuid4().hex}{extension}")
+    with open(output_path, "wb") as output:
+        output.write(audio_bytes)
+
+    return {"message": "参考音频已保存", "path": output_path, "size": len(audio_bytes)}
 
 
 @router.post("/generate")

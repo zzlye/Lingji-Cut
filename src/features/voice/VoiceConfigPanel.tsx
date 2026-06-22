@@ -33,6 +33,7 @@ function createDefaultSettings(): VoiceGenerateSettings {
   return {
     speed: 1, volume: 1, pitch: 0, format: 'mp3', sample_rate: 32000, bitrate: 128000, channel: 1,
     emotion: '', style_prompt: '', language_boost: 'auto', intensity: 0, timbre: 0, voice_pitch: 0, sound_effects: '',
+    xiaomi_voice_design_prompt: '', xiaomi_voice_clone_audio_path: '', xiaomi_voice_clone_audio_name: '',
     retry_count: 2, retry_interval_ms: 1200,
   }
 }
@@ -65,19 +66,93 @@ function voiceOptionLabel(item: VoiceOption): string {
   return `${item.name} · ${voiceGenderLabel(item.gender)} · ${item.style}`
 }
 
+/** 小米 VoiceDesign 的 voice 值编码 */
+function encodeXiaomiVoiceDesign(prompt: string): string {
+  const normalized = prompt.trim()
+  return normalized ? `voice_design:${normalized}` : 'voice_design'
+}
+
+/** 小米 VoiceDesign 的 voice 值解码 */
+function decodeXiaomiVoiceDesign(value: string): string {
+  const normalized = String(value || '').trim()
+  return normalized.startsWith('voice_design:') ? normalized.slice('voice_design:'.length).trim() : ''
+}
+
+/** 从旧版纯文本或新版编码里读取可编辑的文字音色描述 */
+function editableXiaomiVoiceDesignPrompt(value: string): string {
+  const normalized = String(value || '').trim()
+  return decodeXiaomiVoiceDesign(normalized)
+}
+
+/** 小米 VoiceClone 的 voice 值编码 */
+function encodeXiaomiVoiceClonePath(path: string): string {
+  const normalized = path.trim()
+  return normalized ? `voice_clone_path:${normalized}` : 'voice_clone'
+}
+
+/** 小米 VoiceClone 的 voice 值解码 */
+function decodeXiaomiVoiceClonePath(value: string): string {
+  const normalized = String(value || '').trim()
+  if (normalized.startsWith('voice_clone_path:')) return normalized.slice('voice_clone_path:'.length).trim()
+  if (normalized.startsWith('voice_clone:')) return normalized.slice('voice_clone:'.length).trim()
+  return ''
+}
+
+/** 从旧版本地路径或新版编码里读取可编辑的克隆样本路径 */
+function editableXiaomiVoiceClonePath(value: string): string {
+  const normalized = String(value || '').trim()
+  return decodeXiaomiVoiceClonePath(normalized) || (/\.(mp3|wav)$/i.test(normalized) ? normalized : '')
+}
+
+/** 从本地路径里取文件名，Windows 和 POSIX 路径都兼容 */
+function basenameFromPath(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path
+}
+
+/** 展示编码后的特殊音色值 */
+function voiceValueLabel(value: string, voices: VoiceOption[] = []): string {
+  const matched = voices.find((item) => item.id === value)
+  if (matched) return voiceOptionLabel(matched)
+  const designPrompt = decodeXiaomiVoiceDesign(value)
+  if (designPrompt) return `文字定制 · ${designPrompt}`
+  const clonePath = decodeXiaomiVoiceClonePath(value)
+  if (clonePath) return `克隆样本 · ${basenameFromPath(clonePath)}`
+  return value || '未选择'
+}
+
 /** 根据预设构造下拉选项 */
 function voicePresetOptions(presets: VoicePresetProfile[]): FieldOption[] {
-  return presets.map((preset) => [preset.id, `${preset.name} · ${preset.voice}`] as FieldOption)
+  return presets.map((preset) => [preset.id, `${preset.name} · ${voiceValueLabel(preset.voice)}`] as FieldOption)
 }
 
 /** 合并音色目录、预设和当前值，避免下拉里丢失自定义 voice id */
 function voiceOptionsWithCustom(voices: VoiceOption[], presets: VoicePresetProfile[], currentVoice: string): FieldOption[] {
   const options = [
     ...voices.map((item) => [item.id, voiceOptionLabel(item)] as FieldOption),
-    ...presets.map((preset) => [preset.voice, `${preset.name} · ${preset.voice}`] as FieldOption),
-    currentVoice ? [currentVoice, currentVoice] as FieldOption : null,
+    ...presets.map((preset) => [preset.voice, `${preset.name} · ${voiceValueLabel(preset.voice, voices)}`] as FieldOption),
+    currentVoice ? [currentVoice, voiceValueLabel(currentVoice, voices)] as FieldOption : null,
   ].filter(Boolean) as FieldOption[]
   return options.filter((item, index, list) => list.findIndex((candidate) => candidate[0] === item[0]) === index)
+}
+
+/** 按角色文案给小米内置音色选一个默认值 */
+function defaultXiaomiBuiltinVoice(label: string, style: string, index: number): string {
+  const text = `${label} ${style}`
+  if (/旁白|解说|narrator/i.test(text)) return 'mimo_default'
+  if (/女|female|lady|girl|角色 A/i.test(text)) return index % 2 === 0 ? '茉莉' : '冰糖'
+  if (/男|male|gentleman|boy|角色 B/i.test(text)) return index % 2 === 0 ? '白桦' : '苏打'
+  return ['mimo_default', '茉莉', '白桦', '冰糖', '苏打'][index % 5]
+}
+
+/** 按角色文案生成一个可编辑的小米 VoiceDesign 默认描述 */
+function defaultXiaomiDesignPrompt(label: string, style: string, index: number): string {
+  const text = `${label} ${style}`
+  if (/旁白|解说|narrator/i.test(text)) return '中性自然旁白声，普通话标准，语气稳定，节奏清晰，适合视频解说。'
+  if (/女|female|lady|girl|角色 A/i.test(text)) return '年轻女声，普通话标准，声音自然明亮，语气轻松，适合多人对话。'
+  if (/男|male|gentleman|boy|角色 B/i.test(text)) return '年轻男声，普通话标准，音色清爽自然，语速中等，适合游戏解说和对话。'
+  return index % 2 === 0
+    ? '自然中性声，普通话标准，表达清楚，适合短视频对话。'
+    : '沉稳男声，普通话标准，声音有辨识度，适合角色对白。'
 }
 
 /**
@@ -115,9 +190,23 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const activeProviderMeta = VOICE_PROVIDERS.find((p) => p.id === activeProvider) || VOICE_PROVIDERS[0]
   const selectedVoice = customVoice.trim() || voice
   const activeModel = profileForm.custom_model.trim() || profileForm.model
+  const isXiaomiMiMo = activeProvider === 'xiaomi_mimo_tts'
+  const isXiaomiVoiceDesign = isXiaomiMiMo && activeModel.toLowerCase().includes('voicedesign')
+  const isXiaomiVoiceClone = isXiaomiMiMo && activeModel.toLowerCase().includes('voiceclone')
   const supportsMiniMaxAdvanced = activeProvider === 'minimax_tts'
   const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts'
-  const selectedVoiceLabel = voices.find((item) => item.id === selectedVoice)?.name || selectedVoice
+  const activeVoiceValue = (() => {
+    if (isXiaomiVoiceDesign) {
+      const prompt = settings.xiaomi_voice_design_prompt?.trim() || decodeXiaomiVoiceDesign(selectedVoice)
+      return encodeXiaomiVoiceDesign(prompt)
+    }
+    if (isXiaomiVoiceClone) {
+      const samplePath = settings.xiaomi_voice_clone_audio_path?.trim() || decodeXiaomiVoiceClonePath(selectedVoice)
+      return encodeXiaomiVoiceClonePath(samplePath)
+    }
+    return selectedVoice
+  })()
+  const selectedVoiceLabel = voiceValueLabel(activeVoiceValue, voices)
 
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getVoiceSecret(profileId)
@@ -177,6 +266,27 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => { loadProfiles() }, [])
   useEffect(() => { loadVoices(activeProvider, activeModel) }, [activeProvider, activeModel])
+
+  useEffect(() => {
+    if (isXiaomiVoiceDesign) {
+      const catalogPrompt = decodeXiaomiVoiceDesign(voices.find((item) => item.id.startsWith('voice_design:'))?.id || '')
+      setCustomVoice('')
+      setVoice((current) => current.startsWith('voice_design') ? current : (voices.find((item) => item.id.startsWith('voice_design:'))?.id || 'voice_design'))
+      setSettings((current) => {
+        if ((current.xiaomi_voice_design_prompt || '').trim()) return current
+        const prompt = decodeXiaomiVoiceDesign(voice) || catalogPrompt
+        return prompt ? { ...current, xiaomi_voice_design_prompt: prompt } : current
+      })
+    } else if (isXiaomiVoiceClone) {
+      setCustomVoice('')
+      setVoice((current) => current.startsWith('voice_clone') ? current : 'voice_clone')
+      setSettings((current) => {
+        if ((current.xiaomi_voice_clone_audio_path || '').trim()) return current
+        const samplePath = decodeXiaomiVoiceClonePath(voice)
+        return samplePath ? { ...current, xiaomi_voice_clone_audio_path: samplePath, xiaomi_voice_clone_audio_name: basenameFromPath(samplePath) } : current
+      })
+    }
+  }, [isXiaomiVoiceDesign, isXiaomiVoiceClone, voices, voice])
 
   useEffect(() => {
     return () => {
@@ -247,7 +357,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         // 自定义 OpenAI 兼容渠道要保留用户填写的 voice id，不能用占位音色覆盖。
         setVoice((current) => current || result.voices[0]?.id || 'custom')
       } else if (result.voices.length > 0) {
-        setVoice((current) => result.voices.some((item) => item.id === current) ? current : result.voices[0].id)
+        const normalizedModel = String(model || '').toLowerCase()
+        setVoice((current) => {
+          if (normalizedModel.includes('voicedesign') && current.startsWith('voice_design')) return current
+          if (normalizedModel.includes('voiceclone') && current.startsWith('voice_clone')) return current
+          return result.voices.some((item) => item.id === current) ? current : result.voices[0].id
+        })
       }
       setNotice({ type: 'success', message: `已获取 ${result.voices.length} 个音色` })
     } catch (error) {
@@ -263,7 +378,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在保存配音配置...' })
     try {
-      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: selectedVoice }) }
+      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: activeVoiceValue }) }
       const saved = selectedProfileId ? await profileApi.updateVoice(selectedProfileId, payload) : await profileApi.createVoice({ ...payload, api_key: profileForm.api_key })
       setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id }))
       setNotice({ type: 'success', message: `配音配置 "${saved.name}" 已保存` })
@@ -281,7 +396,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setIsTesting(true)
     setNotice({ type: 'info', message: '正在生成短试听并测试连接...' })
     try {
-      const result = await profileApi.testVoiceForm({ name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: selectedVoice }), profile_id: selectedProfileId })
+      const result = await profileApi.testVoiceForm({ name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: activeVoiceValue }), profile_id: selectedProfileId })
       setNotice({ type: 'success', message: result.message }); addLog('info', result.message)
     } catch (error) {
       const message = `测试配音 API 失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -297,13 +412,59 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setAudioUrl('')
     setNotice({ type: 'info', message: '正在生成试听音频...' })
     try {
-      const result = await voiceApi.preview({ text: previewText, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: selectedVoice, model: activeModel, settings })
+      const result = await voiceApi.preview({ text: previewText, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: activeVoiceValue, model: activeModel, settings })
       setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: '试听音频已生成，可直接播放。' })
     } catch (error) {
       const message = `试听失败: ${error instanceof Error ? error.message : '未知错误'}`
       setNotice({ type: 'error', message }); addLog('error', message)
     } finally { setIsGenerating(false) }
+  }
+
+  const handleXiaomiCloneSampleChange = async (file: File | null, onSaved?: (path: string, filename: string) => void) => {
+    if (!file) return
+    const extension = file.name.toLowerCase().split('.').pop() || ''
+    if (!['mp3', 'wav'].includes(extension)) {
+      setNotice({ type: 'warning', message: '小米音色克隆只支持 mp3 或 wav 样本' })
+      return
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setNotice({ type: 'warning', message: '小米音色克隆样本不能超过 10MB' })
+      return
+    }
+    setIsGenerating(true)
+    setNotice({ type: 'info', message: '正在保存音色克隆样本...' })
+    try {
+      const dataUri = await readFileAsDataUri(file)
+      const result = await voiceApi.saveXiaomiVoiceCloneSample({ filename: file.name, data_uri: dataUri })
+      if (onSaved) {
+        onSaved(result.path, file.name)
+      } else {
+        setSettings((current) => ({
+          ...current,
+          xiaomi_voice_clone_audio_path: result.path,
+          xiaomi_voice_clone_audio_name: file.name,
+        }))
+        setVoice(encodeXiaomiVoiceClonePath(result.path))
+        setCustomVoice('')
+      }
+      setNotice({ type: 'success', message: `已保存参考音频：${file.name}` })
+    } catch (error) {
+      const message = `保存参考音频失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const selectCatalogVoice = (item: VoiceOption) => {
+    setVoice(item.id)
+    setCustomVoice('')
+    if (isXiaomiVoiceDesign) {
+      const prompt = decodeXiaomiVoiceDesign(item.id)
+      if (prompt) setSettings((current) => ({ ...current, xiaomi_voice_design_prompt: prompt }))
+    }
   }
 
   const handleLocalPreview = () => {
@@ -427,12 +588,67 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     }))
   }
 
+  const syncXiaomiPresetVoices = (showNotice = true) => {
+    if (!isXiaomiMiMo) return
+    const validVoiceIds = new Set(voices.map((item) => item.id))
+    let changed = false
+
+    const normalizeVoice = (currentVoice: string, label: string, style: string, index: number) => {
+      const voiceValue = String(currentVoice || '').trim()
+      if (isXiaomiVoiceDesign) {
+        if (voiceValue.startsWith('voice_design:')) return voiceValue
+        changed = true
+        return encodeXiaomiVoiceDesign(defaultXiaomiDesignPrompt(label, style, index))
+      }
+      if (isXiaomiVoiceClone) {
+        if (voiceValue.startsWith('voice_clone')) return voiceValue
+        changed = true
+        return 'voice_clone'
+      }
+      if (validVoiceIds.has(voiceValue)) return voiceValue
+      changed = true
+      return defaultXiaomiBuiltinVoice(label, style, index)
+    }
+
+    const nextPresets = automationOptions.voice_presets.map((preset, index) => ({
+      ...preset,
+      voice: normalizeVoice(preset.voice, preset.name, preset.style_prompt, index),
+    }))
+    const presetById = new Map(nextPresets.map((preset) => [preset.id, preset]))
+    const nextSpeakers = automationOptions.voice_speakers.map((speaker, index) => {
+      const preset = speaker.preset_id ? presetById.get(speaker.preset_id) : null
+      if (preset) {
+        const nextSpeaker = {
+          ...speaker,
+          voice: preset.voice,
+          style_prompt: preset.style_prompt,
+          sample_text: speaker.sample_text || preset.sample_text,
+        }
+        if (nextSpeaker.voice !== speaker.voice || nextSpeaker.style_prompt !== speaker.style_prompt) changed = true
+        return nextSpeaker
+      }
+      return {
+        ...speaker,
+        voice: normalizeVoice(speaker.voice, speaker.label, speaker.style_prompt || '', index),
+      }
+    })
+
+    if (!changed) return
+    setAutomationOptions(saveAutomationPreferences({ voice_presets: nextPresets, voice_speakers: nextSpeakers }))
+    if (showNotice) setNotice({ type: 'success', message: '已按当前小米模型同步音色预设和多人说话人' })
+  }
+
+  useEffect(() => {
+    if (!isXiaomiMiMo || voices.length === 0) return
+    syncXiaomiPresetVoices(false)
+  }, [isXiaomiMiMo, isXiaomiVoiceDesign, isXiaomiVoiceClone, activeModel, voices.length, automationOptions.voice_presets, automationOptions.voice_speakers])
+
   const addVoicePreset = () => {
     const nextIndex = automationOptions.voice_presets.length + 1
     const preset: VoicePresetProfile = {
       id: `voice_preset_${Date.now()}`,
       name: `音色 ${nextIndex}`,
-      voice: selectedVoice || 'Kore',
+      voice: activeVoiceValue || 'Kore',
       style_prompt: settings.style_prompt || '',
       sample_text: previewText || DEFAULT_PREVIEW_TEXT,
     }
@@ -445,7 +661,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     const preset: VoicePresetProfile = {
       id: `voice_preset_${Date.now()}`,
       name: `当前音色 ${nextIndex}`,
-      voice: selectedVoice,
+      voice: activeVoiceValue,
       style_prompt: settings.style_prompt,
       sample_text: previewText || DEFAULT_PREVIEW_TEXT,
     }
@@ -490,7 +706,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       id: `speaker_${Date.now()}`,
       label: `角色 ${nextIndex}`,
       preset_id: preset?.id || '',
-      voice: preset?.voice || selectedVoice,
+      voice: preset?.voice || activeVoiceValue,
       style_prompt: preset?.style_prompt || '',
       sample_text: preset?.sample_text || `这是角色 ${nextIndex} 的一句对话试听。`,
     }
@@ -570,7 +786,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             {voices.map((item) => (
               <button
                 key={item.id}
-                onClick={() => { setVoice(item.id); setCustomVoice('') }}
+                onClick={() => selectCatalogVoice(item)}
                 className={cn('rounded-md border p-2.5 text-left transition-colors', selectedVoice === item.id ? 'border-primary bg-primary/10' : 'bg-card hover:border-primary/50')}
               >
                 <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
@@ -581,12 +797,47 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               </button>
             ))}
           </div>
-          <TextField label="自定义 voice id" value={customVoice} placeholder={voice} onChange={setCustomVoice} />
+          {isXiaomiVoiceDesign ? (
+            <TextareaField
+              label="文字定制音色描述"
+              value={settings.xiaomi_voice_design_prompt || ''}
+              rows={3}
+              placeholder="例如：年轻男声，普通话标准，音色清爽自然，语速中等，适合游戏解说和对话。"
+              onChange={(v) => updateSetting('xiaomi_voice_design_prompt', v)}
+            />
+          ) : isXiaomiVoiceClone ? (
+            <div className="space-y-2 rounded-lg border p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <TextField
+                  label="克隆样本路径"
+                  value={settings.xiaomi_voice_clone_audio_path || ''}
+                  placeholder="选择 mp3/wav 后自动填入，也可以手动填写本地路径"
+                  onChange={(v) => updateSetting('xiaomi_voice_clone_audio_path', v)}
+                />
+                <div className="space-y-1.5">
+                  <label className="text-sm font-normal">上传参考音频</label>
+                  <input
+                    type="file"
+                    accept=".mp3,.wav,audio/mpeg,audio/wav"
+                    className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null
+                      void handleXiaomiCloneSampleChange(file)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">{settings.xiaomi_voice_clone_audio_name || '支持 mp3/wav，最大 10MB'}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <TextField label="自定义 voice id" value={customVoice} placeholder={voice} onChange={setCustomVoice} />
+          )}
           <TextareaField label="试听文本" value={previewText} rows={3} onChange={setPreviewText} />
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={handleLocalPreview} disabled={!previewText.trim()}>{isLocalSpeaking ? '停止本地试听' : '本地试听'}</Button>
             <Button onClick={handlePreview} disabled={isGenerating || !previewText.trim()}>{isGenerating ? '生成中…' : '生成试听'}</Button>
-            <Button variant="outline" onClick={saveCurrentAsVoicePreset} disabled={!selectedVoice.trim()}>保存为预设</Button>
+            <Button variant="outline" onClick={saveCurrentAsVoicePreset} disabled={!activeVoiceValue.trim()}>保存为预设</Button>
             <span className="text-xs text-muted-foreground">当前音色：{selectedVoiceLabel}</span>
           </div>
           {audioUrl && (
@@ -609,7 +860,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       <Card>
         <CardHeader><CardTitle className="text-sm">音色预设库</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap justify-end gap-2">
+            {isXiaomiMiMo && (
+              <Button variant="outline" size="sm" onClick={() => syncXiaomiPresetVoices(true)}>
+                同步当前模型音色
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={addVoicePreset}>
               <Plus className="mr-1 size-4" />
               添加音色
@@ -619,7 +875,43 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <div key={preset.id} className="space-y-3 rounded-lg border bg-card p-3">
               <div className="grid gap-3 sm:grid-cols-2">
                 <TextField label="预设名称" value={preset.name} onChange={(v) => updateVoicePreset(preset.id, { name: v })} />
-                <TextField label="voice id" value={preset.voice} placeholder="例如 Kore、Puck、nova" onChange={(v) => updateVoicePreset(preset.id, { voice: v })} />
+                {isXiaomiVoiceDesign ? (
+                  <TextareaField
+                    label="文字音色描述"
+                    value={editableXiaomiVoiceDesignPrompt(preset.voice)}
+                    rows={2}
+                    placeholder="例如：低沉男声，普通话标准，声音稳重，适合旁白。"
+                    onChange={(v) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceDesign(v) })}
+                  />
+                ) : isXiaomiVoiceClone ? (
+                  <div className="space-y-2">
+                    <TextField
+                      label="克隆样本路径"
+                      value={editableXiaomiVoiceClonePath(preset.voice)}
+                      placeholder="选择 mp3/wav 后自动填入"
+                      onChange={(v) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceClonePath(v) })}
+                    />
+                    <input
+                      type="file"
+                      accept=".mp3,.wav,audio/mpeg,audio/wav"
+                      className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0] || null
+                        void handleXiaomiCloneSampleChange(file, (path) => updateVoicePreset(preset.id, { voice: encodeXiaomiVoiceClonePath(path) }))
+                        event.currentTarget.value = ''
+                      }}
+                    />
+                  </div>
+                ) : activeProvider === 'custom_tts' ? (
+                  <TextField label="voice id" value={preset.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateVoicePreset(preset.id, { voice: v })} />
+                ) : (
+                  <SelectField
+                    label="voice id"
+                    value={preset.voice}
+                    options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, preset.voice)}
+                    onChange={(v) => updateVoicePreset(preset.id, { voice: v })}
+                  />
+                )}
               </div>
               <TextareaField label="风格提示" value={preset.style_prompt} rows={2} placeholder="例如：用年轻自然的女声，语气轻松，适合对话。" onChange={(v) => updateVoicePreset(preset.id, { style_prompt: v })} />
               <TextField label="试听文本" value={preset.sample_text} onChange={(v) => updateVoicePreset(preset.id, { sample_text: v })} />
@@ -698,10 +990,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['background', '本地 AI 去人声，保留背景声'], ['mix', '混合完整原视频声音'], ['replace', '仅保留配音']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             {automationOptions.audio_mode === 'background' && (
               <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
-                该模式会调用本地 Demucs 分离模型，生成 no_vocals 背景轨后再叠加配音；未安装本地模型时会停在导出阶段并提示安装。
+                该模式会调用本地 Demucs 分离模型，生成 no_vocals 背景轨后按 1.00 音量叠加配音；未安装本地模型时会停在导出阶段并提示安装。
               </p>
             )}
-            <SliderField label="原声音量" value={automationOptions.original_volume} min={0} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ original_volume: v }))} />
+            {automationOptions.audio_mode !== 'background' && (
+              <SliderField label="原声音量" value={automationOptions.original_volume} min={0} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ original_volume: v }))} />
+            )}
           </AccordionContent>
         </AccordionItem>
 
@@ -721,12 +1015,43 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                     options={[['', '不绑定预设'], ...voicePresetOptions(automationOptions.voice_presets)]}
                     onChange={(v) => v ? applyPresetToSpeaker(speaker.id, v) : updateSpeaker(speaker.id, { preset_id: '' })}
                   />
-                  <SelectField
-                    label="voice id"
-                    value={speaker.voice}
-                    options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, speaker.voice)}
-                    onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })}
-                  />
+                  {isXiaomiVoiceDesign ? (
+                    <TextareaField
+                      label="文字音色描述"
+                      value={editableXiaomiVoiceDesignPrompt(speaker.voice)}
+                      rows={2}
+                      placeholder="例如：年轻女声，语气轻松，适合对话。"
+                      onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceDesign(v), preset_id: '' })}
+                    />
+                  ) : isXiaomiVoiceClone ? (
+                    <div className="space-y-2">
+                      <TextField
+                        label="克隆样本路径"
+                        value={editableXiaomiVoiceClonePath(speaker.voice)}
+                        placeholder="选择 mp3/wav 后自动填入"
+                        onChange={(v) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(v), preset_id: '' })}
+                      />
+                      <input
+                        type="file"
+                        accept=".mp3,.wav,audio/mpeg,audio/wav"
+                        className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0] || null
+                          void handleXiaomiCloneSampleChange(file, (path) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(path), preset_id: '' }))
+                          event.currentTarget.value = ''
+                        }}
+                      />
+                    </div>
+                  ) : activeProvider === 'custom_tts' ? (
+                    <TextField label="voice id" value={speaker.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })} />
+                  ) : (
+                    <SelectField
+                      label="voice id"
+                      value={speaker.voice}
+                      options={voiceOptionsWithCustom(voices, automationOptions.voice_presets, speaker.voice)}
+                      onChange={(v) => updateSpeaker(speaker.id, { voice: v, preset_id: '' })}
+                    />
+                  )}
                 </div>
                 <TextareaField label="风格提示" value={speaker.style_prompt || ''} rows={2} onChange={(v) => updateSpeaker(speaker.id, { style_prompt: v, preset_id: '' })} />
                 <TextField label="试听文本" value={speaker.sample_text} onChange={(v) => updateSpeaker(speaker.id, { sample_text: v })} />
@@ -746,6 +1071,16 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 /** 渠道展示名称 */
 function providerLabel(providerType: string) {
   return VOICE_PROVIDERS.find((provider) => provider.id === providerType)?.name || providerType
+}
+
+/** 把本地参考音频读成 data URI，传给后端保存为克隆样本 */
+function readFileAsDataUri(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('读取参考音频失败'))
+    reader.readAsDataURL(file)
+  })
 }
 
 /** 面板内反馈提示 */
