@@ -6,10 +6,13 @@ import queue
 import random
 import re
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import hashlib
 from functools import lru_cache
 from typing import Any, Callable, Optional
 from ..utils import get_logger
@@ -502,17 +505,22 @@ class FFmpegProcessor:
                 output_path
             ]
         elif normalized_mode == "background":
-            # 本地无 AI 分离模型时，先做中心声道削减，再叠加新配音，尽量保留 BGM 和游戏声音。
+            # 保留背景声必须走本地 AI 分离模型，避免声道抵消把 BGM、游戏音效一起破坏。
+            background_audio_path = self._separate_background_audio_with_local_ai(
+                video_path=video_path,
+                output_path=output_path,
+                control_keys=control_keys,
+                progress_callback=lambda progress: progress_callback(progress * 0.65) if progress_callback else None,
+            )
             cmd = [
                 self.ffmpeg_cmd,
                 "-i", video_path,
+                "-i", background_audio_path,
                 "-i", audio_path,
                 "-filter_complex",
                 (
-                    "[0:a:0]aformat=channel_layouts=stereo,"
-                    "pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0,"
-                    f"volume={volume_ratio}[bg];"
-                    "[1:a:0]volume=1.0[voice];"
+                    f"[1:a:0]volume={volume_ratio}[bg];"
+                    "[2:a:0]volume=1.0[voice];"
                     "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0[out]"
                 ),
                 "-map", "0:v:0",
@@ -525,14 +533,310 @@ class FFmpegProcessor:
             raise ValueError(f"不支持的合并模式: {mode}")
 
         logger.info(f"合并音视频: {video_path} + {audio_path} -> {output_path}")
+        final_progress_callback = progress_callback
+        if normalized_mode == "background" and progress_callback:
+            final_progress_callback = lambda progress: progress_callback(65 + progress * 0.35)
         return self._run_ffmpeg(
             cmd,
             "音视频合并",
             timeout=21600,
             control_keys=control_keys,
-            progress_callback=progress_callback,
+            progress_callback=final_progress_callback,
             progress_total_seconds=self._media_duration_seconds(video_path),
         )
+
+    def _separate_background_audio_with_local_ai(
+        self,
+        video_path: str,
+        output_path: str,
+        control_keys: Optional[list[str]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """使用本地 Demucs AI 模型分离人声，返回保留 BGM 和音效的 no_vocals 音轨"""
+        control_keys = normalize_control_keys(control_keys)
+        output_dir = os.path.dirname(os.path.abspath(output_path)) or "."
+        os.makedirs(output_dir, exist_ok=True)
+        cache_path = self._ai_background_cache_path(video_path, output_dir)
+        if self._is_reusable_audio(cache_path):
+            logger.info(f"复用本地 AI 背景声缓存: {cache_path}")
+            if progress_callback:
+                progress_callback(100)
+            return cache_path
+
+        command_prefix = self._demucs_command_prefix()
+        if not command_prefix:
+            raise RuntimeError(
+                "本地 AI 去人声不可用：未找到 Demucs。请在 D:\\tools 的 Python 环境安装 demucs 和 torch，"
+                "或通过 YTV_DEMUCS_CMD 指定 demucs.exe。"
+            )
+
+        temp_root = tempfile.mkdtemp(prefix="ai_vocal_separation_", dir=output_dir)
+        extracted_audio = os.path.join(temp_root, "source.wav")
+        try:
+            raise_if_control_requested(control_keys)
+            if progress_callback:
+                progress_callback(3)
+            self._extract_audio_for_ai_separation(video_path, extracted_audio, control_keys)
+            if progress_callback:
+                progress_callback(18)
+
+            separated_root = os.path.join(temp_root, "separated")
+            os.makedirs(separated_root, exist_ok=True)
+            self._run_demucs_separation(command_prefix, extracted_audio, separated_root, control_keys)
+            if progress_callback:
+                progress_callback(88)
+
+            no_vocals_path = self._find_demucs_no_vocals(separated_root)
+            if not no_vocals_path:
+                raise RuntimeError("本地 AI 去人声失败：Demucs 未生成 no_vocals.wav")
+            shutil.copyfile(no_vocals_path, cache_path)
+            if progress_callback:
+                progress_callback(100)
+            logger.info(f"本地 AI 背景声分离完成: {cache_path}")
+            return cache_path
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _extract_audio_for_ai_separation(self, video_path: str, output_audio_path: str, control_keys: list[str]) -> None:
+        """抽取原视频音频给 AI 分离模型，统一成稳定的双声道 WAV"""
+        cmd = [
+            self.ffmpeg_cmd,
+            "-i", video_path,
+            "-vn",
+            "-ac", "2",
+            "-ar", "44100",
+            "-c:a", "pcm_s16le",
+            "-y",
+            output_audio_path,
+        ]
+        self._run_ffmpeg(cmd, "抽取原视频音频", timeout=21600, control_keys=control_keys)
+
+    def _run_demucs_separation(
+        self,
+        command_prefix: list[str],
+        audio_path: str,
+        output_dir: str,
+        control_keys: list[str],
+    ) -> None:
+        """执行 Demucs 两轨分离，优先使用 CUDA，失败时可回退 CPU"""
+        device = (os.environ.get("YTV_DEMUCS_DEVICE") or "cuda").strip().lower() or "cuda"
+        devices = [device]
+        if device != "cpu" and self._bool_env("YTV_DEMUCS_ALLOW_CPU_FALLBACK", True):
+            devices.append("cpu")
+
+        errors: list[str] = []
+        for index, current_device in enumerate(dict.fromkeys(devices)):
+            cmd = self._build_demucs_command(command_prefix, audio_path, output_dir, current_device)
+            try:
+                if index > 0:
+                    logger.warning("Demucs CUDA 分离失败，切换 CPU 继续尝试")
+                self._run_external_audio_process(cmd, "本地 AI 去人声", timeout=21600, control_keys=control_keys)
+                return
+            except RuntimeError as exc:
+                errors.append(f"{current_device}: {exc}")
+                if current_device == "cpu":
+                    break
+        raise RuntimeError(f"本地 AI 去人声失败: {'；'.join(errors)}")
+
+    def _build_demucs_command(self, command_prefix: list[str], audio_path: str, output_dir: str, device: str) -> list[str]:
+        """生成 Demucs 命令，使用 vocals 两轨模式以获取 no_vocals 背景声"""
+        cmd = list(command_prefix)
+        model = (os.environ.get("YTV_DEMUCS_MODEL") or "").strip()
+        # htdemucs 训练分段上限约 7.8 秒，默认不能超过它，否则 Demucs 会直接退出。
+        segment = (os.environ.get("YTV_DEMUCS_SEGMENT") or "7").strip()
+        cmd.extend(["--two-stems", "vocals", "-d", device, "--out", output_dir])
+        if model:
+            cmd.extend(["-n", model])
+        if segment:
+            cmd.extend(["--segment", segment])
+        cmd.append(audio_path)
+        return cmd
+
+    def _run_external_audio_process(
+        self,
+        cmd: list[str],
+        action_name: str,
+        timeout: int,
+        control_keys: Optional[list[str]] = None,
+    ) -> None:
+        """执行本地 AI 音频进程，并支持暂停/取消时终止子进程"""
+        control_keys = normalize_control_keys(control_keys)
+        process = None
+        try:
+            raise_if_control_requested(control_keys)
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self._external_audio_process_env(),
+                creationflags=subprocess_creation_flags(),
+            )
+            register_process(control_keys, process, cmd)
+            stdout, _ = self._communicate_with_process(process, timeout, control_keys)
+            raise_if_control_requested(control_keys)
+            if process.returncode != 0:
+                raise RuntimeError(f"{action_name}失败: {self._format_ffmpeg_error(stdout, process.returncode)}")
+            logger.info(f"{action_name}完成")
+        except subprocess.TimeoutExpired:
+            if process:
+                terminate_process(process)
+            raise RuntimeError(f"{action_name}超时")
+        except Exception:
+            if process and process.poll() is None:
+                terminate_process(process)
+            raise
+        finally:
+            if process:
+                unregister_process(process)
+
+    def _external_audio_process_env(self) -> dict[str, str]:
+        """给本地 AI 音频进程固定缓存目录，避免模型散落到用户目录"""
+        env = os.environ.copy()
+        tools_root = "D:\\tools"
+        torch_home = env.get("TORCH_HOME") or os.path.join(tools_root, "demucs-models", "torch")
+        xdg_cache_home = env.get("XDG_CACHE_HOME") or os.path.join(tools_root, "demucs-models", "xdg")
+        os.makedirs(torch_home, exist_ok=True)
+        os.makedirs(xdg_cache_home, exist_ok=True)
+        env["TORCH_HOME"] = torch_home
+        env["XDG_CACHE_HOME"] = xdg_cache_home
+        return env
+
+    def _communicate_with_process(self, process: subprocess.Popen, timeout: int, control_keys: list[str]) -> tuple[str, str]:
+        """读取外部进程输出，同时保持控制请求可响应"""
+        output_lines: list[str] = []
+        line_queue: queue.Queue[str | None] = queue.Queue()
+
+        def read_stdout() -> None:
+            """后台读取管道，避免 AI 进程输出过多时阻塞"""
+            try:
+                if process.stdout:
+                    for raw_line in process.stdout:
+                        line_queue.put(raw_line)
+            finally:
+                line_queue.put(None)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        deadline = time.time() + timeout
+        reader_done = False
+        while True:
+            raise_if_control_requested(control_keys)
+            if time.time() > deadline:
+                terminate_process(process)
+                raise subprocess.TimeoutExpired(process.args, timeout)
+            try:
+                line = line_queue.get(timeout=0.2)
+            except queue.Empty:
+                if process.poll() is not None and reader_done:
+                    break
+                continue
+            if line is None:
+                reader_done = True
+                if process.poll() is not None:
+                    break
+                continue
+            text = line.strip()
+            if text:
+                output_lines.append(text)
+                output_lines = output_lines[-160:]
+            if process.poll() is not None and reader_done:
+                break
+        process.wait(timeout=5)
+        reader.join(timeout=2)
+        if process.stdout:
+            process.stdout.close()
+        return "\n".join(output_lines), ""
+
+    def _demucs_command_prefix(self) -> list[str]:
+        """定位本地 Demucs 命令，优先使用 D:\\tools 或用户显式配置"""
+        explicit = str(os.environ.get("YTV_DEMUCS_CMD") or "").strip()
+        if explicit:
+            return [explicit] if os.path.exists(explicit) else shlex.split(explicit, posix=False)
+
+        runner_path = os.path.join(os.path.dirname(__file__), "demucs_runner.py")
+        runner_python = self._demucs_runner_python()
+        if runner_python and os.path.exists(runner_path):
+            return [runner_python, runner_path]
+
+        candidates = [
+            shutil.which("demucs"),
+            os.path.join("D:\\tools", "python-3.12.10-embed", "Scripts", "demucs.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return [candidate]
+
+        python_candidates = [
+            str(os.environ.get("YTV_DEMUCS_PYTHON") or "").strip(),
+            sys.executable,
+            os.path.join("D:\\tools", "python-3.12.10-embed", "python.exe"),
+        ]
+        for python_path in python_candidates:
+            if python_path and os.path.exists(python_path) and self._python_has_module(python_path, "demucs"):
+                return [python_path, "-m", "demucs.separate"]
+        return []
+
+    def _demucs_runner_python(self) -> Optional[str]:
+        """选择能导入 Demucs 的 Python，用于运行项目内兼容启动器"""
+        python_candidates = [
+            str(os.environ.get("YTV_DEMUCS_PYTHON") or "").strip(),
+            sys.executable,
+            os.path.join("D:\\tools", "python-3.12.10-embed", "python.exe"),
+        ]
+        for python_path in python_candidates:
+            if python_path and os.path.exists(python_path) and self._python_has_module(python_path, "demucs"):
+                return python_path
+        return None
+
+    def _python_has_module(self, python_path: str, module_name: str) -> bool:
+        """检查指定 Python 是否已安装模块，避免启动后才报找不到包"""
+        try:
+            result = subprocess.run(
+                [python_path, "-c", f"import importlib.util; raise SystemExit(0 if importlib.util.find_spec('{module_name}') else 1)"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _find_demucs_no_vocals(self, separated_root: str) -> Optional[str]:
+        """在 Demucs 输出目录中查找 no_vocals 伴奏轨"""
+        matches: list[str] = []
+        for root, _dirs, files in os.walk(separated_root):
+            for file_name in files:
+                if file_name.lower() in {"no_vocals.wav", "no_vocals.mp3", "no_vocals.flac"}:
+                    matches.append(os.path.join(root, file_name))
+        matches.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        return matches[0] if matches else None
+
+    def _ai_background_cache_path(self, video_path: str, output_dir: str) -> str:
+        """按源视频路径、大小和修改时间生成 AI 背景声缓存文件名"""
+        try:
+            stat = os.stat(video_path)
+            identity = f"{os.path.abspath(video_path)}|{stat.st_size}|{stat.st_mtime_ns}"
+        except OSError:
+            identity = os.path.abspath(video_path)
+        digest = hashlib.sha1(identity.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(os.path.basename(video_path))[0]).strip("._") or "video"
+        return os.path.join(output_dir, f"{stem}_ai_no_vocals_{digest}.wav")
+
+    def _is_reusable_audio(self, audio_path: str) -> bool:
+        """判断缓存音频是否真实存在且可读取时长"""
+        return bool(audio_path and os.path.isfile(audio_path) and os.path.getsize(audio_path) > 1024 and self._media_duration_seconds(audio_path))
+
+    def _bool_env(self, name: str, default: bool) -> bool:
+        """读取布尔环境变量，兼容本地 AI 分离的调试开关"""
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def convert_format(
         self,

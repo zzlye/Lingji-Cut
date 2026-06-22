@@ -288,6 +288,7 @@ class VoiceEngine:
         timed_audio_paths: list[dict[str, Any]],
         output_path: str,
         max_inputs: int = 32,
+        fit_to_subtitle_window: Optional[bool] = None,
     ) -> str:
         """把多个带起始时间的音频片段混合成完整时间轴音轨"""
         items = self._normalize_timed_audio_paths(timed_audio_paths)
@@ -304,12 +305,13 @@ class VoiceEngine:
                 for index in range(0, len(items), max_inputs):
                     chunk = items[index:index + max_inputs]
                     chunk_path = os.path.join(chunk_dir, f"chunk_{index // max_inputs:03d}.wav")
-                    self.mix_timed_audio_files(chunk, chunk_path, max_inputs=max_inputs)
+                    self.mix_timed_audio_files(chunk, chunk_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window)
                     chunk_outputs.append({"path": chunk_path, "start_ms": 0})
-                return self.mix_timed_audio_files(chunk_outputs, output_path, max_inputs=max_inputs)
+                return self.mix_timed_audio_files(chunk_outputs, output_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window)
             finally:
                 shutil.rmtree(chunk_dir, ignore_errors=True)
 
+        should_fit_window = self._bool_env("YTV_VOICE_TIMELINE_FIT", False) if fit_to_subtitle_window is None else fit_to_subtitle_window
         cmd = [self._ffmpeg_cmd()]
         for item in items:
             cmd.extend(["-i", item["path"]])
@@ -322,7 +324,7 @@ class VoiceEngine:
             duration_ms = int(item.get("duration_ms") or 0)
             source_duration_ms = int(item.get("source_duration_ms") or 0)
             filters_for_item = [f"[{index}:a]aresample=44100,asetpts=PTS-STARTPTS"]
-            if duration_ms > 0:
+            if should_fit_window and duration_ms > 0:
                 if source_duration_ms > 0:
                     tempo = source_duration_ms / duration_ms
                     if 0.35 <= tempo <= 2.8 and abs(tempo - 1.0) > 0.03:
@@ -976,3 +978,10 @@ class VoiceEngine:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _bool_env(self, name: str, default: bool) -> bool:
+        """读取布尔环境变量，用于保留少数兼容开关"""
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}

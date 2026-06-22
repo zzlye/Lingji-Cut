@@ -196,8 +196,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
         self.assertEqual([[segment["text"] for segment in chunk] for chunk in chunks], [["第一句", "第二句"], ["第三句", "第四句"], ["第五句"]])
 
-    def test_timed_voice_mix_speeds_segment_to_subtitle_window(self):
-        """混合分段配音时按字幕窗口做温和变速，减少字幕和配音错位"""
+    def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
+        """默认只按字幕开始时间放置配音，不再强制变速或裁剪尾音"""
         first_audio = os.path.join(self.temp_dir, "first.wav")
         output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
         self._create_test_audio(first_audio, 440)
@@ -216,15 +216,41 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
         self.assertEqual(result_path, output_audio)
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
-        self.assertIn("atempo=0.500", filter_arg)
+        self.assertNotIn("atempo=", filter_arg)
+        self.assertNotIn("atrim=", filter_arg)
         self.assertIn("adelay=1200:all=1", filter_arg)
 
-    def test_background_audio_mode_reduces_center_voice_before_mix(self):
-        """保留背景声模式应先削弱中心人声再叠加配音"""
+    def test_timed_voice_mix_can_fit_segment_to_subtitle_window_when_enabled(self):
+        """显式开启贴合字幕窗口时才允许变速和裁剪，作为兼容开关保留"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            with open(output_audio, "wb") as file:
+                file.write(b"voice")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("backend.core.voice_engine.subprocess.run", side_effect=fake_run):
+            result_path = self.voice_engine.mix_timed_audio_files([
+                {"path": first_audio, "start_ms": 1200, "duration_ms": 800, "source_duration_ms": 400},
+            ], output_audio, fit_to_subtitle_window=True)
+
+        self.assertEqual(result_path, output_audio)
+        filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
+        self.assertIn("atempo=0.500", filter_arg)
+        self.assertIn("atrim=0:0.960", filter_arg)
+
+    def test_background_audio_mode_uses_local_ai_no_vocals_before_mix(self):
+        """保留背景声模式必须使用本地 AI 分离出的 no_vocals 轨再叠加配音"""
         self._create_test_video()
         voice_audio = os.path.join(self.temp_dir, "voice.wav")
+        background_audio = os.path.join(self.temp_dir, "ai_no_vocals.wav")
         output_video = os.path.join(self.temp_dir, "background_mix.mp4")
         self._create_test_audio(voice_audio, 660)
+        self._create_test_audio(background_audio, 220)
         calls: list[list[str]] = []
 
         def fake_run(cmd, *_args, **_kwargs):
@@ -233,7 +259,10 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(b"video")
             return output_video
 
-        with patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run):
+        with (
+            patch.object(self.processor, "_separate_background_audio_with_local_ai", return_value=background_audio) as separate_background,
+            patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run),
+        ):
             result_path = self.processor.merge_audio_video(
                 video_path=self.input_video,
                 audio_path=voice_audio,
@@ -243,10 +272,46 @@ class LocalMediaPipelineTest(unittest.TestCase):
             )
 
         self.assertEqual(result_path, output_video)
+        separate_background.assert_called_once()
+        self.assertIn(background_audio, calls[0])
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
-        self.assertIn("pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0", filter_arg)
-        self.assertIn("volume=0.35[bg]", filter_arg)
+        self.assertIn("[1:a:0]volume=0.35[bg]", filter_arg)
+        self.assertIn("[2:a:0]volume=1.0[voice]", filter_arg)
         self.assertIn("[bg][voice]amix", filter_arg)
+
+    def test_background_audio_mode_requires_local_ai_separator(self):
+        """保留背景声模式找不到本地 AI 分离模型时直接报错，不再退回声道抵消"""
+        self._create_test_video()
+        voice_audio = os.path.join(self.temp_dir, "voice.wav")
+        output_video = os.path.join(self.temp_dir, "background_mix.mp4")
+        self._create_test_audio(voice_audio, 660)
+
+        with patch.object(self.processor, "_demucs_command_prefix", return_value=[]):
+            with self.assertRaises(RuntimeError) as context:
+                self.processor.merge_audio_video(
+                    video_path=self.input_video,
+                    audio_path=voice_audio,
+                    output_path=output_video,
+                    mode="background",
+                    volume_ratio=0.35,
+                )
+
+        self.assertIn("本地 AI 去人声不可用", str(context.exception))
+
+    def test_demucs_command_prefers_project_runner_when_module_available(self):
+        """本地 AI 去人声优先使用项目内 Demucs 启动器，避开 torchaudio 保存兼容问题"""
+        fake_python = os.path.join(self.temp_dir, "python.exe")
+        with open(fake_python, "wb") as file:
+            file.write(b"python")
+
+        with (
+            patch.object(self.processor, "_python_has_module", return_value=True),
+            patch("backend.core.ffmpeg_processor.sys.executable", fake_python),
+        ):
+            command_prefix = self.processor._demucs_command_prefix()
+
+        self.assertEqual(command_prefix[0], fake_python)
+        self.assertTrue(command_prefix[1].endswith(os.path.join("backend", "core", "demucs_runner.py")))
 
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""
