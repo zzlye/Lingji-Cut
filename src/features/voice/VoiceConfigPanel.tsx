@@ -210,6 +210,13 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   })()
   const selectedVoiceLabel = voiceValueLabel(activeVoiceValue, voices)
 
+  const voiceSettingsForRequest = (overrides: Partial<VoiceGenerateSettings> = {}): VoiceGenerateSettings => ({
+    ...settings,
+    ...overrides,
+    // 手动语速已下线：逐条配音保持自然语速，分组模式由后端按时间窗临时自适应。
+    speed: 1,
+  })
+
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getVoiceSecret(profileId)
     return result.api_key
@@ -234,7 +241,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       try {
         const parsed = JSON.parse(profile.extra_params)
         const savedVoice = String(parsed.voice || '').trim()
-        setSettings({ ...createDefaultSettings(), ...parsed })
+        setSettings({ ...createDefaultSettings(), ...parsed, speed: 1 })
         if (profile.provider_type === 'custom_tts') {
           setVoice('custom')
           setCustomVoice(savedVoice)
@@ -382,7 +389,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在保存配音配置...' })
     try {
-      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: activeVoiceValue }) }
+      const payload = { name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...voiceSettingsForRequest(), voice: activeVoiceValue }) }
       const saved = selectedProfileId ? await profileApi.updateVoice(selectedProfileId, payload) : await profileApi.createVoice({ ...payload, api_key: profileForm.api_key })
       setAutomationOptions(saveAutomationPreferences({ voice_profile_id: saved.id }))
       setNotice({ type: 'success', message: `配音配置 "${saved.name}" 已保存` })
@@ -400,7 +407,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setIsTesting(true)
     setNotice({ type: 'info', message: '正在生成短试听并测试连接...' })
     try {
-      const result = await profileApi.testVoiceForm({ name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...settings, voice: activeVoiceValue }), profile_id: selectedProfileId })
+      const result = await profileApi.testVoiceForm({ name: profileForm.name, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, model: activeModel, extra_params: JSON.stringify({ ...voiceSettingsForRequest(), voice: activeVoiceValue }), profile_id: selectedProfileId })
       setNotice({ type: 'success', message: result.message }); addLog('info', result.message)
     } catch (error) {
       const message = `测试配音 API 失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -416,7 +423,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     setAudioUrl('')
     setNotice({ type: 'info', message: '正在生成试听音频...' })
     try {
-      const result = await voiceApi.preview({ text: previewText, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: activeVoiceValue, model: activeModel, settings })
+      const result = await voiceApi.preview({ text: previewText, profile_id: selectedProfileId, provider_type: profileForm.provider_type, base_url: profileForm.base_url, api_key: profileForm.api_key || undefined, voice: activeVoiceValue, model: activeModel, settings: voiceSettingsForRequest() })
       setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: '试听音频已生成，可直接播放。' })
     } catch (error) {
@@ -489,7 +496,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
 
     const utterance = new SpeechSynthesisUtterance(previewText.trim())
     // 本地试听只用于快速听文本节奏，不消耗任何 TTS API 额度。
-    utterance.rate = Math.max(0.5, Math.min(2, Number(settings.speed) || 1))
+    utterance.rate = 1
     utterance.volume = Math.max(0, Math.min(1, Number(settings.volume) > 1 ? 1 : Number(settings.volume) || 1))
     utterance.pitch = 1
     utterance.lang = /[\u3040-\u30ff]/.test(previewText) ? 'ja-JP' : /[A-Za-z]/.test(previewText) && !/[\u4e00-\u9fff]/.test(previewText) ? 'en-US' : 'zh-CN'
@@ -518,7 +525,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         api_key: profileForm.api_key || undefined,
         voice: speaker.voice,
         model: activeModel,
-        settings: { ...settings, style_prompt: speaker.style_prompt || settings.style_prompt },
+        settings: voiceSettingsForRequest({ style_prompt: speaker.style_prompt || settings.style_prompt }),
       })
       setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: `说话人 "${speaker.label}" 试听已生成。` })
@@ -542,7 +549,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         api_key: profileForm.api_key || undefined,
         voice: preset.voice,
         model: activeModel,
-        settings: { ...settings, style_prompt: preset.style_prompt || settings.style_prompt },
+        settings: voiceSettingsForRequest({ style_prompt: preset.style_prompt || settings.style_prompt }),
       })
       setAudioUrl(`${BASE_URL}${result.audio_url}`)
       setNotice({ type: 'success', message: `音色预设 "${preset.name}" 试听已生成。` })
@@ -945,11 +952,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       {/* 高级 */}
       <Accordion type="multiple" className="space-y-2">
         <AccordionItem value="params" className="rounded-lg border px-4">
-          <AccordionTrigger className="text-sm">配音参数（语速 / 音量 / 格式等）</AccordionTrigger>
+          <AccordionTrigger className="text-sm">配音参数（音量 / 格式 / 重试等）</AccordionTrigger>
           <AccordionContent className="space-y-3 pb-3">
-            {automationOptions.voice_mode !== 'grouped' && (
-              <SliderField label="语速" value={settings.speed} min={0.5} max={2} step={0.05} format={(v) => v.toFixed(2)} suffix="x" onChange={(v) => updateSetting('speed', v)} />
-            )}
             <SliderField label="音量" value={settings.volume} min={0.1} max={10} step={0.1} format={(v) => v.toFixed(1)} onChange={(v) => updateSetting('volume', v)} />
             <SliderField label="音调" value={settings.pitch} min={-12} max={12} step={1} onChange={(v) => updateSetting('pitch', v)} />
             <div className="grid gap-3 sm:grid-cols-2">
@@ -982,25 +986,22 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['grouped', '时间轴分组合成（更快，自动调速）'], ['batched', '逐条按时间轴并发生成（最稳）'], ['segmented', '逐条按时间轴串行生成'], ['full', '整段生成（不保证同步）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
             {automationOptions.voice_mode === 'grouped' && (
               <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-                分组合成会把相邻字幕合成一次请求，按整组时间窗自动判断语速；上方语速参数不会参与该模式。如果生成音频过长，会自动提速重试，仍超时再拆成更小组。
+                分组合成会把相邻字幕合成一次请求，按整组时间窗自动判断语速。如果生成音频过长，会自动提速重试，仍超时再拆成更小组。
               </p>
             )}
-            <div className="grid gap-3 sm:grid-cols-3">
-              {automationOptions.voice_mode === 'grouped' ? (
-                <>
-                  <NumberField label="每组最大行数" value={automationOptions.voice_group_size} min={1} max={12} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_size: Math.max(1, Math.round(v)) }))} />
-                  <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
-                  <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
-                  <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
-                </>
-              ) : (
-                <>
-                  <NumberField label="每轮调度条数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" description="只控制并发调度，不会把多行合成一次 API 请求" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
-                  <NumberField label="每轮调度字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
-                </>
-              )}
-              <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
-            </div>
+            {automationOptions.voice_mode === 'grouped' ? (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <NumberField label="每组最大行数" value={automationOptions.voice_group_size} min={1} max={12} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_size: Math.max(1, Math.round(v)) }))} />
+                <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
+                <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
+                <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+              </div>
+            ) : automationOptions.voice_mode === 'batched' ? (
+              <div className="grid gap-3 sm:grid-cols-3">
+                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+              </div>
+            ) : null}
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
             <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['background', '本地 AI 去人声，保留背景声'], ['mix', '混合完整原视频声音'], ['replace', '仅保留配音']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             {automationOptions.audio_mode === 'background' && (

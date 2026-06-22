@@ -2590,6 +2590,7 @@ class AutomationJobTests(unittest.TestCase):
                 base_url="https://example.test/v1",
                 api_key_encrypted="encrypted",
                 voice="voice-model",
+                extra_params=json.dumps({"speed": 1.8}, ensure_ascii=False),
             )
             task_ids = iter(range(95, 110))
             workspace_paths = {
@@ -2657,6 +2658,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.settings["voice_batch_size"], 8)
         self.assertEqual(voice_engine.settings["voice_batch_chars"], 900)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
+        self.assertEqual(voice_engine.settings["speed"], 1.0)
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 0.25)
 

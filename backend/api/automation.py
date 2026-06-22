@@ -2824,6 +2824,8 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, voice_task)
             settings = _load_profile_settings(voice_profile)
+            # 手动语速已从界面移除；一键流程统一使用自然语速，分组模式内部会按时间窗临时自适应。
+            settings["speed"] = 1.0
             settings["voice_batch_size"] = max(1, min(80, int(request.voice_batch_size or settings.get("voice_batch_size") or 16)))
             settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
