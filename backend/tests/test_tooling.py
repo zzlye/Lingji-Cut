@@ -31,6 +31,18 @@ class FakeDownloadProcess:
         return self.returncode
 
 
+class FakeNoOutputDownloadProcess:
+    """测试用下载进程，模拟 yt-dlp 成功但没有输出文件日志"""
+
+    def __init__(self):
+        self.stdout = []
+        self.returncode = 0
+
+    def wait(self):
+        """模拟进程正常结束"""
+        return self.returncode
+
+
 class FakeBinaryOutputProcess:
     """测试用异常字符输出进程，模拟 Windows 下容错解码后的文本"""
 
@@ -336,6 +348,33 @@ class ToolingTests(unittest.TestCase):
 
         self.assertEqual(result, output_path)
         self.assertIn("bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080][ext=mp4]/best[height<=1080]/best", captured_cmd)
+
+    def test_download_video_fallback_ignores_timeline_meta_json(self):
+        """下载日志缺少输出路径时，目录回退不能把本地时间轴缓存当成视频"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = os.path.join(temp_dir, "真实视频.mp4")
+            timeline_meta_path = os.path.join(temp_dir, "真实视频_local_timeline.meta.json")
+            with open(output_path, "wb") as file:
+                file.write(b"video")
+            with open(timeline_meta_path, "w", encoding="utf-8") as file:
+                json.dump({"timeline": []}, file)
+            os.utime(output_path, (1000, 1000))
+            os.utime(timeline_meta_path, (2000, 2000))
+
+            def fake_popen(_cmd, **_):
+                """返回没有可解析输出路径的下载进程"""
+                return FakeNoOutputDownloadProcess()
+
+            with patch("backend.core.downloader.get_yt_dlp_command", return_value="yt-dlp"), \
+                    patch("backend.core.downloader.get_ffmpeg_command", return_value="D:/tools/ffmpeg/ffmpeg.exe"), \
+                    patch("backend.core.downloader.subprocess.Popen", side_effect=fake_popen):
+                downloader = Downloader()
+                result = downloader.download_video(
+                    url="https://youtube.com/watch?v=test",
+                    output_dir=temp_dir,
+                )
+
+        self.assertEqual(result, output_path)
 
     def test_download_subtitle_does_not_return_unrelated_old_subtitle(self):
         """目标语言没有新字幕文件时，不会误返回输出目录里的旧字幕"""

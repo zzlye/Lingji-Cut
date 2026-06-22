@@ -1008,6 +1008,62 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
             self.assertNotIn(timeline_cache_path, fake_recognizer.video_paths)
 
+    def test_download_stage_rejects_timeline_meta_json_before_subtitle_stage(self):
+        """下载器异常返回本地时间轴元数据时，自动化流程必须在下载阶段拦截"""
+        with tempfile.TemporaryDirectory(prefix="automation_download_meta_guard_") as temp_dir:
+            downloads_dir = os.path.join(temp_dir, "downloads")
+            os.makedirs(downloads_dir, exist_ok=True)
+            timeline_meta_path = os.path.join(downloads_dir, "video_local_timeline.meta.json")
+            with open(timeline_meta_path, "w", encoding="utf-8") as file:
+                json.dump({"segments": []}, file)
+
+            fake_downloader = FakeAutomationDownloader(timeline_meta_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            fake_recognizer = FakeAutomationRecognizer()
+            video = VideoSource(id=44, platform="youtube", video_id="download-meta", url="https://youtu.be/download-meta", title="下载元数据误用")
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "download-meta",
+                "downloads_dir": downloads_dir,
+                "output_dir": os.path.join(temp_dir, "output"),
+                "exports_dir": os.path.join(temp_dir, "exports"),
+            }
+            task_ids = iter(range(120, 130))
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=fake_recognizer),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    _run_automation_sync(
+                        AutomationRunRequest(
+                            url=video.url,
+                            enable_effects=False,
+                            processing_preset={},
+                            enable_voice=False,
+                            burn_subtitles=True,
+                            output_format="mp4",
+                        ),
+                        FakeDb([]),
+                    )
+
+        self.assertIn("下载阶段输入不是可用视频文件", str(context.exception))
+        self.assertEqual(fake_recognizer.video_paths, [])
+        self.assertEqual(fake_processor.burn_calls, [])
+
     def test_gemini_align_reuses_cached_local_timeline(self):
         """Gemini 内容+本地时间轴继续执行时复用本地时间轴缓存，不再从头跑 ASR"""
         class FakeTimelineRecognizer:

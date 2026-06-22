@@ -2475,6 +2475,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     progress_callback=on_progress,
                     control_keys=_control_keys(job, download_task),
                 )
+            downloaded_path = _ensure_video_input_path(downloaded_path, "下载阶段")
             _check_control(db, job, download_task)
             _complete_task(db, download_task, downloaded_path)
             if job:

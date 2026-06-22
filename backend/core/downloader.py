@@ -20,6 +20,10 @@ from .tooling import get_ffmpeg_command, get_yt_dlp_command
 # 日志记录器
 logger = get_logger("downloader")
 
+# 下载阶段只允许这些视频容器作为最终产物，避免把字幕/时间轴缓存误当视频。
+VIDEO_OUTPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+
+
 class Downloader:
     """yt-dlp 下载封装类"""
 
@@ -443,20 +447,22 @@ class Downloader:
                 detail = f": {tail_output}" if tail_output else ""
                 raise RuntimeError(f"下载失败，退出码: {process.returncode}{detail}")
 
-            if output_file and os.path.exists(output_file):
+            if output_file and os.path.exists(output_file) and self._is_video_output_file(output_file):
                 logger.info(f"下载完成: {output_file}")
                 return output_file
-            else:
-                # 尝试在输出目录中查找最新文件
-                files = sorted(
-                    [os.path.join(output_dir, f) for f in os.listdir(output_dir)],
-                    key=os.path.getmtime,
-                    reverse=True
-                )
-                if files:
-                    logger.info(f"下载完成: {files[0]}")
-                    return files[0]
-                raise RuntimeError("下载完成但未找到输出文件")
+
+            if output_file and os.path.exists(output_file):
+                logger.warning(f"下载输出不是视频文件，改为检查输出目录: {output_file}")
+
+            # yt-dlp 输出被截断或没有 Merger 行时，只从目录里回退选择真实视频文件。
+            fallback_file = self._latest_video_output_file(output_dir)
+            if fallback_file:
+                logger.info(f"下载完成: {fallback_file}")
+                return fallback_file
+            if output_file and os.path.exists(output_file):
+                ext = os.path.splitext(output_file)[1].lower() or "无后缀"
+                raise RuntimeError(f"下载完成但输出不是视频文件: {output_file}，后缀={ext}")
+            raise RuntimeError("下载完成但未找到视频输出文件")
 
         except subprocess.TimeoutExpired:
             if process:
@@ -467,6 +473,21 @@ class Downloader:
         finally:
             if process:
                 unregister_process(process)
+
+    def _is_video_output_file(self, path: str) -> bool:
+        """判断路径是否是真实存在的视频下载产物"""
+        return os.path.isfile(path) and os.path.splitext(path)[1].lower() in VIDEO_OUTPUT_EXTENSIONS
+
+    def _latest_video_output_file(self, output_dir: str) -> Optional[str]:
+        """从输出目录中查找最新的视频文件，忽略时间轴、字幕和封面缓存"""
+        candidates: list[str] = []
+        for name in os.listdir(output_dir):
+            path = os.path.join(output_dir, name)
+            if self._is_video_output_file(path):
+                candidates.append(path)
+        if not candidates:
+            return None
+        return sorted(candidates, key=os.path.getmtime, reverse=True)[0]
 
     def download_subtitle(
         self,
