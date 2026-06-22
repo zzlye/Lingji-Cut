@@ -32,6 +32,7 @@ import type { AutomationJob, AutomationStep, AutomationPreferences, VideoParseRe
 
 /** 字幕处理方式中文文案 */
 const SUBTITLE_OP_LABEL: Record<AutomationPreferences['subtitle_operation'], string> = {
+  skip: '不处理字幕',
   none: '使用原字幕',
   generate: '生成字幕',
   translate: '翻译字幕',
@@ -252,7 +253,7 @@ function AutoRunConfirm({
           <Separator />
           <ul className="space-y-2 text-xs text-muted-foreground">
             <li className="flex justify-between"><span>画面处理</span><span className="text-foreground">{preferences.enable_effects ? '开启' : '关闭'}</span></li>
-            <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
+            <li className="flex justify-between"><span>字幕</span><span className="text-foreground">{SUBTITLE_OP_LABEL[preferences.subtitle_operation]}{preferences.subtitle_operation !== 'skip' && preferences.burn_subtitles ? '·硬字幕' : ''}</span></li>
             <li className="flex justify-between"><span>配音</span><span className="text-foreground">{preferences.enable_voice ? '开启' : '关闭'}</span></li>
             {preferences.enable_voice && preferences.export_subtitle_only_when_voice && <li className="flex justify-between"><span>字幕版视频</span><span className="text-foreground">额外导出</span></li>}
             <li className="flex justify-between"><span>导出格式</span><span className="text-foreground uppercase">{preferences.output_format}</span></li>
@@ -508,6 +509,7 @@ function ConfigSummary({
 }) {
   const updatePrefs = usePrefsStore((state) => state.update)
   const subtitleOptions = Object.entries(SUBTITLE_OP_LABEL) as Array<[AutomationPreferences['subtitle_operation'], string]>
+  const shouldSkipSubtitle = preferences.subtitle_operation === 'skip'
 
   return (
     <Card className="glass lg:self-start">
@@ -544,24 +546,27 @@ function ConfigSummary({
           <ConfigGroup
             value="subtitle"
             icon={Captions}
-            label="字幕处理"
-            summary={`${SUBTITLE_OP_LABEL[preferences.subtitle_operation]} · ${preferences.burn_subtitles ? '烧录' : '不烧录'}`}
+            label="字幕策略"
+            summary={shouldSkipSubtitle ? '不处理字幕' : `${SUBTITLE_OP_LABEL[preferences.subtitle_operation]} · ${preferences.burn_subtitles ? '烧录' : '不烧录'}`}
           >
             <ConfigSelectRow
               icon={Captions}
               label="处理方式"
               value={preferences.subtitle_operation}
               options={subtitleOptions}
-              onChange={(value) => updatePrefs({ subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
+              onChange={(value) => updatePrefs(value === 'skip'
+                ? { subtitle_operation: value as AutomationPreferences['subtitle_operation'], burn_subtitles: false }
+                : { subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
               onOpenSettings={() => onOpenSettings('subtitle')}
             />
             <ConfigSwitchRow
               icon={Captions}
               label="烧录硬字幕"
-              description={preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
-              checked={preferences.burn_subtitles}
+              description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
+              checked={!shouldSkipSubtitle && preferences.burn_subtitles}
               onChange={(value) => updatePrefs({ burn_subtitles: value })}
               onOpenSettings={() => onOpenSettings('subtitle')}
+              disabled={shouldSkipSubtitle}
             />
           </ConfigGroup>
 
@@ -658,6 +663,7 @@ function ConfigSwitchRow({
   checked,
   onChange,
   onOpenSettings,
+  disabled = false,
 }: {
   icon: typeof Film
   label: string
@@ -665,6 +671,7 @@ function ConfigSwitchRow({
   checked: boolean
   onChange: (value: boolean) => void
   onOpenSettings: () => void
+  disabled?: boolean
 }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border bg-card/70 px-2.5 py-2">
@@ -673,7 +680,7 @@ function ConfigSwitchRow({
         <p className="text-sm font-medium leading-5">{label}</p>
         <p className="truncate text-[11px] leading-4 text-muted-foreground">{description}</p>
       </div>
-      <Switch checked={checked} onCheckedChange={onChange} aria-label={`${checked ? '关闭' : '开启'}${label}`} />
+      <Switch checked={checked} onCheckedChange={onChange} aria-label={`${checked ? '关闭' : '开启'}${label}`} disabled={disabled} />
       <ConfigSettingsButton label={label} onClick={onOpenSettings} />
     </div>
   )

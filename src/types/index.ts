@@ -307,7 +307,7 @@ export interface AutomationBatchControlResponse {
 }
 
 /** 自动化字幕文本处理方式 */
-export type SubtitleTextOperation = 'none' | 'generate' | 'translate' | 'polish'
+export type SubtitleTextOperation = 'skip' | 'none' | 'generate' | 'translate' | 'polish'
 
 /** 字幕识别方式：本地 Whisper / Gemini 全片转写 / Gemini 内容+本地时间轴 */
 export type SubtitleRecognitionMode = 'local' | 'gemini_full' | 'gemini_align'

@@ -126,6 +126,19 @@ class FakeAutomationDownloader:
         return os.path.join(kwargs["output_dir"], "cover.jpg")
 
 
+class FakeOriginalSubtitleDownloader(FakeAutomationDownloader):
+    """测试用下载器，模拟 YouTube 原字幕下载成功"""
+
+    def download_subtitle(self, url, language, output_dir, sub_type, control_keys):
+        """写入一份可解析的 SRT 原字幕"""
+        _ = (url, sub_type, control_keys)
+        self.subtitle_download_calls += 1
+        subtitle_path = os.path.join(output_dir, f"subtitle.{language}.srt")
+        with open(subtitle_path, "w", encoding="utf-8") as file:
+            file.write("1\n00:00:00,000 --> 00:00:01,000\n原字幕第一句\n\n")
+        return subtitle_path
+
+
 class FailingLocalSourceDownloader:
     """测试用下载器，本地视频流程不应调用任何网络解析或下载"""
 
@@ -1796,6 +1809,19 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("配音", context.exception.detail)
 
+    def test_validate_automation_skip_subtitle_does_not_require_text_profile(self):
+        """完全不处理字幕时，即使识别方式保留 Gemini，也不应要求文本 API 配置"""
+        validate_automation_request_profiles(
+            FakeDb([]),
+            AutomationRunRequest(
+                url="https://youtube.com/watch?v=test",
+                subtitle_operation="skip",
+                subtitle_recognition_mode="gemini_align",
+                burn_subtitles=True,
+                enable_voice=False,
+            ),
+        )
+
     def test_validate_automation_accepts_saved_voice_profile(self):
         """配音配置完整时允许一键流程继续启动"""
         profile = VoiceProviderProfile(
@@ -2003,6 +2029,13 @@ class AutomationJobTests(unittest.TestCase):
             fake_recognizer = FakeAutomationRecognizer()
             video = VideoSource(id=1, platform="youtube", video_id="export-render", url="https://example.test/video", title="测试视频")
             task_ids = iter(range(1, 10))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "export-render",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
 
             def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
                 """创建测试任务对象"""
@@ -2020,6 +2053,7 @@ class AutomationJobTests(unittest.TestCase):
                 patch("backend.api.automation._pick_subtitle_preset", return_value=None),
                 patch("backend.api.automation._pick_text_profile", return_value=None),
                 patch("backend.api.automation.ensure_project_dirs", return_value={"output_dir": temp_dir, "exports_dir": temp_dir}),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
             ):
                 response = _run_automation_sync(
                     AutomationRunRequest(
@@ -2046,6 +2080,255 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.effects_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
         self.assertFalse(fake_processor.effects_calls[0]["preset"]["transform"]["enabled"])
         self.assertEqual(fake_processor.effects_calls[0]["preset"]["canvas"]["resolution"], "1080p")
+
+    def test_original_subtitle_without_burn_skips_subtitle_stage_when_voice_disabled(self):
+        """使用原字幕且不烧录、不配音时，一键流程应直接跳过字幕加工"""
+        with tempfile.TemporaryDirectory(prefix="automation_original_skip_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="original-skip", url="https://example.test/video", title="原字幕跳过")
+            task_ids = iter(range(30, 40))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "original-skip",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            class FailingRecognizer:
+                """原字幕跳过模式不应启动本地识别"""
+
+                def transcribe_video(self, *_args, **_kwargs):
+                    raise AssertionError("原字幕不烧录且未配音时不应识别字幕")
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FailingRecognizer()),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", side_effect=AssertionError("原字幕不烧录时不应校验文本 API")),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        subtitle_operation="none",
+                        subtitle_recognition_mode="gemini_align",
+                        enable_voice=False,
+                        burn_subtitles=False,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["subtitle"].status, "skipped")
+        self.assertIn("跳过字幕加工", stage_by_key["subtitle"].error_message)
+        self.assertEqual(fake_downloader.subtitle_download_calls, 0)
+        self.assertEqual(fake_processor.burn_calls, [])
+        self.assertEqual(fake_processor.merge_calls, [])
+
+    def test_original_subtitle_without_burn_uses_timeline_only_for_segmented_voice(self):
+        """使用原字幕且不烧录、开启分段配音时，只读取原字幕时间轴给配音使用"""
+        class CapturingVoiceEngine:
+            """记录分段配音输入，避免真实调用配音接口"""
+
+            def __init__(self):
+                self.segments: list[dict] = []
+
+            async def generate_timed_voice_track(self, segments, output_path, progress_callback=None, **_kwargs):
+                """模拟按原字幕时间轴生成配音"""
+                self.segments = segments
+                if progress_callback:
+                    progress_callback(100)
+                with open(output_path, "wb") as file:
+                    file.write(b"voice")
+                return output_path
+
+            async def generate_voice(self, *_args, **_kwargs):
+                """原字幕时间轴可用时不应回退整段配音"""
+                raise AssertionError("原字幕时间轴可用时不应回退整段配音")
+
+        with tempfile.TemporaryDirectory(prefix="automation_original_voice_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeOriginalSubtitleDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            voice_engine = CapturingVoiceEngine()
+            video = VideoSource(id=1, platform="youtube", video_id="original-voice", url="https://example.test/video", title="原字幕配音")
+            voice_profile = VoiceProviderProfile(
+                id=4,
+                name="配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            task_ids = iter(range(60, 75))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "original-voice",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            class FailingRecognizer:
+                """原字幕时间轴可用时不应启动本地识别"""
+
+                def transcribe_video(self, *_args, **_kwargs):
+                    raise AssertionError("原字幕时间轴可用时不应识别字幕")
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FailingRecognizer()),
+                patch("backend.api.automation.VoiceEngine", return_value=voice_engine),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", side_effect=AssertionError("原字幕时间轴模式不应调用文本 API")),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        subtitle_operation="none",
+                        subtitle_language="en",
+                        enable_voice=True,
+                        burn_subtitles=False,
+                        voice_mode="segmented",
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["subtitle"].status, "skipped")
+        self.assertIn("原字幕时间轴", stage_by_key["subtitle"].error_message)
+        self.assertEqual(fake_downloader.subtitle_download_calls, 1)
+        self.assertEqual(fake_processor.burn_calls, [])
+        self.assertEqual(fake_processor.merge_calls[0]["video_path"], downloaded_path)
+        self.assertEqual(voice_engine.segments[0]["text"], "原字幕第一句")
+        self.assertIn("原字幕第一句", response.subtitle_text)
+
+    def test_skip_subtitle_stage_ignores_burn_and_voice_timeline(self):
+        """不处理字幕时，即使开启烧录和配音，也不应识别、读取或烧录字幕"""
+        class CapturingVoiceEngine:
+            """记录整段配音输入，确认没有走字幕分段时间轴"""
+
+            def __init__(self):
+                self.text = ""
+
+            async def generate_timed_voice_track(self, *_args, **_kwargs):
+                """不处理字幕时不应进入分段配音"""
+                raise AssertionError("不处理字幕时不应使用字幕时间轴分段配音")
+
+            async def generate_voice(self, text, output_path, **_kwargs):
+                """模拟整段配音并记录文案"""
+                self.text = text
+                with open(output_path, "wb") as file:
+                    file.write(b"voice")
+                return output_path
+
+        with tempfile.TemporaryDirectory(prefix="automation_skip_subtitle_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            voice_engine = CapturingVoiceEngine()
+            video = VideoSource(id=1, platform="youtube", video_id="skip-subtitle", url="https://example.test/video", title="跳过字幕测试")
+            voice_profile = VoiceProviderProfile(
+                id=5,
+                name="配音",
+                provider_type="openai_tts",
+                base_url="https://example.test/v1",
+                api_key_encrypted="encrypted",
+                voice="voice-model",
+            )
+            task_ids = iter(range(80, 95))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "skip-subtitle",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            class FailingRecognizer:
+                """完全跳过字幕时不应启动本地识别"""
+
+                def transcribe_video(self, *_args, **_kwargs):
+                    raise AssertionError("不处理字幕时不应识别字幕")
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FailingRecognizer()),
+                patch("backend.api.automation.VoiceEngine", return_value=voice_engine),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", side_effect=AssertionError("不处理字幕时不应读取字幕预设")),
+                patch("backend.api.automation._pick_text_profile", side_effect=AssertionError("不处理字幕时不应调用文本 API")),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        subtitle_operation="skip",
+                        subtitle_recognition_mode="gemini_align",
+                        enable_voice=True,
+                        burn_subtitles=True,
+                        voice_mode="segmented",
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["subtitle"].status, "skipped")
+        self.assertIn("不处理字幕", stage_by_key["subtitle"].error_message)
+        self.assertEqual(fake_downloader.subtitle_download_calls, 0)
+        self.assertEqual(fake_processor.burn_calls, [])
+        self.assertEqual(fake_processor.merge_calls[0]["video_path"], downloaded_path)
+        self.assertIn("跳过字幕测试", voice_engine.text)
+        self.assertEqual(response.subtitle_text, "")
 
     def test_automation_voice_can_export_subtitle_only_copy(self):
         """开启配音时可额外导出一份只有字幕、没有配音的视频"""

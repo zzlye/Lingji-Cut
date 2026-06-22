@@ -473,7 +473,7 @@ export type AutomationStartParams = {
   subtitle_language?: string
   text_profile_id?: number
   subtitle_recognition_mode?: 'local' | 'gemini_full' | 'gemini_align'
-  subtitle_operation?: 'none' | 'generate' | 'translate' | 'polish'
+  subtitle_operation?: 'skip' | 'none' | 'generate' | 'translate' | 'polish'
   subtitle_target_language?: string
   text_system_prompt?: string
   burn_subtitles?: boolean

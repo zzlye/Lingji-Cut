@@ -117,6 +117,14 @@ function normalizeExportSettings(value: unknown): AutomationPreferences['export_
   }
 }
 
+/** 规范字幕处理方式，区分完全跳过和使用原字幕 */
+function normalizeSubtitleOperation(value: unknown): AutomationPreferences['subtitle_operation'] {
+  const operation = String(value || '')
+  return ['skip', 'none', 'generate', 'translate', 'polish'].includes(operation)
+    ? operation as AutomationPreferences['subtitle_operation']
+    : DEFAULT_AUTOMATION_PREFERENCES.subtitle_operation
+}
+
 /** 读取一键自动化偏好 */
 export function loadAutomationPreferences(): AutomationPreferences {
   if (typeof localStorage === 'undefined') {
@@ -141,6 +149,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
       subtitle_recognition_mode: ['local', 'gemini_full', 'gemini_align'].includes(parsed.subtitle_recognition_mode)
         ? parsed.subtitle_recognition_mode
         : 'local',
+      subtitle_operation: normalizeSubtitleOperation(parsed.subtitle_operation),
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),
       voice_profile_id: normalizeId(parsed.voice_profile_id),

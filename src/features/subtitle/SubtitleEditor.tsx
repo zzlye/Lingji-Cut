@@ -238,7 +238,7 @@ function presetToForm(preset: SubtitlePreset): SubtitlePresetForm {
   }
 }
 
-const SUBTITLE_OP_OPTIONS: FieldOption[] = [['none', '不处理'], ['polish', '润色字幕'], ['translate', '翻译字幕'], ['generate', '生成字幕文案']]
+const SUBTITLE_OP_OPTIONS: FieldOption[] = [['skip', '不处理字幕'], ['none', '使用原字幕'], ['polish', '润色字幕'], ['translate', '翻译字幕'], ['generate', '生成字幕文案']]
 const TARGET_LANG_OPTIONS: FieldOption[] = [['zh-CN', '中文 简体'], ['en', '英文'], ['ja', '日文'], ['ko', '韩文'], ['es', '西班牙语'], ['', '跟随字幕']]
 
 /**
@@ -269,6 +269,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   }, [form.font_name])
   const fontAvailability = useFontAvailability(fontFamiliesToCheck, fontAvailabilityRefreshKey)
   const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
+  const shouldSkipSubtitle = automationOptions.subtitle_operation === 'skip'
 
   const loadPresets = async () => {
     try {
@@ -524,10 +525,10 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="auto" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">一键完成字幕策略</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
-                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode }))} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
-                <SelectField label="文本 API 处理" value={automationOptions.subtitle_operation} options={SUBTITLE_OP_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_operation: v as typeof automationOptions.subtitle_operation }))} description="需先在「文本 API」配置渠道" />
+                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode }))} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
+                <SelectField label="文本 API 处理" value={automationOptions.subtitle_operation} options={SUBTITLE_OP_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences(v === 'skip' ? { subtitle_operation: v as typeof automationOptions.subtitle_operation, burn_subtitles: false } : { subtitle_operation: v as typeof automationOptions.subtitle_operation }))} description="需先在「文本 API」配置渠道" />
                 <SelectField label="输出语言" value={automationOptions.subtitle_target_language || ''} options={TARGET_LANG_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_target_language: v }))} />
-                <SwitchField label="默认烧录硬字幕" description="导出时把字幕烧进画面" checked={automationOptions.burn_subtitles} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: v }))} />
+                <SwitchField label="默认烧录硬字幕" description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : '导出时把字幕烧进画面'} checked={!shouldSkipSubtitle && automationOptions.burn_subtitles} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: shouldSkipSubtitle ? false : v }))} />
               </AccordionContent>
             </AccordionItem>
           </Accordion>

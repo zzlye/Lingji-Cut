@@ -359,7 +359,7 @@ def _update_job_stage(
         "parse": "解析视频",
         "download": "下载入库",
         "effects": "画面处理",
-        "subtitle": "字幕处理",
+        "subtitle": "字幕准备",
         "voice": "配音生成",
         "export": "合成导出",
     }.get(key, job.current_step)
@@ -1346,6 +1346,44 @@ SUBTITLE_API_OPERATION_LABELS = {
 SUBTITLE_RECOGNITION_MODES = {"local", "gemini_full", "gemini_align"}
 
 
+def _skips_subtitle_stage(request: "AutomationRunRequest") -> bool:
+    """判断一键流程是否完全跳过字幕阶段"""
+    return (request.subtitle_operation or "none") == "skip"
+
+
+def _uses_original_subtitles_without_burn(request: "AutomationRunRequest") -> bool:
+    """判断一键流程是否只保留原字幕语义，不做字幕加工和硬字幕烧录"""
+    return (request.subtitle_operation or "none") == "none" and not request.burn_subtitles
+
+
+def _voice_needs_original_subtitles(request: "AutomationRunRequest") -> bool:
+    """配音没有手写文案时需要原字幕文本；分段配音会同时使用字幕时间轴"""
+    return bool(request.enable_voice and not str(request.voice_text or "").strip())
+
+
+def _load_original_subtitle_timeline(
+    downloader: Downloader,
+    video: VideoSource,
+    request: "AutomationRunRequest",
+    output_dir: str,
+    control_keys: Optional[list[str]],
+) -> tuple[str, str, list[dict[str, Any]], list[str]]:
+    """下载并解析原字幕轨，只作为配音分段时间轴，不做翻译、润色或烧录"""
+    engine = SubtitleEngine()
+    subtitle_path, language, warnings = _download_subtitle_with_fallback(
+        downloader=downloader,
+        video=video,
+        requested_language=request.subtitle_language,
+        preset_language=None,
+        output_dir=output_dir,
+        control_keys=control_keys,
+    )
+    entries = _parse_subtitle_entries(engine, subtitle_path)
+    if not entries:
+        raise RuntimeError("原字幕为空，无法作为配音时间轴")
+    return subtitle_path, language, entries, warnings
+
+
 def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> GeminiAudioTranscriber:
     """按文本 API 配置构造 Gemini 音频识别器，缺配置时报错拦截"""
     profile = _pick_text_profile(db, request.text_profile_id)
@@ -1635,7 +1673,11 @@ def validate_automation_request_profiles(db: Session, request: AutomationRunRequ
     """一键流程启动前校验 API 配置，缺配置时直接拦截而不是生成卡住任务"""
     # Gemini 识别方式依赖文本 API 渠道，缺配置时提前拦截
     recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
-    if recognition_mode in {"gemini_full", "gemini_align"}:
+    if (
+        recognition_mode in {"gemini_full", "gemini_align"}
+        and not _skips_subtitle_stage(request)
+        and not _uses_original_subtitles_without_burn(request)
+    ):
         text_profile = _pick_text_profile(db, request.text_profile_id)
         if not text_profile:
             raise HTTPException(
@@ -2327,8 +2369,65 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             raise
 
     video_for_export = effects_path
+    skip_subtitle_stage = _skips_subtitle_stage(request)
+    subtitle_processing_disabled = _uses_original_subtitles_without_burn(request)
+    voice_needs_original_subtitles = _voice_needs_original_subtitles(request)
     reusable_subtitle_path = _stage_subtitle_output_if_reusable(job, "subtitle", "断点续跑") if resume_from_checkpoint else None
-    if reusable_subtitle_path:
+    if skip_subtitle_stage:
+        skip_message = "已按设置不处理字幕，跳过识别、原字幕读取和硬字幕烧录"
+        stages.append(AutomationStageResult(key="subtitle", status="skipped", progress=100, error_message=skip_message))
+        if job:
+            _update_job_stage(db, job, "subtitle", "skipped", error_message=skip_message)
+    elif subtitle_processing_disabled and not voice_needs_original_subtitles:
+        skip_message = "已按设置跳过字幕加工和硬字幕烧录"
+        stages.append(AutomationStageResult(key="subtitle", status="skipped", progress=100, error_message=skip_message))
+        if job:
+            _update_job_stage(db, job, "subtitle", "skipped", error_message=skip_message)
+    elif subtitle_processing_disabled and voice_needs_original_subtitles:
+        subtitle_task = _create_task(db, video.id, "subtitle", {"timeline_only": True}, parent_job_id=job.id if job else None)
+        if job:
+            _update_job_stage(db, job, "subtitle", "running", progress=15, task_id=subtitle_task.id)
+        try:
+            _check_control(db, job, subtitle_task)
+            subtitle_path, language, original_entries, subtitle_download_warnings = _load_original_subtitle_timeline(
+                downloader=downloader,
+                video=video,
+                request=request,
+                output_dir=paths["output_dir"],
+                control_keys=_control_keys(job, subtitle_task),
+            )
+            engine = SubtitleEngine()
+            subtitle_entries = engine.dedupe_entries_by_text(_apply_glossary_terms(original_entries, request.glossary_terms))
+            subtitle_text = entries_to_plain_text(subtitle_entries)
+            if job:
+                job.subtitle_text = subtitle_text
+            _check_control(db, job, subtitle_task)
+            _complete_task(db, subtitle_task, subtitle_path)
+            timeline_message = "已读取原字幕时间轴用于配音，未加工字幕也未烧录"
+            if subtitle_download_warnings:
+                timeline_message = f"{timeline_message}；字幕下载降级: {_format_subtitle_fallback_error(subtitle_download_warnings)}"
+            subtitle_task.error_message = timeline_message
+            subtitle_task.params = json.dumps({
+                "source_subtitle_path": subtitle_path,
+                "editable_subtitle_path": subtitle_path,
+                "subtitle_language": language,
+                "recognition_mode": "original_subtitle",
+                "timeline_only": True,
+            }, ensure_ascii=False)
+            db.commit()
+            stages.append(AutomationStageResult(key="subtitle", status="skipped", progress=100, task_id=subtitle_task.id, output_path=subtitle_path, error_message=timeline_message))
+            if job:
+                _update_job_stage(db, job, "subtitle", "skipped", task_id=subtitle_task.id, output_path=subtitle_path, error_message=timeline_message)
+        except TaskControlRequested as exc:
+            _handle_task_control(db, subtitle_task, exc)
+            raise
+        except Exception as exc:
+            resumable_error = exc if isinstance(exc, ResumableStageFailed) else _resumable_stage_error("原字幕时间轴读取", exc)
+            _fail_task(db, subtitle_task, resumable_error)
+            if job:
+                _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(resumable_error))
+            raise resumable_error from exc
+    elif reusable_subtitle_path:
         video_for_export = reusable_subtitle_path if request.burn_subtitles else video_for_export
         subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else None
         subtitle_text = job.subtitle_text or ""
@@ -2629,20 +2728,6 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     try:
         _check_control(db, job, export_task)
         working_video = video_for_export
-        if subtitle_ass_path and not request.burn_subtitles:
-            subtitle_burn_preset = merge_subtitle_burn_preset(preset_dict, request.processing_preset)
-            working_video = processor.burn_subtitles(
-                video_path=working_video,
-                subtitle_path=subtitle_ass_path,
-                preset=subtitle_burn_preset,
-                control_keys=_control_keys(job, export_task),
-                progress_callback=lambda progress: _update_export_progress(db, job, export_task, min(55.0, 15.0 + progress * 0.4)),
-            )
-            _check_control(db, job, export_task)
-            export_task.progress = 35
-            db.commit()
-            if job:
-                _update_job_stage(db, job, "export", "running", progress=35, task_id=export_task.id)
         subtitle_only_warning: Optional[str] = None
         if request.export_subtitle_only_when_voice and audio_path and subtitle_ass_path:
             try:
