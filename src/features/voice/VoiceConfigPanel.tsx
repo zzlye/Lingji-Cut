@@ -820,7 +820,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
                 <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
                 <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
-                <NumberField label="尾音避让" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="尾音避让" description="默认 300ms。数值越大越不容易抢话，但整体配音会更靠后。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
                 <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
               </div>
             ) : automationOptions.voice_mode === 'batched' || automationOptions.voice_mode === 'segmented' ? (
@@ -828,7 +828,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 {automationOptions.voice_mode === 'batched' && (
                   <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
                 )}
-                <NumberField label="尾音避让" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="尾音避让" description="默认 300ms。数值越大越不容易抢话，但整体配音会更靠后。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
               </div>
             ) : null}
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />

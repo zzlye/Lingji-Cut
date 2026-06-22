@@ -18,6 +18,9 @@ const AUDIO_REPLACE_CONFIRMED_KEY = 'audio_replace_confirmed'
 /** 自然分组模式迁移标记，避免旧版逐条并发继续造成抢话听感 */
 const VOICE_NATURAL_MODE_MIGRATED_KEY = 'voice_natural_mode_migrated'
 
+/** 尾音避让默认值迁移标记，避免旧缓存继续把 160ms 发给后端 */
+const VOICE_GAP_300_MIGRATED_KEY = 'voice_gap_300_migrated'
+
 /** 旧版默认风格偏平淡，升级时只替换这些精确默认值 */
 const LEGACY_DEFAULT_VOICE_STYLE_PROMPTS: Record<string, string> = {
   preset_narrator: '用中性自然解说口吻，语气稳定，节奏清晰。',
@@ -184,6 +187,16 @@ function normalizeVoiceNumber(value: unknown, defaultValue: number, min: number,
   return Math.min(max, Math.max(min, Number.isFinite(numberValue) ? numberValue : defaultValue))
 }
 
+/** 规范尾音避让；旧版默认 160ms 会自动迁移到 300ms，用户设置的其它数值保留 */
+function normalizeVoiceMinGapMs(value: unknown, migrated: boolean): number {
+  const hasValue = value !== undefined && value !== null && String(value).trim() !== ''
+  const numberValue = Math.round(Number(value))
+  if (!migrated && (!hasValue || numberValue === 160)) {
+    return DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms
+  }
+  return normalizeVoiceNumber(value, DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms, 0, 2000)
+}
+
 /** 规范最终导出设置，保证旧缓存升级后仍有完整默认值 */
 function normalizeExportSettings(value: unknown): AutomationPreferences['export_settings'] {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -222,6 +235,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
     const audioReplaceWasExplicitlyChosen = parsed[AUDIO_REPLACE_CONFIRMED_KEY] === true
     const voiceModeWasMigrated = parsed[VOICE_NATURAL_MODE_MIGRATED_KEY] === true
+    const voiceGapWasMigrated = parsed[VOICE_GAP_300_MIGRATED_KEY] === true
     const normalizedVoiceMode = normalizeVoiceMode(parsed.voice_mode)
     const voiceMode = !voiceModeWasMigrated && normalizedVoiceMode === 'batched'
       ? 'grouped'
@@ -249,7 +263,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
       voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
       voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
       voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
-      voice_min_gap_ms: normalizeVoiceNumber(parsed.voice_min_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms, 0, 2000),
+      voice_min_gap_ms: normalizeVoiceMinGapMs(parsed.voice_min_gap_ms, voiceGapWasMigrated),
       voice_group_size: normalizeVoiceNumber(parsed.voice_group_size, DEFAULT_AUTOMATION_PREFERENCES.voice_group_size, 1, 12),
       voice_group_chars: normalizeVoiceNumber(parsed.voice_group_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_group_chars, 80, 2000),
       voice_group_max_seconds: Math.min(30, Math.max(1, Number(parsed.voice_group_max_seconds ?? DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds) || DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds)),
@@ -260,8 +274,12 @@ export function loadAutomationPreferences(): AutomationPreferences {
       banned_words: normalizeBannedWords(parsed.banned_words),
       banned_word_action: parsed.banned_word_action === 'block' ? 'block' : 'warn',
     }
-    if (saved && (!voiceModeWasMigrated || shouldPersistVoiceMigration) && typeof localStorage !== 'undefined') {
-      localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify({ ...preferences, [VOICE_NATURAL_MODE_MIGRATED_KEY]: true }))
+    if (saved && (!voiceModeWasMigrated || !voiceGapWasMigrated || shouldPersistVoiceMigration) && typeof localStorage !== 'undefined') {
+      localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify({
+        ...preferences,
+        [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
+        [VOICE_GAP_300_MIGRATED_KEY]: true,
+      }))
     }
     return preferences
   } catch {
@@ -280,6 +298,7 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
     const persisted = {
       ...next,
       [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
+      [VOICE_GAP_300_MIGRATED_KEY]: true,
       ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
       ...(Object.prototype.hasOwnProperty.call(updates, 'audio_mode') ? { [AUDIO_REPLACE_CONFIRMED_KEY]: updates.audio_mode === 'replace' } : {}),
     }
