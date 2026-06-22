@@ -451,7 +451,7 @@ export const exportApi = {
     subtitle_path?: string
     audio_path?: string
     output_format?: string
-    audio_mode?: 'replace' | 'mix'
+    audio_mode?: 'replace' | 'mix' | 'background'
     original_volume?: number
   }) =>
     request<{ message: string; task_id: number; output_path: string }>('/exports/create', {
@@ -482,7 +482,7 @@ export type AutomationStartParams = {
   voice_profile_id?: number
   voice_text?: string
   voice_mode?: 'full' | 'batched' | 'segmented'
-  audio_mode?: 'replace' | 'mix'
+  audio_mode?: 'replace' | 'mix' | 'background'
   original_volume?: number
   voice_batch_size?: number
   voice_batch_chars?: number
@@ -573,7 +573,7 @@ export const automationApi = {
     output_format?: string
     export_with_settings?: boolean
     export_settings?: import('@/types').AutomationExportSettings
-    audio_mode?: 'replace' | 'mix'
+    audio_mode?: 'replace' | 'mix' | 'background'
     original_volume?: number
   }) =>
     request<import('@/types').AutomationReExportResponse>(`/automation/jobs/${id}/re-export`, {

@@ -677,7 +677,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
             </div>
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
-            <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['mix', '混合原视频声音'], ['replace', '仅保留配音（静音原视频）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
+            <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['background', '保留背景声，尽量去人声'], ['mix', '混合完整原视频声音'], ['replace', '仅保留配音']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             <SliderField label="原声音量" value={automationOptions.original_volume} min={0} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ original_volume: v }))} />
           </AccordionContent>
         </AccordionItem>

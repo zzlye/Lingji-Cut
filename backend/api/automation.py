@@ -114,7 +114,7 @@ def _control_keys(job: Optional[AutomationJobRecord] = None, task: Optional[Down
 def _normalize_audio_mode(value: Any) -> str:
     """规范配音合成模式，默认保留原视频声音"""
     mode = str(value or "").strip().lower()
-    return mode if mode in {"mix", "replace"} else "mix"
+    return mode if mode in {"mix", "replace", "background"} else "mix"
 
 
 def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
@@ -1378,8 +1378,10 @@ def _uses_original_subtitles_without_burn(request: "AutomationRunRequest") -> bo
 
 
 def _voice_needs_original_subtitles(request: "AutomationRunRequest") -> bool:
-    """配音没有手写文案时需要原字幕文本；分段配音会同时使用字幕时间轴"""
-    return bool(request.enable_voice and not str(request.voice_text or "").strip())
+    """配音需要字幕时间轴或没有手写文案时，才读取原字幕"""
+    voice_mode = str(request.voice_mode or "batched").strip().lower()
+    uses_timeline = voice_mode in {"segmented", "batched"}
+    return bool(request.enable_voice and (uses_timeline or not str(request.voice_text or "").strip()))
 
 
 def _load_original_subtitle_timeline(
@@ -1994,6 +1996,38 @@ def subtitle_entries_to_voice_segments(entries: list[dict[str, Any]], max_chars_
     return segments
 
 
+def _voice_entries_from_subtitle_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """生成配音专用字幕条目，双语字幕只取第一行中文字幕"""
+    engine = SubtitleEngine()
+    voice_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        lines = [
+            line.strip()
+            for line in str(entry.get("text") or "").replace("\\N", "\n").splitlines()
+            if line.strip()
+        ]
+        text = lines[0] if lines else str(entry.get("text") or "")
+        text = " ".join(engine.clean_subtitle_text_for_output(text).split())
+        if not text or engine.is_meaningless_subtitle_text(text):
+            continue
+        next_entry = dict(entry)
+        next_entry["index"] = len(voice_entries) + 1
+        next_entry["text"] = text
+        voice_entries.append(next_entry)
+    return voice_entries
+
+
+def _load_voice_entries_from_subtitle_file(subtitle_path: Optional[str]) -> list[dict[str, Any]]:
+    """从已保存字幕文件恢复配音时间轴，避免断点续跑退回整段配音"""
+    if not subtitle_path:
+        return []
+    path = _existing_file(subtitle_path, EDITABLE_SUBTITLE_EXTENSIONS)
+    if not path:
+        return []
+    engine = SubtitleEngine()
+    return _voice_entries_from_subtitle_entries(_parse_subtitle_entries(engine, path))
+
+
 def map_text_to_timed_entries(text: str, original_entries: list[dict]) -> list[dict[str, str | int]]:
     """把文本 API 返回内容映射回原字幕时间轴"""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -2354,6 +2388,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     stages: list[AutomationStageResult] = []
     subtitle_text = ""
     subtitle_entries: list[dict[str, Any]] = []
+    voice_subtitle_entries: list[dict[str, Any]] = []
     subtitle_ass_path: Optional[str] = None
     subtitle_burn_preset: dict[str, Any] = merge_subtitle_burn_preset({}, request.processing_preset)
     final_export_preset: dict[str, Any] = build_final_export_preset(request.export_settings)
@@ -2537,6 +2572,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             )
             engine = SubtitleEngine()
             subtitle_entries = engine.dedupe_entries_by_text(_apply_glossary_terms(original_entries, request.glossary_terms))
+            voice_subtitle_entries = _voice_entries_from_subtitle_entries(subtitle_entries)
             subtitle_text = entries_to_plain_text(subtitle_entries)
             if job:
                 job.subtitle_text = subtitle_text
@@ -2569,7 +2605,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
     elif reusable_subtitle_path:
         video_for_export = reusable_subtitle_path if request.burn_subtitles else video_for_export
         subtitle_ass_path = reusable_subtitle_path if reusable_subtitle_path.lower().endswith(".ass") else None
-        subtitle_text = job.subtitle_text or ""
+        voice_subtitle_entries = _load_voice_entries_from_subtitle_file(_find_job_editable_subtitle_path(job, db) if job else reusable_subtitle_path)
+        subtitle_entries = voice_subtitle_entries
+        subtitle_text = entries_to_plain_text(voice_subtitle_entries) or (job.subtitle_text if job else "") or ""
         _mark_stage_reused(db, job, "subtitle", reusable_subtitle_path)
         stages.append(AutomationStageResult(key="subtitle", status="completed", progress=100, output_path=reusable_subtitle_path))
     else:
@@ -2704,8 +2742,10 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             display_entries = engine.normalize_entries_for_display(display_source_entries, preset_dict)
             subtitle_burn_preset = merge_subtitle_burn_preset(preset_dict, request.processing_preset)
             subtitle_entries = entries
+            voice_subtitle_entries = _voice_entries_from_subtitle_entries(display_entries)
+            voice_subtitle_text = entries_to_plain_text(voice_subtitle_entries)
             if job:
-                job.subtitle_text = subtitle_text
+                job.subtitle_text = voice_subtitle_text or subtitle_text
                 _update_job_stage(db, job, "subtitle", "running", progress=70, task_id=subtitle_task.id)
             base_name = os.path.splitext(os.path.basename(effects_path))[0]
             translated_subtitle_path = os.path.join(paths["output_dir"], f"{base_name}_{language}_translated.srt") if translated_entries_for_display else None
@@ -2776,7 +2816,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
-            voice_text = (request.voice_text or subtitle_text or _fallback_voice_text(video)).strip()
+            voice_mode = str(request.voice_mode or "batched").strip().lower()
+            if voice_mode not in {"full", "segmented", "batched"}:
+                voice_mode = "batched"
+            voice_text_source = request.voice_text if voice_mode == "full" and str(request.voice_text or "").strip() else subtitle_text
+            voice_text = (voice_text_source or _fallback_voice_text(video)).strip()
             voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text
             banned_hits = _find_banned_words(voice_text, request.banned_words)
             if banned_hits and request.banned_word_action == "block":
@@ -2786,13 +2830,15 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
             voice_engine = VoiceEngine()
             api_key = decrypt_api_key(voice_profile.api_key_encrypted)
-            segments = subtitle_entries_to_voice_segments(subtitle_entries)
-            voice_mode = str(request.voice_mode or "batched").strip().lower()
+            segments = subtitle_entries_to_voice_segments(voice_subtitle_entries)
+            has_voice_timeline = bool(voice_subtitle_entries or subtitle_entries)
             has_speakers = _segments_have_speakers(segments)
             should_use_speaker_map = bool(request.multi_speaker_enabled and has_speakers)
             voice_selector = _build_auto_voice_selector(voice, request.speaker_voice_map) if should_use_speaker_map else None
             style_selector = _build_auto_style_selector(request.speaker_voice_styles, request.speaker_voice_map, voice) if should_use_speaker_map and request.speaker_voice_styles else None
-            if voice_mode in {"segmented", "batched"} and segments and not request.voice_text:
+            if voice_mode in {"segmented", "batched"} and has_voice_timeline:
+                if not segments:
+                    raise RuntimeError("没有可用于配音的中文字幕时间轴，已停止生成，避免整段配音和字幕错位")
                 try:
                     audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_{voice_mode}.{output_ext}")
 
@@ -2836,20 +2882,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 except TaskControlRequested:
                     raise
                 except Exception as segmented_exc:
-                    if job:
-                        _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"批量/分段配音失败，回退整段配音: {segmented_exc}")
-                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
-                    audio_path = asyncio.run(voice_engine.generate_voice(
-                        text=voice_text,
-                        output_path=audio_path,
-                        provider_type=voice_profile.provider_type,
-                        voice=voice,
-                        api_key=api_key,
-                        base_url=voice_profile.base_url,
-                        model=model,
-                        settings=settings,
-                    ))
-                    _check_control(db, job, voice_task)
+                    raise RuntimeError(f"按中文字幕时间轴配音失败，已停止生成，避免回退整段配音导致音画错位: {segmented_exc}") from segmented_exc
             else:
                 audio_path = asyncio.run(voice_engine.generate_voice(
                     text=voice_text,

@@ -227,6 +227,14 @@ class FakeAutomationRecognizer:
 class FakeVoiceEngine:
     """测试用配音引擎，返回假音频文件"""
 
+    async def generate_batched_timed_voice_track(self, output_path, progress_callback=None, **_kwargs):
+        """模拟按字幕批量分段生成配音"""
+        if progress_callback:
+            progress_callback(100)
+        with open(output_path, "wb") as file:
+            file.write(b"voice")
+        return output_path
+
     async def generate_timed_voice_track(self, output_path, progress_callback=None, **_kwargs):
         """模拟按字幕分段生成配音"""
         if progress_callback:
@@ -257,6 +265,10 @@ class FailingTextEngine:
 class FailingVoiceEngine:
     """测试用配音引擎，模拟分段和整段配音都失败"""
 
+    async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
+        """模拟批量配音失败"""
+        raise RuntimeError("配音 API 重试次数已用完")
+
     async def generate_timed_voice_track(self, *_args, **_kwargs):
         """模拟分段配音失败"""
         raise RuntimeError("配音 API 重试次数已用完")
@@ -264,6 +276,22 @@ class FailingVoiceEngine:
     async def generate_voice(self, *_args, **_kwargs):
         """模拟整段配音失败"""
         raise RuntimeError("配音 API 重试次数已用完")
+
+
+class FailingSegmentVoiceEngine:
+    """测试用配音引擎，分段失败但整段接口不应被回退调用"""
+
+    async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
+        """模拟按时间轴配音失败"""
+        raise RuntimeError("批量配音失败")
+
+    async def generate_timed_voice_track(self, *_args, **_kwargs):
+        """模拟逐句配音失败"""
+        raise RuntimeError("逐句配音失败")
+
+    async def generate_voice(self, *_args, **_kwargs):
+        """时间轴配音失败后不能回退整段生成错位音轨"""
+        raise AssertionError("时间轴配音失败后不应回退整段配音")
 
 
 class AutomationJobTests(unittest.TestCase):
@@ -1344,6 +1372,107 @@ class AutomationJobTests(unittest.TestCase):
 
         self.assertIn("你好世界", comparison_content)
         self.assertIn("hello world", comparison_content)
+
+    def test_automation_voice_uses_translated_chinese_timeline(self):
+        """翻译后配音必须按最终中文字幕时间轴生成，不能读原文或旧整段文案"""
+        class EnglishRecognizer:
+            """测试用英文识别器"""
+
+            def transcribe_video(self, video_path, progress_callback=None):
+                if progress_callback:
+                    progress_callback(100)
+                return ([
+                    {"index": 1, "start": "00:00:00,000", "end": "00:00:01,200", "text": "hello world"},
+                    {"index": 2, "start": "00:00:01,200", "end": "00:00:02,500", "text": "open the door"},
+                ], "en")
+
+        class FakeTextEngine:
+            """测试用文本引擎，模拟英文翻译成中文"""
+
+            async def process_subtitle_entries(self, entries, **_kwargs):
+                translations = ["你好世界", "打开那扇门"]
+                return [{**entry, "text": translations[index]} for index, entry in enumerate(entries)]
+
+        class CapturingVoiceEngine:
+            """记录传入配音接口的时间轴分段"""
+
+            def __init__(self):
+                self.segments: list[dict] = []
+
+            async def generate_batched_timed_voice_track(self, segments, output_path, progress_callback=None, **_kwargs):
+                """模拟按中文字幕时间轴配音"""
+                self.segments = segments
+                if progress_callback:
+                    progress_callback(100)
+                with open(output_path, "wb") as file:
+                    file.write(b"voice")
+                return output_path
+
+            async def generate_voice(self, *_args, **_kwargs):
+                """有字幕时间轴时不应回退整段配音"""
+                raise AssertionError("翻译字幕可用时不应走整段配音")
+
+        with tempfile.TemporaryDirectory(prefix="automation_voice_translate_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            voice_engine = CapturingVoiceEngine()
+            video = VideoSource(id=1, platform="youtube", video_id="voice-translate", url="https://example.test/video", title="Voice Translate")
+            text_profile = TextProviderProfile(id=21, name="文本", provider_type="openai_compatible", base_url="https://example.test/v1", api_key_encrypted="encrypted", model="test-model")
+            voice_profile = VoiceProviderProfile(id=22, name="配音", provider_type="openai_tts", base_url="https://example.test/v1", api_key_encrypted="encrypted", voice="voice-model")
+            task_ids = iter(range(200, 220))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-translate",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=EnglishRecognizer()),
+                patch("backend.api.automation.TextEngine", return_value=FakeTextEngine()),
+                patch("backend.api.automation.VoiceEngine", return_value=voice_engine),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=text_profile),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=True,
+                        subtitle_operation="translate",
+                        subtitle_target_language="zh-CN",
+                        text_profile_id=21,
+                        voice_profile_id=22,
+                        voice_text="这段旧文案不应该参与时间轴配音",
+                        voice_mode="batched",
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        self.assertEqual([segment["text"] for segment in voice_engine.segments], ["你好世界", "打开那扇门"])
+        self.assertEqual([segment["start_ms"] for segment in voice_engine.segments], [0, 1200])
+        self.assertNotIn("hello world", [segment["text"] for segment in voice_engine.segments])
+        self.assertNotIn("这段旧文案不应该参与时间轴配音", [segment["text"] for segment in voice_engine.segments])
 
     def test_automation_translation_failure_stops_for_resume(self):
         """字幕翻译重试耗尽后停在字幕阶段，不应静默跳过并继续导出"""
@@ -2653,6 +2782,171 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(stages["export"]["status"], "pending")
             self.assertEqual(fake_processor.convert_calls, [])
             self.assertEqual(fake_processor.merge_calls, [])
+
+    def test_timeline_voice_failure_does_not_fallback_to_full_voice(self):
+        """按字幕时间轴配音失败时必须停下，不能回退整段配音生成错位音轨"""
+        with tempfile.TemporaryDirectory(prefix="automation_voice_no_fallback_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="voice-no-fallback", url="https://example.test/video", title="配音不回退")
+            voice_profile = VoiceProviderProfile(id=23, name="配音", provider_type="openai_tts", base_url="https://example.test/v1", api_key_encrypted="encrypted", voice="voice-model")
+            task_ids = iter(range(220, 240))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "voice-no-fallback",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FakeAutomationRecognizer()),
+                patch("backend.api.automation.VoiceEngine", return_value=FailingSegmentVoiceEngine()),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    _run_automation_sync(
+                        AutomationRunRequest(
+                            url=video.url,
+                            enable_effects=False,
+                            enable_voice=True,
+                            burn_subtitles=True,
+                            voice_mode="batched",
+                            output_format="mp4",
+                        ),
+                        FakeDb([]),
+                    )
+
+        self.assertIn("避免回退整段配音导致音画错位", str(context.exception))
+        self.assertEqual(fake_processor.merge_calls, [])
+        self.assertEqual(fake_processor.convert_calls, [])
+
+    def test_resume_restores_voice_timeline_from_completed_subtitle_file(self):
+        """断点续跑复用字幕阶段时，也要从字幕文件恢复配音时间轴"""
+        class CapturingVoiceEngine:
+            """记录续跑时传入的配音分段"""
+
+            def __init__(self):
+                self.segments: list[dict] = []
+
+            async def generate_batched_timed_voice_track(self, segments, output_path, progress_callback=None, **_kwargs):
+                """模拟按恢复出的字幕时间轴配音"""
+                self.segments = segments
+                if progress_callback:
+                    progress_callback(100)
+                with open(output_path, "wb") as file:
+                    file.write(b"voice")
+                return output_path
+
+            async def generate_voice(self, *_args, **_kwargs):
+                """有字幕文件时不应回退整段配音"""
+                raise AssertionError("断点续跑有字幕文件时不应整段配音")
+
+        with tempfile.TemporaryDirectory(prefix="automation_resume_voice_timeline_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            subtitle_path = os.path.join(temp_dir, "downloaded_zh.ass")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            with open(subtitle_path, "w", encoding="utf-8") as file:
+                file.write("""[Script Info]
+ScriptType: v4.00+
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:01.10,Default,,0,0,0,,续跑第一句
+Dialogue: 0,0:00:01.10,0:00:02.40,Default,,0,0,0,,续跑第二句
+""")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            voice_engine = CapturingVoiceEngine()
+            video = VideoSource(id=1, platform="youtube", video_id="resume-voice", url="https://example.test/video", title="续跑配音")
+            voice_profile = VoiceProviderProfile(id=24, name="配音", provider_type="openai_tts", base_url="https://example.test/v1", api_key_encrypted="encrypted", voice="voice-model")
+            job = AutomationJobRecord(
+                id="auto-resume-voice",
+                video_id=video.id,
+                source_url=video.url,
+                title=video.title,
+                status="failed",
+                params=json.dumps({
+                    "url": video.url,
+                    "enable_effects": False,
+                    "enable_voice": True,
+                    "voice_profile_id": 24,
+                    "voice_mode": "batched",
+                    "burn_subtitles": True,
+                    "output_format": "mp4",
+                    "workspace_dir": temp_dir,
+                    "workspace_name": "resume-voice",
+                    "video_downloads_dir": temp_dir,
+                    "video_output_dir": temp_dir,
+                    "video_exports_dir": temp_dir,
+                    "source_video_path": downloaded_path,
+                }, ensure_ascii=False),
+                stages=json.dumps([
+                    {"key": "parse", "status": "completed", "progress": 100, "task_id": None, "output_path": None, "error_message": None},
+                    {"key": "download", "status": "completed", "progress": 100, "task_id": 1, "output_path": downloaded_path, "error_message": None},
+                    {"key": "effects", "status": "skipped", "progress": 100, "task_id": 2, "output_path": downloaded_path, "error_message": None},
+                    {"key": "subtitle", "status": "completed", "progress": 100, "task_id": 3, "output_path": subtitle_path, "error_message": None},
+                    {"key": "voice", "status": "failed", "progress": 20, "task_id": 4, "output_path": None, "error_message": "旧失败"},
+                    {"key": "export", "status": "pending", "progress": 0, "task_id": None, "output_path": None, "error_message": None},
+                ], ensure_ascii=False),
+            )
+            db = FakeTaskDb([job], [], [video])
+            task_ids = iter(range(240, 260))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "resume-voice",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", side_effect=AssertionError("续跑不应重新识别字幕")),
+                patch("backend.api.automation.VoiceEngine", return_value=voice_engine),
+                patch("backend.api.automation.decrypt_api_key", return_value="test-key"),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                _run_automation_sync(
+                    AutomationRunRequest(**json.loads(job.params)),
+                    db,
+                    job,
+                    resume_from_checkpoint=True,
+                )
+
+        self.assertEqual([segment["text"] for segment in voice_engine.segments], ["续跑第一句", "续跑第二句"])
+        self.assertEqual([segment["start_ms"] for segment in voice_engine.segments], [0, 1100])
+        self.assertEqual(fake_processor.merge_calls[0]["audio_path"], os.path.join(temp_dir, "resume-voice_voice_batched.mp3"))
 
     def test_reexport_automation_job_uses_new_subtitle_and_updates_job_output(self):
         """字幕调整页重新导出会使用新 ASS 并覆盖任务的最新导出路径"""

@@ -152,7 +152,10 @@ function normalizeAudioMode(value: unknown, replaceConfirmed: boolean): Automati
   if (mode === 'replace') {
     return replaceConfirmed ? 'replace' : DEFAULT_AUTOMATION_PREFERENCES.audio_mode
   }
-  return mode === 'mix' ? 'mix' : DEFAULT_AUTOMATION_PREFERENCES.audio_mode
+  if (mode === 'mix' || mode === 'background') {
+    return mode
+  }
+  return DEFAULT_AUTOMATION_PREFERENCES.audio_mode
 }
 
 /** 规范配音批处理数值，避免缓存里写入过大值拖垮接口 */

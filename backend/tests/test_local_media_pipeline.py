@@ -219,6 +219,35 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn("atempo=0.500", filter_arg)
         self.assertIn("adelay=1200:all=1", filter_arg)
 
+    def test_background_audio_mode_reduces_center_voice_before_mix(self):
+        """保留背景声模式应先削弱中心人声再叠加配音"""
+        self._create_test_video()
+        voice_audio = os.path.join(self.temp_dir, "voice.wav")
+        output_video = os.path.join(self.temp_dir, "background_mix.mp4")
+        self._create_test_audio(voice_audio, 660)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *_args, **_kwargs):
+            calls.append(cmd)
+            with open(output_video, "wb") as file:
+                file.write(b"video")
+            return output_video
+
+        with patch.object(self.processor, "_run_ffmpeg", side_effect=fake_run):
+            result_path = self.processor.merge_audio_video(
+                video_path=self.input_video,
+                audio_path=voice_audio,
+                output_path=output_video,
+                mode="background",
+                volume_ratio=0.35,
+            )
+
+        self.assertEqual(result_path, output_video)
+        filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
+        self.assertIn("pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0", filter_arg)
+        self.assertIn("volume=0.35[bg]", filter_arg)
+        self.assertIn("[bg][voice]amix", filter_arg)
+
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""
         with patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)):

@@ -365,7 +365,7 @@ export interface AutomationPreferences {
   export_subtitle_only_when_voice: boolean
   voice_profile_id: number | null
   voice_mode: 'full' | 'batched' | 'segmented'
-  audio_mode: 'replace' | 'mix'
+  audio_mode: 'replace' | 'mix' | 'background'
   original_volume: number
   voice_batch_size: number
   voice_batch_chars: number

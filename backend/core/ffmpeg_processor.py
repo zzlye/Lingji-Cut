@@ -454,7 +454,7 @@ class FFmpegProcessor:
     ) -> str:
         """
         合并音频和视频
-        mode: replace（替换原声）/ mix（混合）/ overlay（叠加）
+        mode: replace（替换原声）/ mix（混合）/ background（尽量保留背景声并削弱人声）
         volume_ratio: 原声音量比例（0.0-1.0）
         """
         if not os.path.exists(video_path):
@@ -495,6 +495,26 @@ class FFmpegProcessor:
                 "-i", audio_path,
                 "-filter_complex",
                 f"[0:a:0]volume={volume_ratio}[a0];[1:a:0]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[out]",
+                "-map", "0:v:0",
+                "-map", "[out]",
+                "-c:v", "copy",
+                "-y",
+                output_path
+            ]
+        elif normalized_mode == "background":
+            # 本地无 AI 分离模型时，先做中心声道削减，再叠加新配音，尽量保留 BGM 和游戏声音。
+            cmd = [
+                self.ffmpeg_cmd,
+                "-i", video_path,
+                "-i", audio_path,
+                "-filter_complex",
+                (
+                    "[0:a:0]aformat=channel_layouts=stereo,"
+                    "pan=stereo|c0=0.5*c0-0.5*c1|c1=0.5*c1-0.5*c0,"
+                    f"volume={volume_ratio}[bg];"
+                    "[1:a:0]volume=1.0[voice];"
+                    "[bg][voice]amix=inputs=2:duration=first:dropout_transition=0[out]"
+                ),
                 "-map", "0:v:0",
                 "-map", "[out]",
                 "-c:v", "copy",

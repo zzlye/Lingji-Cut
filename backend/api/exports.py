@@ -64,7 +64,7 @@ def _prepare_subtitle_for_export_burn(subtitle_path: str, video_path: str, proce
 def _normalize_audio_mode(value: str) -> str:
     """规范导出音频合成模式，默认保留原视频声音"""
     mode = str(value or "").strip().lower()
-    return mode if mode in {"mix", "replace"} else "mix"
+    return mode if mode in {"mix", "replace", "background"} else "mix"
 
 
 def _normalize_original_volume(value: float) -> float:
