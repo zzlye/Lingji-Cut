@@ -2,6 +2,7 @@
 # 配音引擎 - 调用多家 TTS API 生成配音音频
 
 import base64
+import asyncio
 import wave
 import os
 import shutil
@@ -52,29 +53,81 @@ class VoiceEngine:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         logger.info(f"生成配音: {effective_provider_type}, 语音: {voice}")
+        return await self._generate_voice_with_retry(
+            text=text,
+            output_path=output_path,
+            provider_type=effective_provider_type,
+            voice=voice,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=options,
+        )
 
-        if effective_provider_type == "openai_tts":
-            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
-        if effective_provider_type == "gemini_tts":
-            return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url, model, options)
-        if effective_provider_type == "minimax_tts":
-            return await self._generate_minimax_tts(text, output_path, voice, api_key, base_url, model, options)
-        if effective_provider_type == "xiaomi_mimo_tts":
-            return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, options)
-        if effective_provider_type == "custom_tts":
-            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, options)
+    async def _generate_voice_with_retry(
+        self,
+        text: str,
+        output_path: str,
+        provider_type: str,
+        voice: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """按配置执行配音请求，网络波动或限流时自动重试"""
+        retry_count = max(0, self._int(settings.get("retry_count"), 2))
+        retry_interval_ms = max(0, self._int(settings.get("retry_interval_ms"), 1200))
+        last_error: Exception | None = None
+
+        for attempt in range(retry_count + 1):
+            try:
+                result_path = await self._generate_voice_once(text, output_path, provider_type, voice, api_key, base_url, model, settings)
+                self._validate_voice_output(result_path)
+                return result_path
+            except Exception as exc:
+                last_error = exc
+                if attempt >= retry_count:
+                    break
+                logger.warning(f"配音生成失败，准备重试: attempt={attempt + 1}/{retry_count}, provider={provider_type}, reason={exc}")
+                self._remove_partial_output(output_path)
+                if retry_interval_ms > 0:
+                    await asyncio.sleep(retry_interval_ms / 1000)
+
+        raise RuntimeError(f"配音 API 重试次数已用完: {last_error}" if last_error else "配音 API 调用失败")
+
+    async def _generate_voice_once(
+        self,
+        text: str,
+        output_path: str,
+        provider_type: str,
+        voice: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """根据渠道类型执行一次配音请求"""
+        if provider_type == "openai_tts":
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings)
+        if provider_type == "gemini_tts":
+            return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url, model, settings)
+        if provider_type == "minimax_tts":
+            return await self._generate_minimax_tts(text, output_path, voice, api_key, base_url, model, settings)
+        if provider_type == "xiaomi_mimo_tts":
+            return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, settings)
+        if provider_type == "custom_tts":
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings)
 
         raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
 
     @staticmethod
     def resolve_provider_type(provider_type: str, model: str = "") -> str:
-        """按模型修正真实调用协议，NewAPI 里的特殊 TTS 模型不能走 OpenAI audio/speech"""
+        """按模型修正真实调用协议，自定义兼容渠道默认仍走 OpenAI audio/speech"""
         normalized_provider = str(provider_type or "").strip()
         normalized_model = str(model or "").strip().lower()
         if normalized_provider in {"openai_tts", "custom_tts"} and normalized_model.startswith("mimo-"):
             return "xiaomi_mimo_tts"
-        if normalized_provider in {"openai_tts", "custom_tts"} and "gemini" in normalized_model and "tts" in normalized_model:
-            return "gemini_tts"
         return normalized_provider
 
     async def generate_timed_voice_track(
@@ -251,6 +304,9 @@ class VoiceEngine:
 
             if response.status_code != 200:
                 raise RuntimeError(f"OpenAI TTS 调用失败: {response.text}")
+            content_type = response.headers.get("content-type", "")
+            if "json" in content_type.lower() or "text/" in content_type.lower():
+                raise RuntimeError(f"OpenAI TTS 未返回音频数据: {response.text[:300]}")
 
             with open(output_path, "wb") as file:
                 file.write(response.content)
@@ -561,6 +617,69 @@ class VoiceEngine:
         if ext == "opus":
             return ["-c:a", "libopus", "-b:a", "128k"]
         return ["-c:a", "aac", "-b:a", "192k"]
+
+    def _validate_voice_output(self, output_path: str) -> None:
+        """确认配音产物是真实可用音频，避免极短静音文件被误判为成功"""
+        if not output_path or not os.path.isfile(output_path):
+            raise RuntimeError("配音 API 未生成音频文件")
+        size = os.path.getsize(output_path)
+        if size < 1024:
+            raise RuntimeError(f"配音音频文件过小: {size} bytes")
+        duration = self._audio_duration_seconds(output_path)
+        if duration is not None and duration < 0.12:
+            raise RuntimeError(f"配音音频时长异常: {duration:.2f}s")
+
+    def _audio_duration_seconds(self, output_path: str) -> Optional[float]:
+        """优先用 ffprobe 读取音频时长，失败时对 WAV 做轻量兜底解析"""
+        ffprobe = self._ffprobe_cmd()
+        try:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    output_path,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip().splitlines()[0])
+        except Exception:
+            pass
+
+        if os.path.splitext(output_path)[1].lower() != ".wav":
+            return None
+        try:
+            with wave.open(output_path, "rb") as wav_file:
+                rate = wav_file.getframerate()
+                return wav_file.getnframes() / rate if rate else None
+        except Exception:
+            return None
+
+    def _remove_partial_output(self, output_path: str) -> None:
+        """重试前清理上一次失败留下的半成品音频"""
+        try:
+            if output_path and os.path.exists(output_path):
+                os.remove(output_path)
+        except OSError:
+            pass
+
+    def _ffprobe_cmd(self) -> str:
+        """获取 ffprobe 可执行文件路径"""
+        ffmpeg = self._ffmpeg_cmd()
+        exe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        bundled = os.path.join(os.path.dirname(ffmpeg), exe_name)
+        if os.path.exists(bundled):
+            return bundled
+        return "ffprobe"
 
     def _ffmpeg_cmd(self) -> str:
         """获取 ffmpeg 可执行文件路径"""

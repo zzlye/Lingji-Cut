@@ -4,6 +4,7 @@
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -141,8 +142,8 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "gpt-4o-mini-tts"), "openai_tts")
 
     def test_gemini_tts_model_uses_gemini_voice_catalog_in_custom_channel(self):
-        """NewAPI 自定义渠道里选择 Gemini TTS 模型时应返回 Gemini 内置音色"""
-        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "gemini-3.1-flash-tts-preview"), "gemini_tts")
+        """NewAPI 自定义渠道里选择 Gemini TTS 模型时，音色目录显示 Gemini 音色但调用仍走兼容协议"""
+        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "gemini-3.1-flash-tts-preview"), "custom_tts")
 
         result = asyncio.run(get_voice_catalog(VoiceCatalogRequest(
             provider_type="custom_tts",
@@ -153,6 +154,70 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertIn("Kore", voice_ids)
         self.assertIn("Puck", voice_ids)
         self.assertNotIn("custom", voice_ids)
+
+    def test_generate_voice_retries_before_success(self):
+        """配音生成遇到临时失败会按配置自动重试"""
+        with tempfile.TemporaryDirectory(prefix="voice_retry_") as temp_dir:
+            output_path = os.path.join(temp_dir, "retry.mp3")
+            engine = VoiceEngine()
+            calls = {"count": 0}
+
+            async def fake_once(*_args, **_kwargs):
+                calls["count"] += 1
+                if calls["count"] < 3:
+                    raise RuntimeError("temporary unavailable")
+                with open(output_path, "wb") as file:
+                    file.write(b"voice" * 512)
+                return output_path
+
+            with (
+                patch.object(engine, "_generate_voice_once", side_effect=fake_once),
+                patch.object(engine, "_audio_duration_seconds", return_value=1.0),
+                patch("backend.core.voice_engine.asyncio.sleep", new=AsyncMock()),
+            ):
+                result = asyncio.run(engine.generate_voice(
+                    text="配音重试测试",
+                    output_path=output_path,
+                    provider_type="openai_tts",
+                    api_key="key",
+                    base_url="https://api.example.com/v1",
+                    model="gpt-4o-mini-tts",
+                    settings={"retry_count": 2, "retry_interval_ms": 1},
+                ))
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(calls["count"], 3)
+
+    def test_generate_voice_retries_when_audio_output_is_too_short(self):
+        """配音接口返回极短静音文件时不能标记成功，应删除半成品并重试"""
+        with tempfile.TemporaryDirectory(prefix="voice_short_retry_") as temp_dir:
+            output_path = os.path.join(temp_dir, "short.wav")
+            engine = VoiceEngine()
+            calls = {"count": 0}
+
+            async def fake_once(*_args, **_kwargs):
+                calls["count"] += 1
+                with open(output_path, "wb") as file:
+                    file.write(b"0" * 2048)
+                return output_path
+
+            with (
+                patch.object(engine, "_generate_voice_once", side_effect=fake_once),
+                patch.object(engine, "_audio_duration_seconds", side_effect=[0.04, 1.25]),
+                patch("backend.core.voice_engine.asyncio.sleep", new=AsyncMock()),
+            ):
+                result = asyncio.run(engine.generate_voice(
+                    text="极短音频重试测试",
+                    output_path=output_path,
+                    provider_type="openai_tts",
+                    api_key="key",
+                    base_url="https://api.example.com/v1",
+                    model="gpt-4o-mini-tts",
+                    settings={"retry_count": 1, "retry_interval_ms": 1},
+                ))
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(calls["count"], 2)
 
 
 if __name__ == "__main__":

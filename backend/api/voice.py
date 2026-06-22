@@ -123,6 +123,15 @@ def _audio_format_for_preview(provider_type: str, settings: dict[str, Any], mode
     return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
 
 
+def _voice_catalog_key(provider_type: str, model: str = "") -> str:
+    """音色目录按模型提示展示，调用协议仍由 VoiceEngine 单独决定"""
+    normalized_provider = str(provider_type or "").strip()
+    normalized_model = str(model or "").strip().lower()
+    if normalized_provider == "custom_tts" and "gemini" in normalized_model and "tts" in normalized_model:
+        return "gemini_tts"
+    return VoiceEngine.resolve_provider_type(provider_type, model)
+
+
 def _preview_output_path(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """生成不会互相覆盖的试听输出路径"""
     import uuid
@@ -170,8 +179,8 @@ def _resolve_preview_api_key(request_key: Optional[str], profile: Optional[Voice
 @router.post("/voices")
 async def get_voice_catalog(request: VoiceCatalogRequest):
     """获取内置音色目录"""
-    effective_provider_type = VoiceEngine.resolve_provider_type(request.provider_type, request.model or "")
-    return {"voices": VOICE_CATALOGS.get(effective_provider_type, VOICE_CATALOGS["custom_tts"])}
+    catalog_key = _voice_catalog_key(request.provider_type, request.model or "")
+    return {"voices": VOICE_CATALOGS.get(catalog_key, VOICE_CATALOGS["custom_tts"])}
 
 
 @router.post("/generate")
