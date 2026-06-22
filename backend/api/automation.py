@@ -166,12 +166,13 @@ class AutomationRunRequest(BaseModel):
     export_subtitle_only_when_voice: bool = False
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
-    voice_mode: str = "batched"
+    voice_mode: str = "grouped"
     audio_mode: str = "mix"
     original_volume: float = 0.25
     voice_batch_size: int = 16
     voice_batch_chars: int = 1800
     voice_concurrency: int = 2
+    voice_min_gap_ms: int = 160
     voice_group_size: int = 6
     voice_group_chars: int = 500
     voice_group_max_seconds: float = 12.0
@@ -1396,7 +1397,7 @@ def _uses_original_subtitles_without_burn(request: "AutomationRunRequest") -> bo
 
 def _voice_needs_original_subtitles(request: "AutomationRunRequest") -> bool:
     """配音需要字幕时间轴或没有手写文案时，才读取原字幕"""
-    voice_mode = str(request.voice_mode or "batched").strip().lower()
+    voice_mode = str(request.voice_mode or "grouped").strip().lower()
     uses_timeline = voice_mode in {"segmented", "batched", "grouped"}
     return bool(request.enable_voice and (uses_timeline or not str(request.voice_text or "").strip()))
 
@@ -2077,6 +2078,7 @@ def _sync_subtitle_entries_to_voice_timeline(
     segments: list[dict[str, int]] = []
     for item in voice_timeline:
         start_ms = max(0, _safe_int(item.get("start_ms"), 0))
+        original_start_ms = max(0, _safe_int(item.get("original_start_ms"), start_ms))
         source_duration_ms = max(0, _safe_int(item.get("source_duration_ms"), 0))
         window_duration_ms = max(0, _safe_int(item.get("duration_ms"), 0))
         audio_end_ms = max(0, _safe_int(item.get("audio_end_ms"), 0))
@@ -2084,7 +2086,7 @@ def _sync_subtitle_entries_to_voice_timeline(
             audio_end_ms = start_ms + (source_duration_ms or window_duration_ms)
         if audio_end_ms <= start_ms:
             continue
-        segments.append({"start_ms": start_ms, "audio_end_ms": audio_end_ms})
+        segments.append({"start_ms": start_ms, "original_start_ms": original_start_ms, "audio_end_ms": audio_end_ms})
     if not segments:
         return [dict(entry) for entry in entries]
     segments.sort(key=lambda item: item["start_ms"])
@@ -2101,14 +2103,21 @@ def _sync_subtitle_entries_to_voice_timeline(
             else None
         )
         desired_end_ms = end_ms
+        matched_starts: list[int] = []
         for segment in segments:
             segment_start_ms = segment["start_ms"]
-            if segment_start_ms < start_ms - 80:
+            original_start_ms = segment.get("original_start_ms", segment_start_ms)
+            if original_start_ms < start_ms - 80:
                 continue
-            if segment_start_ms > end_ms + 80:
+            if original_start_ms > end_ms + 80:
                 break
+            matched_starts.append(segment_start_ms)
             desired_end_ms = max(desired_end_ms, segment["audio_end_ms"] + tail_padding_ms)
 
+        if matched_starts:
+            voice_start_ms = min(matched_starts)
+            if voice_start_ms > start_ms + 120:
+                start_ms = voice_start_ms
         if desired_end_ms > end_ms:
             desired_end_ms = min(desired_end_ms, end_ms + max_extension_ms)
             if next_start_ms is not None and next_start_ms > start_ms:
@@ -2933,14 +2942,15 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             settings["voice_batch_size"] = max(1, min(80, int(request.voice_batch_size or settings.get("voice_batch_size") or 16)))
             settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
+            settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 160)))
             settings["voice_group_size"] = max(1, min(12, int(request.voice_group_size or settings.get("voice_group_size") or 6)))
             settings["voice_group_chars"] = max(80, min(2000, int(request.voice_group_chars or settings.get("voice_group_chars") or 500)))
             settings["voice_group_max_seconds"] = max(1.0, min(30.0, float(request.voice_group_max_seconds or settings.get("voice_group_max_seconds") or 12.0)))
             settings["voice_group_gap_ms"] = max(0, min(5000, int(request.voice_group_gap_ms or settings.get("voice_group_gap_ms") or 800)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
-            voice_mode = str(request.voice_mode or "batched").strip().lower()
+            voice_mode = str(request.voice_mode or "grouped").strip().lower()
             if voice_mode not in {"full", "segmented", "batched", "grouped"}:
-                voice_mode = "batched"
+                voice_mode = "grouped"
             voice_text_source = request.voice_text if voice_mode == "full" and str(request.voice_text or "").strip() else subtitle_text
             voice_text = (voice_text_source or _fallback_voice_text(video)).strip()
             voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text

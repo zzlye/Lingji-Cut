@@ -115,7 +115,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(b"segment")
             return output_path
 
-        def fake_mix(_timed_audio_paths, final_output_path: str):
+        def fake_mix(_timed_audio_paths, final_output_path: str, **_kwargs):
             os.makedirs(os.path.dirname(final_output_path), exist_ok=True)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
@@ -153,7 +153,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(b"segment")
             return output_path
 
-        def fake_mix(timed_audio_paths, final_output_path: str):
+        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
             mixed_items.extend(timed_audio_paths)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
@@ -181,6 +181,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertTrue(generated[0]["style"].startswith("解说风格"))
         self.assertTrue(generated[1]["style"].startswith("对话风格"))
         self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
+        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
         self.assertEqual([item["duration_ms"] for item in mixed_items], [500, 500])
 
     def test_batched_timed_voice_writes_timeline_metadata(self):
@@ -194,7 +195,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(f"voice:{text}".encode("utf-8"))
             return output_path
 
-        def fake_mix(_timed_audio_paths, final_output_path: str):
+        def fake_mix(_timed_audio_paths, final_output_path: str, **_kwargs):
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
             return final_output_path
@@ -256,7 +257,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
             _ = path
             return 1.4
 
-        def fake_mix(timed_audio_paths, final_output_path: str):
+        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
             mixed_items.extend(timed_audio_paths)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
@@ -302,7 +303,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         def fake_duration(path: str):
             return 5.0 if "_try" in path and "_a_" not in path and "_b_" not in path else 0.7
 
-        def fake_mix(timed_audio_paths, final_output_path: str):
+        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
             mixed_items.extend(timed_audio_paths)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
@@ -336,7 +337,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertIn({"text": "第一句，第二句", "speed": "1.25"}, generated_pairs)
         self.assertIn({"text": "第一句", "speed": "1.0"}, generated_pairs)
         self.assertIn({"text": "第二句", "speed": "1.0"}, generated_pairs)
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
+        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 860])
+        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
         """默认只按字幕开始时间放置配音，不再强制变速或裁剪尾音"""
@@ -361,6 +363,32 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertNotIn("atempo=", filter_arg)
         self.assertNotIn("atrim=", filter_arg)
         self.assertIn("adelay=1200:all=1", filter_arg)
+
+    def test_timed_voice_mix_delays_next_segment_to_avoid_overlap(self):
+        """逐条配音真实尾音超过字幕窗时，下一句会顺延留出安全间隔"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        second_audio = os.path.join(self.temp_dir, "second.wav")
+        output_audio = os.path.join(self.temp_dir, "timed_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        self._create_test_audio(second_audio, 880)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            with open(output_audio, "wb") as file:
+                file.write(b"voice")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("backend.core.voice_engine.subprocess.run", side_effect=fake_run):
+            result_path = self.voice_engine.mix_timed_audio_files([
+                {"path": first_audio, "start_ms": 0, "duration_ms": 500, "source_duration_ms": 900},
+                {"path": second_audio, "start_ms": 600, "duration_ms": 500, "source_duration_ms": 300},
+            ], output_audio)
+
+        self.assertEqual(result_path, output_audio)
+        filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
+        self.assertIn("adelay=0:all=1", filter_arg)
+        self.assertIn("adelay=1060:all=1", filter_arg)
 
     def test_timed_voice_mix_can_fit_segment_to_subtitle_window_when_enabled(self):
         """显式开启贴合字幕窗口时才允许变速和裁剪，作为兼容开关保留"""

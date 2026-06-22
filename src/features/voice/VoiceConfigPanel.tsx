@@ -53,6 +53,12 @@ const BITRATE_OPTIONS: FieldOption[] = ['32000', '64000', '128000', '256000'].ma
 const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
+const VOICE_MODE_OPTIONS: FieldOption[] = [
+  ['grouped', '自然分组（推荐，连贯、有停顿）'],
+  ['batched', '逐条并发（最快，容易像念稿）'],
+  ['segmented', '逐条串行（慢，便于排查）'],
+  ['full', '整段生成（自然但不保证同步）'],
+]
 
 /** 音色听感倾向展示文案 */
 function voiceGenderLabel(gender?: VoiceOption['gender']): string {
@@ -147,12 +153,12 @@ function defaultXiaomiBuiltinVoice(label: string, style: string, index: number):
 /** 按角色文案生成一个可编辑的小米 VoiceDesign 默认描述 */
 function defaultXiaomiDesignPrompt(label: string, style: string, index: number): string {
   const text = `${label} ${style}`
-  if (/旁白|解说|narrator/i.test(text)) return '中性自然旁白声，普通话标准，语气稳定，节奏清晰，适合视频解说。'
-  if (/女|female|lady|girl|角色 A/i.test(text)) return '年轻女声，普通话标准，声音自然明亮，语气轻松，适合多人对话。'
-  if (/男|male|gentleman|boy|角色 B/i.test(text)) return '年轻男声，普通话标准，音色清爽自然，语速中等，适合游戏解说和对话。'
+  if (/旁白|解说|narrator/i.test(text)) return '中性自然旁白声，普通话标准，语气有起伏，遇到危险、转折和惊讶时能加强重音，适合游戏视频解说。'
+  if (/女|female|lady|girl|角色 A/i.test(text)) return '年轻女声，普通话标准，声音自然明亮，反应真实，轻松但不平淡，适合多人对话。'
+  if (/男|male|gentleman|boy|角色 B/i.test(text)) return '年轻男声，普通话标准，音色清爽，有角色感，关键字有重音，适合游戏解说和对话。'
   return index % 2 === 0
-    ? '自然中性声，普通话标准，表达清楚，适合短视频对话。'
-    : '沉稳男声，普通话标准，声音有辨识度，适合角色对白。'
+    ? '自然中性声，普通话标准，表达有起伏，像真实对话，不要像机械朗读。'
+    : '沉稳男声，普通话标准，声音有辨识度，语气明确，适合角色对白。'
 }
 
 /**
@@ -935,7 +941,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                   />
                 )}
               </div>
-              <TextareaField label="风格提示" value={preset.style_prompt} rows={2} placeholder="例如：用年轻自然的女声，语气轻松，适合对话。" onChange={(v) => updateVoicePreset(preset.id, { style_prompt: v })} />
+              <TextareaField label="风格提示" value={preset.style_prompt} rows={2} placeholder="例如：像真实游戏对话，语气有起伏，遇到惊讶和危险时加强重音，不要像念稿。" onChange={(v) => updateVoicePreset(preset.id, { style_prompt: v })} />
               <TextField label="试听文本" value={preset.sample_text} onChange={(v) => updateVoicePreset(preset.id, { sample_text: v })} />
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" size="sm" onClick={() => handleVoicePresetPreview(preset)} disabled={isGenerating}>试听</Button>
@@ -973,7 +979,14 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               </div>
             )}
             {supportsStylePrompt && (
-              <TextareaField label="风格提示" value={settings.style_prompt} rows={3} placeholder="例如：用自然口播风格，语气稳定，适合短视频解说。" onChange={(v) => updateSetting('style_prompt', v)} />
+              <div className="space-y-2">
+                <TextareaField label="全局风格提示" value={settings.style_prompt} rows={3} placeholder="例如：用游戏视频口播风格，情绪有起伏；遇到危险、反转、惊讶时加强重音，短句自然停顿，不要像朗读稿。" onChange={(v) => updateSetting('style_prompt', v)} />
+                {isXiaomiMiMo && (
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    小米 MiMo 的情绪主要靠这里和音色预设里的风格提示控制；下面的“情绪”参数只对 MiniMax 生效。
+                  </p>
+                )}
+              </div>
             )}
           </AccordionContent>
         </AccordionItem>
@@ -983,10 +996,15 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
             <SwitchField label="额外导出无配音字幕版" description="开启后会多生成一个保留原声、没有配音的字幕版视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
-            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['grouped', '时间轴分组合成（更快，自动调速）'], ['batched', '逐条按时间轴并发生成（最稳）'], ['segmented', '逐条按时间轴串行生成'], ['full', '整段生成（不保证同步）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
+            <SelectField label="生成方式" value={automationOptions.voice_mode} options={VOICE_MODE_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
             {automationOptions.voice_mode === 'grouped' && (
               <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-                分组合成会把相邻字幕合成一次请求，按整组时间窗自动判断语速。如果生成音频过长，会自动提速重试，仍超时再拆成更小组。
+                推荐给成片使用。它会把相邻字幕合成一段，让模型一次性处理语气、停顿和情绪；比逐条更不容易像念稿，也更少出现上一句没收尾下一句就进来的感觉。
+              </p>
+            )}
+            {automationOptions.voice_mode === 'batched' && (
+              <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
+                逐条并发速度最快，但每句都是单独生成，情绪和换气会更碎；只建议接口很慢或需要快速预览时使用。
               </p>
             )}
             {automationOptions.voice_mode === 'grouped' ? (
@@ -995,11 +1013,15 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
                 <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
                 <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
+                <NumberField label="尾音避让" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
                 <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
               </div>
-            ) : automationOptions.voice_mode === 'batched' ? (
+            ) : automationOptions.voice_mode === 'batched' || automationOptions.voice_mode === 'segmented' ? (
               <div className="grid gap-3 sm:grid-cols-3">
-                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+                {automationOptions.voice_mode === 'batched' && (
+                  <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+                )}
+                <NumberField label="尾音避让" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
               </div>
             ) : null}
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />

@@ -15,6 +15,19 @@ const VOICE_OPTIONAL_CONFIRMED_KEY = 'voice_optional_confirmed'
 /** 替换原声确认标记，避免旧缓存误把 BGM 和游戏声音静音 */
 const AUDIO_REPLACE_CONFIRMED_KEY = 'audio_replace_confirmed'
 
+/** 自然分组模式迁移标记，避免旧版逐条并发继续造成抢话听感 */
+const VOICE_NATURAL_MODE_MIGRATED_KEY = 'voice_natural_mode_migrated'
+
+/** 旧版默认风格偏平淡，升级时只替换这些精确默认值 */
+const LEGACY_DEFAULT_VOICE_STYLE_PROMPTS: Record<string, string> = {
+  preset_narrator: '用中性自然解说口吻，语气稳定，节奏清晰。',
+  preset_speaker_a: '用年轻自然的女声对话口吻，表达轻松。',
+  preset_speaker_b: '用沉稳有辨识度的男声对话口吻，语气明确。',
+  narrator: '用中性自然解说口吻，语气稳定，节奏清晰。',
+  speaker_a: '用年轻自然的女声对话口吻，表达轻松。',
+  speaker_b: '用沉稳有辨识度的男声对话口吻，语气明确。',
+}
+
 /** 默认一键自动化偏好 */
 export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   output_format: 'mp4',
@@ -37,26 +50,27 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   enable_voice: false,
   export_subtitle_only_when_voice: false,
   voice_profile_id: null,
-  voice_mode: 'batched',
+  voice_mode: 'grouped',
   audio_mode: 'mix',
   original_volume: 0.25,
   voice_batch_size: 16,
   voice_batch_chars: 1800,
   voice_concurrency: 2,
+  voice_min_gap_ms: 160,
   voice_group_size: 6,
   voice_group_chars: 500,
   voice_group_max_seconds: 12,
   voice_group_gap_ms: 800,
   multi_speaker_enabled: false,
   voice_presets: [
-    { id: 'preset_narrator', name: '旁白', voice: 'alloy', style_prompt: '用中性自然解说口吻，语气稳定，节奏清晰。', sample_text: '旁白负责解释画面和推进节奏。' },
-    { id: 'preset_speaker_a', name: '角色 A 女声', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，表达轻松。', sample_text: '这是角色 A 的一句女声对话试听。' },
-    { id: 'preset_speaker_b', name: '角色 B 男声', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确。', sample_text: '这是角色 B 的一句男声对话试听。' },
+    { id: 'preset_narrator', name: '旁白', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
+    { id: 'preset_speaker_a', name: '角色 A 女声', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，反应真实，情绪轻松但有变化；短句要像聊天，不要像念稿。', sample_text: '这是角色 A 的一句女声对话试听，带一点轻松反应。' },
+    { id: 'preset_speaker_b', name: '角色 B 男声', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确，关键字有重音；保持角色感，不要平铺直叙。', sample_text: '这是角色 B 的一句男声对话试听，语气要明确。' },
   ],
   voice_speakers: [
-    { id: 'narrator', label: '旁白', preset_id: 'preset_narrator', voice: 'alloy', style_prompt: '用中性自然解说口吻，语气稳定，节奏清晰。', sample_text: '旁白负责解释画面和推进节奏。' },
-    { id: 'speaker_a', label: '角色 A', preset_id: 'preset_speaker_a', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，表达轻松。', sample_text: '这是角色 A 的一句女声对话试听。' },
-    { id: 'speaker_b', label: '角色 B', preset_id: 'preset_speaker_b', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确。', sample_text: '这是角色 B 的一句男声对话试听。' },
+    { id: 'narrator', label: '旁白', preset_id: 'preset_narrator', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
+    { id: 'speaker_a', label: '角色 A', preset_id: 'preset_speaker_a', voice: 'nova', style_prompt: '用年轻自然的女声对话口吻，反应真实，情绪轻松但有变化；短句要像聊天，不要像念稿。', sample_text: '这是角色 A 的一句女声对话试听，带一点轻松反应。' },
+    { id: 'speaker_b', label: '角色 B', preset_id: 'preset_speaker_b', voice: 'onyx', style_prompt: '用沉稳有辨识度的男声对话口吻，语气明确，关键字有重音；保持角色感，不要平铺直叙。', sample_text: '这是角色 B 的一句男声对话试听，语气要明确。' },
   ],
   glossary_terms: [],
   banned_words: [],
@@ -67,6 +81,35 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
 function normalizeId(value: unknown): number | null {
   const id = Number(value)
   return Number.isFinite(id) && id > 0 ? id : null
+}
+
+/** 查找新版默认音色预设，供旧默认提示词迁移使用 */
+function defaultVoicePresetById(id: string): AutomationPreferences['voice_presets'][number] | undefined {
+  return DEFAULT_AUTOMATION_PREFERENCES.voice_presets.find((preset) => preset.id === id)
+}
+
+/** 查找新版默认说话人，供旧默认提示词迁移使用 */
+function defaultVoiceSpeakerById(id: string): AutomationPreferences['voice_speakers'][number] | undefined {
+  return DEFAULT_AUTOMATION_PREFERENCES.voice_speakers.find((speaker) => speaker.id === id)
+}
+
+/** 只把软件旧默认风格提示升级为更有情绪的新版提示，不覆盖用户自定义内容 */
+function migrateLegacyVoiceStylePrompt(id: string, stylePrompt: string, fallback?: string): string {
+  const trimmed = stylePrompt.trim()
+  return trimmed && LEGACY_DEFAULT_VOICE_STYLE_PROMPTS[id] !== trimmed
+    ? trimmed
+    : fallback || trimmed
+}
+
+/** 判断缓存里是否还存在旧版默认风格提示，决定是否回写迁移结果 */
+function hasLegacyDefaultVoiceStylePrompts(value: unknown): boolean {
+  if (!Array.isArray(value)) return false
+  return value.some((item) => {
+    const data = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+    const id = String(data.id || '').trim()
+    const stylePrompt = String(data.style_prompt || '').trim()
+    return Boolean(id && stylePrompt && LEGACY_DEFAULT_VOICE_STYLE_PROMPTS[id] === stylePrompt)
+  })
 }
 
 /** 规范说话人音色映射，避免空标签或空音色进入自动化请求 */
@@ -80,12 +123,14 @@ function normalizeVoiceSpeakers(value: unknown, presets: AutomationPreferences['
       const preset = presets.find((candidate) => candidate.id === presetId)
       const voice = String(data.voice || preset?.voice || '').trim()
       if (!label || !voice) return null
+      const id = String(data.id || `speaker_${index + 1}`)
+      const defaultSpeaker = defaultVoiceSpeakerById(id)
       return {
-        id: String(data.id || `speaker_${index + 1}`),
+        id,
         label,
         preset_id: presetId || preset?.id || '',
         voice,
-        style_prompt: String(data.style_prompt || preset?.style_prompt || '').trim(),
+        style_prompt: migrateLegacyVoiceStylePrompt(id, String(data.style_prompt || preset?.style_prompt || ''), defaultSpeaker?.style_prompt || preset?.style_prompt || ''),
         sample_text: String(data.sample_text || '').trim() || `${label} 的配音试听。`,
       }
     })
@@ -102,11 +147,13 @@ function normalizeVoicePresets(value: unknown): AutomationPreferences['voice_pre
       const voice = String(data.voice || '').trim()
       if (!voice) return null
       const name = String(data.name || '').trim() || `音色 ${index + 1}`
+      const id = String(data.id || `voice_preset_${index + 1}`)
+      const defaultPreset = defaultVoicePresetById(id)
       return {
-        id: String(data.id || `voice_preset_${index + 1}`),
+        id,
         name,
         voice,
-        style_prompt: String(data.style_prompt || '').trim(),
+        style_prompt: migrateLegacyVoiceStylePrompt(id, String(data.style_prompt || ''), defaultPreset?.style_prompt || ''),
         sample_text: String(data.sample_text || '').trim() || `${name} 的配音试听。`,
       }
     })
@@ -205,8 +252,15 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const parsed = saved ? JSON.parse(saved) : {}
     const voiceWasExplicitlyChosen = parsed[VOICE_OPTIONAL_CONFIRMED_KEY] === true
     const audioReplaceWasExplicitlyChosen = parsed[AUDIO_REPLACE_CONFIRMED_KEY] === true
+    const voiceModeWasMigrated = parsed[VOICE_NATURAL_MODE_MIGRATED_KEY] === true
+    const normalizedVoiceMode = normalizeVoiceMode(parsed.voice_mode)
+    const voiceMode = !voiceModeWasMigrated && normalizedVoiceMode === 'batched'
+      ? 'grouped'
+      : normalizedVoiceMode
     const voicePresets = normalizeVoicePresets(parsed.voice_presets)
-    return {
+    const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, voicePresets)
+    const shouldPersistVoiceMigration = hasLegacyDefaultVoiceStylePrompts(parsed.voice_presets) || hasLegacyDefaultVoiceStylePrompts(parsed.voice_speakers)
+    const preferences = {
       ...DEFAULT_AUTOMATION_PREFERENCES,
       ...parsed,
       export_with_settings: parsed.export_with_settings !== false,
@@ -221,23 +275,28 @@ export function loadAutomationPreferences(): AutomationPreferences {
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
-      voice_mode: normalizeVoiceMode(parsed.voice_mode),
+      voice_mode: voiceMode,
       audio_mode: normalizeAudioMode(parsed.audio_mode, audioReplaceWasExplicitlyChosen),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
       voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
       voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
       voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
+      voice_min_gap_ms: normalizeVoiceNumber(parsed.voice_min_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms, 0, 2000),
       voice_group_size: normalizeVoiceNumber(parsed.voice_group_size, DEFAULT_AUTOMATION_PREFERENCES.voice_group_size, 1, 12),
       voice_group_chars: normalizeVoiceNumber(parsed.voice_group_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_group_chars, 80, 2000),
       voice_group_max_seconds: Math.min(30, Math.max(1, Number(parsed.voice_group_max_seconds ?? DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds) || DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds)),
       voice_group_gap_ms: normalizeVoiceNumber(parsed.voice_group_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_group_gap_ms, 0, 5000),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
       voice_presets: voicePresets,
-      voice_speakers: normalizeVoiceSpeakers(parsed.voice_speakers, voicePresets),
+      voice_speakers: voiceSpeakers,
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),
       banned_words: normalizeBannedWords(parsed.banned_words),
       banned_word_action: parsed.banned_word_action === 'block' ? 'block' : 'warn',
     }
+    if (saved && (!voiceModeWasMigrated || shouldPersistVoiceMigration) && typeof localStorage !== 'undefined') {
+      localStorage.setItem(AUTOMATION_PREFERENCES_STORAGE_KEY, JSON.stringify({ ...preferences, [VOICE_NATURAL_MODE_MIGRATED_KEY]: true }))
+    }
+    return preferences
   } catch {
     return DEFAULT_AUTOMATION_PREFERENCES
   }
@@ -253,6 +312,7 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
   if (typeof localStorage !== 'undefined') {
     const persisted = {
       ...next,
+      [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
       ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
       ...(Object.prototype.hasOwnProperty.call(updates, 'audio_mode') ? { [AUDIO_REPLACE_CONFIRMED_KEY]: updates.audio_mode === 'replace' } : {}),
     }

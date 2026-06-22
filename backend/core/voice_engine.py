@@ -193,6 +193,7 @@ class VoiceEngine:
         batch_size = max(1, min(80, self._int(options.get("voice_batch_size"), 16)))
         max_chars = max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
+        min_gap_ms = self._voice_min_gap_ms(options)
         semaphore = asyncio.Semaphore(concurrency)
         temp_dir = tempfile.mkdtemp(prefix="voice_batches_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         completed = 0
@@ -240,7 +241,8 @@ class VoiceEngine:
                 index_offset += len(chunk)
 
             timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=0)
             self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
@@ -276,6 +278,7 @@ class VoiceEngine:
         group_window_ms = max(1000, min(30000, int(self._float(options.get("voice_group_max_seconds"), 12.0) * 1000)))
         group_gap_ms = max(0, min(5000, self._int(options.get("voice_group_gap_ms"), 800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
+        min_gap_ms = self._voice_min_gap_ms(options)
         semaphore = asyncio.Semaphore(concurrency)
         groups = self._group_timed_segments(
             normalized_segments,
@@ -318,7 +321,8 @@ class VoiceEngine:
                     progress_callback(10 + completed / max(len(groups), 1) * 75)
 
             timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=0)
             self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
@@ -352,6 +356,7 @@ class VoiceEngine:
         options = settings or {}
         audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        min_gap_ms = self._voice_min_gap_ms(options)
 
         # 分段音频临时目录跟最终输出放在同一视频目录，避免又落回全局 output 里。
         temp_dir = tempfile.mkdtemp(prefix="voice_segments_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
@@ -386,7 +391,8 @@ class VoiceEngine:
                 if progress_callback:
                     progress_callback(10 + index / max(total, 1) * 75)
 
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=0)
             self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
@@ -400,11 +406,15 @@ class VoiceEngine:
         output_path: str,
         max_inputs: int = 32,
         fit_to_subtitle_window: Optional[bool] = None,
+        min_gap_ms: Optional[int] = None,
     ) -> str:
         """把多个带起始时间的音频片段混合成完整时间轴音轨"""
         items = self._normalize_timed_audio_paths(timed_audio_paths)
         if not items:
             raise ValueError("没有音频文件可混合")
+        gap_ms = self._voice_min_gap_ms({}) if min_gap_ms is None else max(0, min(2000, int(min_gap_ms)))
+        if gap_ms > 0:
+            items = self._apply_timed_audio_spacing(items, gap_ms)
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -416,9 +426,9 @@ class VoiceEngine:
                 for index in range(0, len(items), max_inputs):
                     chunk = items[index:index + max_inputs]
                     chunk_path = os.path.join(chunk_dir, f"chunk_{index // max_inputs:03d}.wav")
-                    self.mix_timed_audio_files(chunk, chunk_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window)
+                    self.mix_timed_audio_files(chunk, chunk_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window, min_gap_ms=0)
                     chunk_outputs.append({"path": chunk_path, "start_ms": 0})
-                return self.mix_timed_audio_files(chunk_outputs, output_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window)
+                return self.mix_timed_audio_files(chunk_outputs, output_path, max_inputs=max_inputs, fit_to_subtitle_window=fit_to_subtitle_window, min_gap_ms=0)
             finally:
                 shutil.rmtree(chunk_dir, ignore_errors=True)
 
@@ -1215,10 +1225,50 @@ class VoiceEngine:
             items.append({
                 "path": path,
                 "start_ms": max(0, self._int(item.get("start_ms"), 0)),
+                "original_start_ms": max(0, self._int(item.get("original_start_ms"), item.get("start_ms", 0))),
                 "duration_ms": max(0, self._int(item.get("duration_ms"), 0)),
                 "source_duration_ms": max(0, int(source_duration)),
             })
         return items
+
+    def _voice_min_gap_ms(self, settings: dict[str, Any]) -> int:
+        """读取分段配音之间的尾音避让间隔，默认留出一点呼吸空间"""
+        raw_value = settings.get("voice_min_gap_ms") if isinstance(settings, dict) else None
+        if raw_value is None:
+            raw_value = os.environ.get("YTV_VOICE_MIN_GAP_MS")
+        return max(0, min(2000, self._int(raw_value, 160)))
+
+    def _apply_timed_audio_spacing(self, timed_audio_paths: list[dict[str, Any]], min_gap_ms: int) -> list[dict[str, Any]]:
+        """按真实音频尾音顺延后续片段，避免逐条配音互相抢话"""
+        if min_gap_ms <= 0:
+            return [dict(item) for item in timed_audio_paths]
+
+        spaced: list[dict[str, Any]] = []
+        previous_audio_end_ms: Optional[int] = None
+        for item in sorted(timed_audio_paths, key=lambda value: self._int(value.get("start_ms"), 0)):
+            next_item = dict(item)
+            current_start_ms = max(0, self._int(next_item.get("start_ms"), 0))
+            original_start_ms = max(0, self._int(next_item.get("original_start_ms"), current_start_ms))
+            source_duration_ms = max(0, self._int(next_item.get("source_duration_ms"), 0))
+            duration_ms = max(0, self._int(next_item.get("duration_ms"), 0))
+            if source_duration_ms <= 0:
+                path = str(next_item.get("path") or "")
+                duration_seconds = self._audio_duration_seconds(path) if path and os.path.exists(path) else None
+                source_duration_ms = int((duration_seconds or 0) * 1000)
+                if source_duration_ms > 0:
+                    next_item["source_duration_ms"] = source_duration_ms
+            effective_duration_ms = source_duration_ms or duration_ms
+            adjusted_start_ms = current_start_ms
+            if previous_audio_end_ms is not None:
+                adjusted_start_ms = max(adjusted_start_ms, previous_audio_end_ms + min_gap_ms)
+            if adjusted_start_ms != current_start_ms:
+                next_item["original_start_ms"] = original_start_ms
+                next_item["start_ms"] = adjusted_start_ms
+            else:
+                next_item.setdefault("original_start_ms", original_start_ms)
+            previous_audio_end_ms = adjusted_start_ms + max(1, effective_duration_ms)
+            spaced.append(next_item)
+        return spaced
 
     def _write_timeline_metadata(self, output_path: str, timed_audio_paths: list[dict[str, Any]]) -> None:
         """保存每段配音真实时长，供最终字幕烧录按配音尾音校准"""
@@ -1226,6 +1276,7 @@ class VoiceEngine:
         for item in timed_audio_paths:
             path = str(item.get("path") or "")
             start_ms = max(0, self._int(item.get("start_ms"), 0))
+            original_start_ms = max(0, self._int(item.get("original_start_ms"), start_ms))
             duration_ms = max(0, self._int(item.get("duration_ms"), 0))
             source_duration_ms = max(0, self._int(item.get("source_duration_ms"), 0))
             if source_duration_ms <= 0 and path and os.path.exists(path):
@@ -1233,6 +1284,7 @@ class VoiceEngine:
                 source_duration_ms = int((duration_seconds or 0) * 1000)
             segment = {
                 "start_ms": start_ms,
+                "original_start_ms": original_start_ms,
                 "duration_ms": duration_ms,
                 "source_duration_ms": source_duration_ms,
                 "audio_end_ms": start_ms + source_duration_ms if source_duration_ms > 0 else start_ms + duration_ms,

@@ -494,6 +494,7 @@ export type AutomationStartParams = {
   voice_batch_size?: number
   voice_batch_chars?: number
   voice_concurrency?: number
+  voice_min_gap_ms?: number
   voice_group_size?: number
   voice_group_chars?: number
   voice_group_max_seconds?: number

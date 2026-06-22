@@ -65,6 +65,7 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     voice_batch_size: preferences.enable_voice ? preferences.voice_batch_size : undefined,
     voice_batch_chars: preferences.enable_voice ? preferences.voice_batch_chars : undefined,
     voice_concurrency: preferences.enable_voice ? preferences.voice_concurrency : undefined,
+    voice_min_gap_ms: preferences.enable_voice ? preferences.voice_min_gap_ms : undefined,
     voice_group_size: preferences.enable_voice ? preferences.voice_group_size : undefined,
     voice_group_chars: preferences.enable_voice ? preferences.voice_group_chars : undefined,
     voice_group_max_seconds: preferences.enable_voice ? preferences.voice_group_max_seconds : undefined,
