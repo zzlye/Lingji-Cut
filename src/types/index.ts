@@ -204,6 +204,7 @@ export interface AutomationJob {
   status: 'pending' | 'running' | 'paused' | 'cancelled' | 'completed' | 'failed'
   progress: number
   current_step: string
+  error_message?: string | null
   batch_id: string | null
   created_at: string
   completed_at: string | null

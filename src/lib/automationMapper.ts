@@ -47,6 +47,7 @@ export function mapBackendAutomationJob(job: BackendAutomationJob): AutomationJo
     status: job.status,
     progress: Math.round(job.progress || 0),
     current_step: job.current_step || '等待开始',
+    error_message: job.error_message || null,
     batch_id: job.batch_id,
     created_at: job.created_at || new Date().toISOString(),
     completed_at: job.completed_at,

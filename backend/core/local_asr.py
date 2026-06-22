@@ -91,6 +91,26 @@ def _asr_force_cuda_enabled() -> bool:
     return str(os.environ.get("YTV_ASR_FORCE_CUDA") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _asr_cuda_marker_ttl_seconds() -> float:
+    """读取 CUDA 熔断标记有效期，过期后自动恢复 GPU 探测"""
+    try:
+        value = float(os.environ.get("YTV_ASR_CUDA_DISABLED_TTL_SECONDS", "1800"))
+    except (TypeError, ValueError):
+        value = 1800.0
+    return max(0.0, value)
+
+
+def _remove_asr_cuda_disabled_marker(flag_path: str) -> None:
+    """删除过期 CUDA 熔断标记，失败只记录日志不阻断识别"""
+    try:
+        os.remove(flag_path)
+        logger.info(f"本地识别 CUDA 熔断标记已过期并清理: {flag_path}")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(f"清理 CUDA 熔断标记失败: {exc}")
+
+
 def read_asr_cuda_disabled_reason() -> str:
     """读取 CUDA 熔断标记内容，日志里展示 CPU 回退原因"""
     try:
@@ -104,11 +124,20 @@ def read_asr_cuda_disabled_reason() -> str:
 
 
 def asr_cuda_disabled_by_marker() -> bool:
-    """判断是否因上次 CUDA 原生崩溃而禁用本地识别 CUDA"""
+    """判断是否因近期 CUDA 原生崩溃而临时禁用本地识别 CUDA"""
     if _asr_force_cuda_enabled():
         return False
     try:
-        return os.path.exists(asr_cuda_disabled_flag_path())
+        flag_path = asr_cuda_disabled_flag_path()
+        if not os.path.exists(flag_path):
+            return False
+        ttl_seconds = _asr_cuda_marker_ttl_seconds()
+        if ttl_seconds > 0:
+            age_seconds = time.time() - os.path.getmtime(flag_path)
+            if age_seconds > ttl_seconds:
+                _remove_asr_cuda_disabled_marker(flag_path)
+                return False
+        return True
     except OSError:
         return False
 

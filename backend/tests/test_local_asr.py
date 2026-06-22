@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -190,7 +191,7 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(FakeWhisperModel.transcribe_calls[0]["beam_size"], 5)
 
     def test_transcribe_video_uses_cpu_when_cuda_marker_exists(self):
-        """存在 CUDA 熔断标记时默认不再使用 GPU，避免后端反复原生崩溃"""
+        """存在未过期 CUDA 熔断标记时默认不再使用 GPU，避免后端反复原生崩溃"""
         fake_module = types.ModuleType("faster_whisper")
         fake_module.WhisperModel = FakeWhisperModel
         marker_path = os.path.join(self.temp_dir, "asr-cuda-disabled.flag")
@@ -210,6 +211,34 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(language, "en")
         self.assertTrue(entries)
         self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
+
+    def test_expired_cuda_marker_is_removed_and_gpu_retried(self):
+        """过期 CUDA 熔断标记会自动清理，避免一次旧崩溃长期导致本地识别走 CPU"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+        marker_path = os.path.join(self.temp_dir, "asr-cuda-disabled.flag")
+        with open(marker_path, "w", encoding="utf-8") as file:
+            file.write("old cuda crash")
+        old_time = time.time() - 60
+        os.utime(marker_path, (old_time, old_time))
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {
+                "YTV_ASR_CUDA_DISABLED_FLAG": marker_path,
+                "YTV_ASR_CUDA_DISABLED_TTL_SECONDS": "10",
+            }),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cuda")
+        self.assertFalse(os.path.exists(marker_path))
 
     def test_transcribe_video_rejects_timeline_json_input(self):
         """本地识别入口直接拒绝时间轴 JSON，避免交给 ffmpeg 后报不可读错误"""

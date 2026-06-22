@@ -105,12 +105,12 @@ export function useAutomationStream() {
         toast.success('视频已导出完成')
       } else if (job.status === 'failed') {
         const failedStage = findResumableFailedStage(job)
-        const message = failedStage?.error_message || '未知错误'
+        const message = resolveAutomationFailureMessage(job, failedStage)
         addLog('error', `一键流程失败: ${message}`)
         queueResumeFailedStagePrompt(job, failedStage, resumePromptRef.current, setResumePrompt)
       } else if (job.status === 'paused' || job.status === 'cancelled') {
         const failedStage = job.steps.find((step) => step.error_message)
-        const message = failedStage?.error_message || (job.status === 'paused' ? '任务已暂停' : '任务已取消')
+        const message = resolveAutomationFailureMessage(job, failedStage, job.status === 'paused' ? '任务已暂停' : '任务已取消')
         addLog(job.status === 'paused' ? 'info' : 'warn', `一键流程${job.status === 'paused' ? '已暂停' : '已中断'}: ${message}`)
         if (job.status === 'cancelled') toast.warning('任务已中断，可在任务队列点击断点续跑')
       }
@@ -166,6 +166,33 @@ type ResumePromptState = {
 /** 找出需要弹继续提示的失败阶段；只处理用户要求的字幕和配音 */
 function findResumableFailedStage(job: AutomationJob): AutomationStep | undefined {
   return job.steps.find((step) => (step.key === 'subtitle' || step.key === 'voice') && step.status === 'failed')
+}
+
+/** 提取最具体的自动化失败原因，避免阶段错误为空时只显示“未知错误” */
+function resolveAutomationFailureMessage(
+  job: AutomationJob,
+  preferredStage?: AutomationStep,
+  fallback = '未知错误',
+): string {
+  const stageMessage = preferredStage?.error_message?.trim()
+  if (stageMessage) return stageMessage
+
+  const jobMessage = job.error_message?.trim()
+  if (jobMessage) return jobMessage
+
+  const failedStageMessage = [...job.steps]
+    .reverse()
+    .find((step) => step.status === 'failed' && step.error_message?.trim())
+    ?.error_message
+    ?.trim()
+  if (failedStageMessage) return failedStageMessage
+
+  const anyStageMessage = [...job.steps]
+    .reverse()
+    .find((step) => step.error_message?.trim())
+    ?.error_message
+    ?.trim()
+  return anyStageMessage || fallback
 }
 
 /** 字幕或配音失败时排队弹应用内确认框；取消后任务仍保留在队列里，随时能继续 */
