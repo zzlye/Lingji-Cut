@@ -3,10 +3,19 @@
 
 import argparse
 import json
+import os
+import sys
 import traceback
 from typing import Any
 
-from .local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer
+if __package__ in {None, ""}:
+    # 嵌入式 Python 不一定把当前项目目录加入 sys.path，直接执行脚本时需要手动补上。
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from backend.core.local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer
+else:
+    from .local_asr import ASR_WORKER_EVENT_PREFIX, LocalSpeechRecognizer
 
 
 def _emit(event: dict[str, Any]) -> None:

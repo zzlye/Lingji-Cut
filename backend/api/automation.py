@@ -4104,6 +4104,10 @@ def reexport_automation_job(job_id: str, request: AutomationReExportRequest, db:
     _prepare_job_export_stage_for_rerun(job)
     db.commit()
     workspace_paths = _job_workspace_paths(job, db) or (detect_video_workspace(source_video_path) if source_video_path else None) or ensure_project_dirs()
+    if not _job_workspace_paths(job, db) and not (detect_video_workspace(source_video_path) if source_video_path else None) and subtitle_path:
+        # 旧任务缺少项目目录元数据时，把重新导出的临时字幕放在用户当前字幕旁边，避免落到全局默认目录。
+        workspace_paths = dict(workspace_paths)
+        workspace_paths["output_dir"] = os.path.dirname(os.path.abspath(subtitle_path)) or workspace_paths["output_dir"]
 
     export_task = _create_task(
         db,

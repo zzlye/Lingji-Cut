@@ -384,6 +384,7 @@ export interface VoiceOption {
   name: string
   language: string
   style: string
+  gender?: 'male' | 'female' | 'neutral'
 }
 
 /** 配音生成设置 */

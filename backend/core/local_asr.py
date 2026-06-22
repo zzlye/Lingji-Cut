@@ -298,7 +298,11 @@ class LocalSpeechRecognizer:
                 if not self._should_fallback_to_cpu():
                     raise
                 import traceback
-                logger.warning(f"GPU 本地识别子进程失败，自动回退 CPU: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+                summary = f"GPU 本地识别子进程失败，自动回退 CPU: {type(exc).__name__}: {exc}"
+                logger.warning(
+                    f"{summary}\n{traceback.format_exc()}",
+                    extra={"activity_message": summary},
+                )
                 self._switch_to_cpu_after_cuda_failure(exc)
 
         # 预处理音频：响度归一化让低声说话更容易被识别，时间轴保持不变。
@@ -389,14 +393,14 @@ class LocalSpeechRecognizer:
     ) -> tuple[list[dict], str]:
         """在独立 Python 子进程中执行 CUDA 识别，子进程崩溃时主后端仍可回退 CPU"""
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        worker_path = os.path.join(project_root, "backend", "core", "local_asr_worker.py")
         env = os.environ.copy()
         env["YTV_ASR_CHILD_WORKER"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = os.pathsep.join([project_root, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
         command = [
             sys.executable,
-            "-m",
-            "backend.core.local_asr_worker",
+            worker_path,
             "--video-path", video_path,
             "--model-name", self.model_name,
             "--model-dir", self.model_dir,

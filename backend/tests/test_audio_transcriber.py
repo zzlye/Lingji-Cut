@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 
 # 嵌入式 Python 直接运行测试时需要手动加入项目根目录。
@@ -250,6 +251,162 @@ class AudioContentPartTest(unittest.TestCase):
             part = transcriber._audio_content_part("QUJD")
         self.assertEqual(part["type"], "input_audio")
         self.assertEqual(part["input_audio"]["data"], "QUJD")
+
+
+class DedupeBoundaryRepeatsTest(unittest.TestCase):
+    """相邻分段边界重复转写去重测试"""
+
+    def test_drops_entry_fully_repeated_in_previous(self):
+        """后一条整句是前一条的连续子串时应整条丢弃"""
+        transcriber = _make_transcriber()
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:03,000", "text": "they thought defeating me would be the end"},
+            {"index": 2, "start": "00:00:02,800", "end": "00:00:04,000", "text": "defeating me would be the end"},
+        ]
+        out = transcriber._dedupe_boundary_repeats(entries)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "they thought defeating me would be the end")
+
+    def test_strips_overlap_at_boundary(self):
+        """前一条结尾和后一条开头的连续重复词应从后一条裁掉"""
+        transcriber = _make_transcriber()
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:03,000", "text": "I joined in with a plan to make"},
+            {"index": 2, "start": "00:00:02,900", "end": "00:00:05,000", "text": "with a plan to make the best base ever"},
+        ]
+        out = transcriber._dedupe_boundary_repeats(entries)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[1]["text"], "the best base ever")
+
+    def test_keeps_normal_short_repeats(self):
+        """正常的短重复（No No）不应被误删"""
+        transcriber = _make_transcriber()
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "No"},
+            {"index": 2, "start": "00:00:01,200", "end": "00:00:02,000", "text": "No"},
+        ]
+        out = transcriber._dedupe_boundary_repeats(entries)
+        self.assertEqual(len(out), 2)
+
+    def test_keeps_distant_same_text(self):
+        """时间相隔很远的相同句子（真的说了两遍）不去重"""
+        transcriber = _make_transcriber()
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:03,000", "text": "this marks the beginning of the war"},
+            {"index": 2, "start": "00:05:00,000", "end": "00:05:03,000", "text": "this marks the beginning of the war"},
+        ]
+        out = transcriber._dedupe_boundary_repeats(entries)
+        self.assertEqual(len(out), 2)
+
+
+class AlignSequenceTest(unittest.TestCase):
+    """序列对齐：Gemini 词按文本对应关系落到正确的时间槽，不产生闪现/错位/重复"""
+
+    def setUp(self):
+        """准备时间码换算工具"""
+        self.asr = LocalSpeechRecognizer()
+
+    def _align(self, whisper_entries, gemini_entries):
+        """调用对齐函数的便捷封装"""
+        return align_gemini_content_to_whisper_timeline(
+            whisper_entries,
+            gemini_entries,
+            self.asr._srt_time_to_seconds,
+            self.asr._seconds_to_srt_time,
+        )
+
+    def test_short_phrase_not_split_into_flash_fragments(self):
+        """一句话即使本地切成多碎片，Gemini 同句词应按对应关系分配，不出现 0.2s 闪现碎片"""
+        # 模拟原 146-148 条：Blow one man army baby 被本地切成 3 条短碎片
+        whisper = [
+            {"index": 1, "start": "00:00:35,190", "end": "00:00:36,090", "text": "Blow one"},
+            {"index": 2, "start": "00:00:36,270", "end": "00:00:36,470", "text": "man army"},
+            {"index": 3, "start": "00:00:36,750", "end": "00:00:36,950", "text": "baby"},
+        ]
+        gemini = [{"index": 1, "start": "00:00:35,100", "end": "00:00:37,000", "text": "Blow one man army baby"}]
+        out = self._align(whisper, gemini)
+        # 时间轴沿用本地的 3 条，内容用 Gemini 词精确落位，所有词都在、不重复
+        joined = " ".join(entry["text"] for entry in out)
+        self.assertEqual(joined.split(), ["Blow", "one", "man", "army", "baby"])
+        # 没有任何一条把整句重复塞进去
+        for entry in out:
+            self.assertLess(len(entry["text"].split()), 5)
+
+    def test_no_time_overlap_between_entries(self):
+        """对齐结果相邻条目时间不重叠、不倒退"""
+        whisper = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:02,000", "text": "hello there"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:04,000", "text": "how are you"},
+        ]
+        gemini = [{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "hello there how are you"}]
+        out = self._align(whisper, gemini)
+        for left, right in zip(out, out[1:]):
+            self.assertLessEqual(
+                self.asr._srt_time_to_seconds(left["end"]),
+                self.asr._srt_time_to_seconds(right["start"]) + 0.001,
+            )
+
+    def test_gemini_word_corrects_whisper_misheard(self):
+        """Whisper 听错的词被 Gemini 正确词替换，时间轴保持本地精确边界"""
+        whisper = [{"index": 1, "start": "00:00:01,000", "end": "00:00:03,000", "text": "I built the base war"}]
+        gemini = [{"index": 1, "start": "00:00:01,050", "end": "00:00:02,950", "text": "I built the best base"}]
+        out = self._align(whisper, gemini)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["text"], "I built the best base")
+        self.assertEqual(out[0]["start"], "00:00:01,000")
+        self.assertEqual(out[0]["end"], "00:00:03,000")
+
+    def test_entry_without_gemini_match_keeps_whisper_text(self):
+        """分不到任何 Gemini 词的条目保留原 Whisper 文本兜底，不留空"""
+        whisper = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "matched words here"},
+            {"index": 2, "start": "00:01:00,000", "end": "00:01:01,000", "text": "lonely whisper line"},
+        ]
+        gemini = [{"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "matched words here"}]
+        out = self._align(whisper, gemini)
+        texts = [entry["text"] for entry in out]
+        self.assertIn("lonely whisper line", texts)
+        for entry in out:
+            self.assertTrue(entry["text"].strip())
+
+
+class LocalAsrWorkerLaunchTest(unittest.TestCase):
+    """本地 ASR CUDA worker 启动命令测试"""
+
+    def test_cuda_worker_uses_script_path_for_embedded_python(self):
+        """CUDA 子进程直接执行 worker 脚本，避免嵌入式 Python 找不到 backend 包"""
+        captured: dict[str, object] = {}
+
+        class FakeStdout:
+            """模拟子进程 stdout，返回一次成功事件"""
+
+            def __iter__(self):
+                payload = '{"type":"result","language":"zh","entries":[{"text":"测试","start":"00:00:00,000","end":"00:00:01,000"}]}'
+                return iter([f"__YTV_ASR_WORKER__{payload}\n"])
+
+        class FakeProcess:
+            """模拟成功退出的 CUDA worker 子进程"""
+
+            stdout = FakeStdout()
+
+            def wait(self):
+                return 0
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = command
+            captured["kwargs"] = kwargs
+            return FakeProcess()
+
+        recognizer = LocalSpeechRecognizer(model_name="base", device="cuda", compute_type="float16")
+        with patch("backend.core.local_asr.subprocess.Popen", side_effect=fake_popen):
+            entries, language = recognizer._transcribe_video_in_worker("D:\\tmp\\sample.mp4", None, None)
+
+        command = captured["command"]
+        self.assertIsInstance(command, list)
+        self.assertNotIn("-m", command)
+        self.assertTrue(str(command[1]).endswith(os.path.join("backend", "core", "local_asr_worker.py")))
+        self.assertEqual(entries[0]["text"], "测试")
+        self.assertEqual(language, "zh")
 
 
 if __name__ == "__main__":

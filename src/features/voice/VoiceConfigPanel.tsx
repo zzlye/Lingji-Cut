@@ -53,6 +53,18 @@ const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
 
+/** 音色听感倾向展示文案 */
+function voiceGenderLabel(gender?: VoiceOption['gender']): string {
+  if (gender === 'male') return '偏男声'
+  if (gender === 'female') return '偏女声'
+  return '中性'
+}
+
+/** 下拉里展示音色名称、听感倾向和风格 */
+function voiceOptionLabel(item: VoiceOption): string {
+  return `${item.name} · ${voiceGenderLabel(item.gender)} · ${item.style}`
+}
+
 /** 根据预设构造下拉选项 */
 function voicePresetOptions(presets: VoicePresetProfile[]): FieldOption[] {
   return presets.map((preset) => [preset.id, `${preset.name} · ${preset.voice}`] as FieldOption)
@@ -61,7 +73,7 @@ function voicePresetOptions(presets: VoicePresetProfile[]): FieldOption[] {
 /** 合并音色目录、预设和当前值，避免下拉里丢失自定义 voice id */
 function voiceOptionsWithCustom(voices: VoiceOption[], presets: VoicePresetProfile[], currentVoice: string): FieldOption[] {
   const options = [
-    ...voices.map((item) => [item.id, `${item.name} · ${item.style}`] as FieldOption),
+    ...voices.map((item) => [item.id, voiceOptionLabel(item)] as FieldOption),
     ...presets.map((preset) => [preset.voice, `${preset.name} · ${preset.voice}`] as FieldOption),
     currentVoice ? [currentVoice, currentVoice] as FieldOption : null,
   ].filter(Boolean) as FieldOption[]
@@ -561,7 +573,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 onClick={() => { setVoice(item.id); setCustomVoice('') }}
                 className={cn('rounded-md border p-2.5 text-left transition-colors', selectedVoice === item.id ? 'border-primary bg-primary/10' : 'bg-card hover:border-primary/50')}
               >
-                <span className="block truncate text-sm font-medium">{item.name}</span>
+                <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+                  <span className="truncate">{item.name}</span>
+                  <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">{voiceGenderLabel(item.gender)}</span>
+                </span>
                 <span className="block truncate text-xs text-muted-foreground">{item.language} · {item.style}</span>
               </button>
             ))}

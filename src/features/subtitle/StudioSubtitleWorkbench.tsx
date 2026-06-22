@@ -181,6 +181,7 @@ export function StudioSubtitleWorkbench({
   const draftKey = useMemo(() => buildSubtitleDraftKey(selectedJob), [selectedJob?.id])
   const selectedJobResolvedSubtitle = selectedJob?.id ? (resolvedJobSubtitlePaths[selectedJob.id] || '').trim() : ''
   const selectedJobSourceVideo = useMemo(() => resolveJobSourceVideo(selectedJob), [selectedJob])
+  const selectedJobReExportSourceVideo = useMemo(() => resolveJobReExportSourceVideo(selectedJob), [selectedJob])
   const selectedJobExportVideo = useMemo(() => resolveJobExportVideo(selectedJob), [selectedJob])
   const selectedJobPreviewVideo = useMemo(() => resolveJobPreviewVideo(selectedJob, selectedJobSourceVideo), [selectedJob, selectedJobSourceVideo])
   const previewVideoUrl = selectedJobPreviewVideo ? automationApi.mediaUrl(selectedJobPreviewVideo) : ''
@@ -243,7 +244,7 @@ export function StudioSubtitleWorkbench({
   const listBottomSpacer = Math.max(0, (filteredEntryIndexes.length - visibleListEnd) * SUBTITLE_LIST_ROW_HEIGHT)
   const primaryOutputLabel = selectedJob?.id ? '保存字幕并导出视频' : '保存字幕文件'
   const isPrimaryOutputBusy = isSaving || isReExporting
-  const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || (Boolean(selectedJobSourceVideo) && Boolean(selectedJobExportVideo)))
+  const canUsePrimaryOutput = entries.length > 0 && (!selectedJob?.id || (Boolean(selectedJobReExportSourceVideo) && Boolean(selectedJobExportVideo)))
   const deleteRequestIndexes = deleteRequest
     ? Array.from(new Set(deleteRequest.indexes)).filter((index) => index >= 0 && index < entries.length)
     : []
@@ -1335,7 +1336,7 @@ export function StudioSubtitleWorkbench({
       setNotice({ type: 'warning', message: '当前任务还在执行中，请等它结束后再覆盖导出。' })
       return
     }
-    if (!selectedJobSourceVideo) {
+    if (!selectedJobReExportSourceVideo) {
       setNotice({ type: 'warning', message: '这个任务没有可复用的源视频，暂时不能覆盖导出。' })
       return
     }
@@ -1352,6 +1353,7 @@ export function StudioSubtitleWorkbench({
       const assPath = await ensureAssForReExport()
       const result = await automationApi.reExport(selectedJob.id, {
         subtitle_path: assPath,
+        video_path: selectedJobReExportSourceVideo,
         output_path: selectedJobExportVideo,
         output_format: preferences.output_format,
         export_with_settings: preferences.export_with_settings,
@@ -2255,6 +2257,16 @@ function resolveJobSourceVideo(job: AutomationJob | null) {
     if (isMediaPath(stagePath)) return stagePath
   }
   return ''
+}
+
+function resolveJobReExportSourceVideo(job: AutomationJob | null) {
+  // 覆盖导出要从“未烧字幕但已画面处理”的视频开始，避免字幕调整后丢失画面处理效果。
+  for (const key of ['effects', 'download'] as const) {
+    const stagePath = (job?.steps.find((step) => step.key === key)?.output_path || '').trim()
+    if (isMediaPath(stagePath)) return stagePath
+  }
+  const directPath = (job?.source_video_path || '').trim()
+  return isMediaPath(directPath) ? directPath : ''
 }
 
 function resolveJobExportVideo(job: AutomationJob | null) {

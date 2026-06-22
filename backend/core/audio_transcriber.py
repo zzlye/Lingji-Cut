@@ -4,6 +4,7 @@
 
 import asyncio
 import base64
+import difflib
 import json
 import os
 import re
@@ -203,7 +204,69 @@ class GeminiAudioTranscriber:
         entries: list[dict] = []
         for chunk in results:
             entries.extend(chunk)
-        return entries
+        # 相邻分段为防切断句子各留了 0.3 秒重叠，边界处同一句话会被两段都转写出来，
+        # 必须在对齐前去重，否则对齐时一份算"替换"一份算"补漏"，仍会落进相邻字幕造成重复。
+        return self._dedupe_boundary_repeats(entries)
+
+    def _dedupe_boundary_repeats(self, entries: list[dict]) -> list[dict]:
+        """裁掉相邻分段在重叠边界重复转写的同一段话，避免对齐后出现重复字幕"""
+        if len(entries) < 2:
+            return entries
+        ordered = sorted(
+            entries,
+            key=lambda e: self._asr._srt_time_to_seconds(str(e.get("start") or "00:00:00,000")),
+        )
+        result: list[dict] = []
+        for entry in ordered:
+            drop = False
+            # 重复只发生在分段重叠边界，只和时间相近的前几条比较即可
+            for prev in reversed(result[-3:]):
+                prev_start = self._asr._srt_time_to_seconds(str(prev.get("start") or "00:00:00,000"))
+                cur_start = self._asr._srt_time_to_seconds(str(entry.get("start") or "00:00:00,000"))
+                if cur_start - prev_start > 6.0:
+                    continue
+                outcome = self._strip_boundary_overlap(prev, entry)
+                if outcome is None:
+                    drop = True
+                    break
+                entry = outcome
+            if not drop and str(entry.get("text") or "").strip():
+                result.append(entry)
+        return result
+
+    def _strip_boundary_overlap(self, prev: dict, entry: dict) -> Optional[dict]:
+        """比较相邻两条字幕，去掉边界重复词；返回 None 表示整条都是重复应丢弃，原样返回表示无重复"""
+        prev_units = _sentence_units(" ".join(str(prev.get("text") or "").split()))
+        cur_units = _sentence_units(" ".join(str(entry.get("text") or "").split()))
+        # 要求至少 4 个连续词重合才判定为重复，避免误删 "No No" 这类正常短重复
+        if len(prev_units) < 4 or len(cur_units) < 1:
+            return entry
+        prev_norm = [unit.lower() for unit in prev_units]
+        cur_norm = [unit.lower() for unit in cur_units]
+        # entry 整句就是 prev 的一段连续子串（含完全相同）→ 整条丢弃
+        if len(cur_norm) >= 4 and len(cur_norm) <= len(prev_norm) and self._contains_run(prev_norm, cur_norm):
+            return None
+        # prev 尾部和 entry 头部的最长重叠（边界缝合处的重复词）
+        max_overlap = min(len(prev_norm), len(cur_norm))
+        for length in range(max_overlap, 3, -1):
+            if prev_norm[-length:] == cur_norm[:length]:
+                kept_units = cur_units[length:]
+                if not kept_units:
+                    return None
+                new_entry = dict(entry)
+                new_entry["text"] = _join_sentence_units(kept_units)
+                return new_entry
+        return entry
+
+    def _contains_run(self, haystack: list[str], needle: list[str]) -> bool:
+        """判断 needle 是否作为连续子序列出现在 haystack 中"""
+        n, m = len(haystack), len(needle)
+        if m == 0 or m > n:
+            return False
+        for start in range(n - m + 1):
+            if haystack[start:start + m] == needle:
+                return True
+        return False
 
     async def _transcribe_one_segment(self, client: Any, seg_start: float, mp3_path: str, language: Optional[str]) -> list[dict]:
         """转写单个分段，带失败重试，返回平移回完整时间轴的字幕条目"""
@@ -445,24 +508,51 @@ def align_gemini_content_to_whisper_timeline(
     srt_to_seconds: Callable[[str], float],
     seconds_to_srt: Callable[[float], str],
 ) -> list[dict]:
-    """方案3：以 Whisper 精确时间轴为骨架，用 Gemini 的准确内容按时间重叠替换/补全
+    """方案3：以 Whisper 精确时间轴为骨架，用 Gemini 的准确内容按"文本序列对齐"分配
 
-    - Whisper 每条字幕的时间区间内，取时间上重叠的 Gemini 句子文本拼接，替换该条文本；
-    - Gemini 有、但没落进任何 Whisper 区间的句子（Whisper 漏掉的），按其时间戳作为新条目插入。
+    Whisper 和 Gemini 是同一段语音的两次转写，文本高度相似：Whisper 时间准但词可能错，
+    Gemini 词准但时间粗。旧做法按"时间重叠 + 字数比例硬切长句"分配，会把一句话切成
+    0.2 秒的碎片、相邻条目时间错位、内容重复。这里改成用 difflib 把 Gemini 的每个词
+    按"和 Whisper 词的对应关系"落到对应条目的精确时间槽，从根本上消除碎片和错位。
+
+    - equal/replace：Gemini 词按文本对齐落到对应 Whisper 条目，时间沿用该条目精确边界；
+    - insert（Whisper 漏的词）：落在某条目时间区间内就并入该条目，否则收集为补漏；
+    - delete（Whisper 多出/听错的词）：直接忽略；
+    - 分不到任何 Gemini 词的条目保留原 Whisper 文本兜底，不留空。
     """
     if not gemini_entries:
         return whisper_entries
     if not whisper_entries:
         return gemini_entries
 
-    gemini_spans = [
-        (
-            srt_to_seconds(str(g.get("start") or "00:00:00,000")),
-            srt_to_seconds(str(g.get("end") or "00:00:00,000")),
-            " ".join(str(g.get("text") or "").split()),
-        )
-        for g in gemini_entries
-    ]
+    # 构造带"所属条目下标"的 Whisper 词序列（difflib 的 a 序列，用归一化小写词比对）
+    w_words: list[tuple[str, int]] = []
+    for entry_index, entry in enumerate(whisper_entries):
+        for unit in _sentence_units(" ".join(str(entry.get("text") or "").split())):
+            w_words.append((unit.lower(), entry_index))
+
+    # 构造带"插值时间 + 所属句起止"的 Gemini 词序列（difflib 的 b 序列）
+    # 插值时间用于判断漏词落在哪条字幕；句起止用于补漏时还原原句时间边界
+    g_words: list[tuple[str, str, float, float, float]] = []
+    for g in gemini_entries:
+        units = _sentence_units(" ".join(str(g.get("text") or "").split()))
+        if not units:
+            continue
+        g_start = srt_to_seconds(str(g.get("start") or "00:00:00,000"))
+        g_end = srt_to_seconds(str(g.get("end") or "00:00:00,000"))
+        span = max(0.0, g_end - g_start)
+        count = len(units)
+        for offset, unit in enumerate(units):
+            # 词中心时间 = 句起点 + 句时长 * (词序+0.5)/词数
+            word_time = g_start + span * (offset + 0.5) / count
+            g_words.append((unit.lower(), unit, word_time, g_start, g_end))
+
+    if not g_words:
+        return whisper_entries
+    if not w_words:
+        # Whisper 没有可用文本时无法对齐，退回 Gemini 自身内容和时间
+        return gemini_entries
+
     whisper_spans = [
         (
             srt_to_seconds(str(entry.get("start") or "00:00:00,000")),
@@ -471,48 +561,171 @@ def align_gemini_content_to_whisper_timeline(
         )
         for entry in whisper_entries
     ]
-    assigned: list[list[tuple[float, str]]] = [[] for _ in whisper_entries]
-    missing: list[tuple[float, float, str]] = []
+    # 每个 Whisper 条目收集分到的 (Gemini 词全局序号, 原始词)，按序号排序即还原 Gemini 语序
+    assigned: list[list[tuple[int, str]]] = [[] for _ in whisper_entries]
+    g_assigned = [False] * len(g_words)
 
-    for g_start, g_end, g_text in gemini_spans:
-        if not g_text:
-            continue
-        overlaps: list[tuple[int, float]] = []
-        for index, (w_start, w_end, _entry) in enumerate(whisper_spans):
-            overlap = min(w_end, g_end) - max(w_start, g_start)
-            # 句子中心落在该 Whisper 区间内，或与之有实质重叠，就归到这条
-            center = (g_start + g_end) / 2
-            if overlap > 0.05 or (w_start <= center <= w_end):
-                overlaps.append((index, _alignment_slot_weight(whisper_spans[index], max(overlap, 0.05))))
-
-        if not overlaps:
-            missing.append((g_start, g_end, g_text))
-            continue
-        if len(overlaps) == 1:
-            assigned[overlaps[0][0]].append((g_start, g_text))
-            continue
-
-        # 一个 Gemini 长句横跨多个本地时间槽时，必须切分后分配；
-        # 不能把整句重复写进每个重叠槽位，否则字幕会成倍膨胀。
-        pieces = _split_sentence_by_weights(g_text, [weight for _index, weight in overlaps])
-        for (slot_index, _weight), piece in zip(overlaps, pieces):
-            if piece:
-                assigned[slot_index].append((g_start, piece))
+    # autojunk=False：关闭"高频词当噪声"启发式，避免 the/a 等常见词被忽略破坏对齐
+    matcher = difflib.SequenceMatcher(None, [w[0] for w in w_words], [g[0] for g in g_words], autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            # 完全对齐：Gemini 词逐一落到对齐位置的 Whisper 词所属条目
+            for offset in range(i2 - i1):
+                entry_index = w_words[i1 + offset][1]
+                assigned[entry_index].append((j1 + offset, g_words[j1 + offset][1]))
+                g_assigned[j1 + offset] = True
+        elif tag == "replace":
+            # 词不同但同段：Gemini 词按比例映射到这段 Whisper 词，落到对应条目
+            # 用 Whisper 词位置（时间准）做基准，更符合真实说话节奏
+            span_w = i2 - i1
+            span_g = j2 - j1
+            for offset in range(span_g):
+                local = min(span_w - 1, int(offset * span_w / span_g))
+                entry_index = w_words[i1 + local][1]
+                assigned[entry_index].append((j1 + offset, g_words[j1 + offset][1]))
+                g_assigned[j1 + offset] = True
+        elif tag == "insert":
+            # Whisper 漏掉的词：能落进某条字幕时间区间就并入，否则留给补漏
+            for index in range(j1, j2):
+                word_time = g_words[index][2]
+                entry_index = _entry_index_containing_time(whisper_spans, word_time)
+                if entry_index is not None:
+                    assigned[entry_index].append((index, g_words[index][1]))
+                    g_assigned[index] = True
+        # delete：Whisper 多出来的词（多为听错或幻觉），不影响 Gemini 内容，忽略
 
     aligned: list[dict] = []
-    for index, (_w_start, _w_end, entry) in enumerate(whisper_spans):
+    for entry_index, entry in enumerate(whisper_entries):
         next_entry = dict(entry)
-        if assigned[index]:
-            assigned[index].sort(key=lambda item: item[0])
-            next_entry["text"] = _join_sentences(text for _, text in assigned[index])
+        words = assigned[entry_index]
+        if words:
+            words.sort(key=lambda item: item[0])
+            next_entry["text"] = _join_sentence_units([word for _index, word in words])
+        # 没分到任何 Gemini 词的条目保留原 Whisper 文本兜底，避免留空
         aligned.append(next_entry)
 
+    # 把没分配出去的 Gemini 词按连续段还原成补漏句（用原句时间边界，不用插值时间）
+    missing = _collect_missing_runs(g_words, g_assigned)
     aligned.extend(_build_missing_gemini_entries(missing, whisper_spans, seconds_to_srt))
 
     aligned.sort(key=lambda item: srt_to_seconds(str(item.get("start") or "00:00:00,000")))
+    # 收尾平滑：消除从 Whisper 时间轴继承来的极短闪现碎片和时间重叠/倒退
+    aligned = _smooth_aligned_entries(aligned, srt_to_seconds, seconds_to_srt)
     for index, entry in enumerate(aligned, 1):
         entry["index"] = index
     return aligned
+
+
+def _smooth_aligned_entries(
+    entries: list[dict],
+    srt_to_seconds: Callable[[str], float],
+    seconds_to_srt: Callable[[float], str],
+) -> list[dict]:
+    """对齐结果收尾平滑：合并继承自时间轴的极短碎片、修正相邻条目时间重叠或倒退
+
+    对齐沿用 Whisper 的精确时间，但 Whisper 时间轴本身可能带 0.2 秒的单词碎片和
+    边界重叠（来自补漏合并），原样输出会闪现/音画错位。这里做两步收尾：
+    1) 时长过短且与相邻条目几乎连续的碎片，并入相邻条目；
+    2) 保证相邻条目时间不重叠、不倒退（前一条结束不晚于后一条开始）。
+    """
+    if len(entries) < 2:
+        return entries
+
+    # 时长低于该值视为闪现碎片，与相邻条目间隔小于 MAX_GAP 时合并
+    min_duration = 0.35
+    max_gap = 0.12
+    merged = [dict(entry) for entry in entries]
+    index = 0
+    while index < len(merged):
+        current = merged[index]
+        start = srt_to_seconds(str(current.get("start") or "00:00:00,000"))
+        end = srt_to_seconds(str(current.get("end") or "00:00:00,000"))
+        if end - start >= min_duration:
+            index += 1
+            continue
+        prev_entry = merged[index - 1] if index > 0 else None
+        next_entry = merged[index + 1] if index + 1 < len(merged) else None
+        prev_gap = (start - srt_to_seconds(str(prev_entry.get("end") or "00:00:00,000"))) if prev_entry else 1e9
+        next_gap = (srt_to_seconds(str(next_entry.get("start") or "00:00:00,000")) - end) if next_entry else 1e9
+        # 优先并回前一条（短碎片多是前句没收完的尾音），其次并入后一条
+        if prev_entry is not None and prev_gap <= max_gap and (next_gap > max_gap or prev_gap <= next_gap):
+            prev_entry["end"] = current["end"]
+            prev_entry["text"] = _join_sentences([str(prev_entry.get("text") or ""), str(current.get("text") or "")])
+            merged.pop(index)
+            continue
+        if next_entry is not None and next_gap <= max_gap:
+            next_entry["start"] = current["start"]
+            next_entry["text"] = _join_sentences([str(current.get("text") or ""), str(next_entry.get("text") or "")])
+            merged.pop(index)
+            continue
+        index += 1
+
+    # 拉伸仍然过短的孤立碎片：被停顿隔开、无法合并的短句（如 0.2 秒的 "man army"），
+    # 向后借用空闲间隙延长显示时长到可读，必要时再向前借，避免一闪而过来不及看
+    readable_min = 0.85
+    min_gap_between = 0.04
+    for idx, entry in enumerate(merged):
+        start = srt_to_seconds(str(entry.get("start") or "00:00:00,000"))
+        end = srt_to_seconds(str(entry.get("end") or "00:00:00,000"))
+        if end - start >= readable_min:
+            continue
+        # 向后延长：吃掉到下一条起点前的空闲（留一点间隙），但不超过可读上限
+        next_start = srt_to_seconds(str(merged[idx + 1].get("start") or "00:00:00,000")) if idx + 1 < len(merged) else end + readable_min
+        new_end = min(start + readable_min, max(end, next_start - min_gap_between))
+        if new_end > end:
+            end = new_end
+            entry["end"] = seconds_to_srt(end)
+        if end - start >= readable_min:
+            continue
+        # 仍不够则向前借：把起点提前到上一条结束之后一点
+        prev_end = srt_to_seconds(str(merged[idx - 1].get("end") or "00:00:00,000")) if idx > 0 else 0.0
+        new_start = max(prev_end + min_gap_between, end - readable_min)
+        if new_start < start:
+            entry["start"] = seconds_to_srt(new_start)
+
+    # 修正时间重叠/倒退：前一条结束时间不晚于后一条开始时间
+    for idx in range(len(merged) - 1):
+        cur_start = srt_to_seconds(str(merged[idx].get("start") or "00:00:00,000"))
+        cur_end = srt_to_seconds(str(merged[idx].get("end") or "00:00:00,000"))
+        next_start = srt_to_seconds(str(merged[idx + 1].get("start") or "00:00:00,000"))
+        if cur_end > next_start:
+            # 收回到后一条起点，但不短于自身起点，避免负时长
+            merged[idx]["end"] = seconds_to_srt(max(cur_start, next_start))
+    return merged
+
+
+def _entry_index_containing_time(whisper_spans: list[tuple[float, float, dict]], moment: float) -> Optional[int]:
+    """找出时间点落在哪个 Whisper 条目区间内，找不到返回 None"""
+    for index, (w_start, w_end, _entry) in enumerate(whisper_spans):
+        if w_start <= moment <= w_end:
+            return index
+    return None
+
+
+def _collect_missing_runs(
+    g_words: list[tuple[str, str, float, float, float]],
+    g_assigned: list[bool],
+) -> list[tuple[float, float, str]]:
+    """把连续未分配的 Gemini 词合并成补漏句，时间用原句起止边界（避免逐词碎片）"""
+    runs: list[tuple[float, float, str]] = []
+    index = 0
+    total = len(g_words)
+    while index < total:
+        if g_assigned[index]:
+            index += 1
+            continue
+        end = index
+        while end < total and not g_assigned[end]:
+            end += 1
+        run = g_words[index:end]
+        # 这段词可能跨多个原句，起止取其中最早的句起点和最晚的句终点
+        run_start = min(word[3] for word in run)
+        run_end = max(word[4] for word in run)
+        text = _join_sentence_units([word[1] for word in run])
+        if text:
+            runs.append((run_start, max(run_end, run_start), text))
+        index = end
+    return runs
 
 
 def _build_missing_gemini_entries(
@@ -626,49 +839,6 @@ def _timed_missing_chunks(
         })
         cursor = end
     return entries
-
-
-def _split_sentence_by_weights(text: str, weights: list[float]) -> list[str]:
-    """按时间重叠权重把一句 Gemini 文本切给多个本地时间槽"""
-    if not weights:
-        return []
-    normalized = " ".join(str(text or "").split())
-    if not normalized:
-        return ["" for _ in weights]
-    units = _sentence_units(normalized)
-    if len(weights) == 1 or len(units) <= 1:
-        return [normalized] + ["" for _ in weights[1:]]
-
-    total_units = len(units)
-    total_weight = max(0.001, sum(max(0.001, weight) for weight in weights))
-    pieces: list[str] = []
-    start = 0
-    elapsed = 0.0
-    for index, weight in enumerate(weights):
-        elapsed += max(0.001, weight)
-        remaining_slots = len(weights) - index - 1
-        if index == len(weights) - 1:
-            end = total_units
-        else:
-            proposed = round(total_units * elapsed / total_weight)
-            min_end = start + (1 if total_units - start > remaining_slots else 0)
-            max_end = total_units - remaining_slots
-            end = max(min_end, min(max_end, proposed))
-        pieces.append(_join_sentence_units(units[start:end]))
-        start = end
-    return pieces
-
-
-def _alignment_slot_weight(whisper_span: tuple[float, float, dict], overlap: float) -> float:
-    """计算 Gemini 长句拆分权重，优先按本地识别文本密度还原真实说话节奏"""
-    w_start, w_end, entry = whisper_span
-    duration = max(0.001, w_end - w_start)
-    local_text = " ".join(str(entry.get("text") or "").split())
-    text_weight = len(_sentence_units(local_text)) if local_text else 0
-    overlap_ratio = max(0.05, min(1.0, overlap / duration))
-    if text_weight > 0:
-        return max(0.05, text_weight * overlap_ratio)
-    return max(0.05, overlap)
 
 
 def _sentence_units(text: str) -> list[str]:

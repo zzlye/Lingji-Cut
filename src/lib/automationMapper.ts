@@ -10,7 +10,7 @@ export const AUTOMATION_STAGE_META: Record<AutomationStep['key'], { label: strin
   parse: { label: '解析视频', description: '读取 YouTube 元数据和字幕轨', keyword: '解析' },
   download: { label: '下载入库', description: '下载原视频并归档到项目目录', keyword: '下载' },
   effects: { label: '画面处理', description: '应用画面差异化和输出参数', keyword: '画面' },
-  subtitle: { label: '字幕处理', description: '生成、翻译、润色并渲染字幕', keyword: '字幕' },
+  subtitle: { label: '字幕准备', description: '按设置读取原字幕、生成字幕或跳过字幕加工', keyword: '字幕' },
   voice: { label: '配音生成', description: '按配置生成或跳过配音', keyword: '配音' },
   export: { label: '合成导出', description: '合成视频、字幕、配音并导出成品', keyword: '导出' },
 }

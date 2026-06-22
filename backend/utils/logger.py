@@ -35,7 +35,8 @@ class ActivityLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         global _LOG_SEQUENCE
         try:
-            message = record.getMessage()
+            # 活动抽屉用于快速看状态，允许调用方传短摘要，完整日志仍输出到控制台。
+            message = str(getattr(record, "activity_message", "") or record.getMessage())
         except Exception:
             message = str(record.msg)
         with _LOG_LOCK:

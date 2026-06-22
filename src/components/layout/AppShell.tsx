@@ -16,7 +16,7 @@ import { useBackendLogs } from '@/hooks/useBackendLogs'
 
 export function AppShell() {
   // 全局唯一的自动化进度流（SSE）入口
-  useAutomationStream()
+  const automationDialogs = useAutomationStream()
   // 同步后端业务日志到活动日志抽屉
   useBackendLogs()
   const workspace = useUiStore((s) => s.workspace)
@@ -45,6 +45,7 @@ export function AppShell() {
           </main>
         </div>
         <ActivityDrawer />
+        {automationDialogs}
       </div>
     </TooltipProvider>
   )

@@ -1,12 +1,22 @@
-// src/hooks/useAutomationStream.ts
+// src/hooks/useAutomationStream.tsx
 // 全局自动化进度流 - 在 AppShell 顶层挂载一次，作为唯一的 SSE 订阅入口，
 // 取代原先 Header 与 TaskPanel 各开一份 EventSource 的重复监听。
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { automationApi } from '@/lib/api'
 import { useAutomationStore, selectActiveJobIds } from '@/stores/automationStore'
 import { useLogStore } from '@/stores/logStore'
 import type { AutomationJob, AutomationStep, BackendAutomationJob } from '@/types'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 const ACTIVE_JOB_POLL_INTERVAL_MS = 4000
 const ACTIVE_STATUSES = new Set<AutomationJob['status']>(['pending', 'running'])
@@ -42,6 +52,7 @@ export function useAutomationStream() {
   const previousStatusRef = useRef<Map<string, AutomationJob['status']>>(new Map())
   // 记录已经弹过“继续完成”的失败点，避免 React 严格模式或轮询重复弹窗。
   const resumePromptRef = useRef<Set<string>>(new Set())
+  const [resumePrompt, setResumePrompt] = useState<ResumePromptState | null>(null)
 
   // 挂载时拉取已有任务列表；后端启动慢时重试，避免重启后素材库/历史记录空白。
   useEffect(() => {
@@ -96,7 +107,7 @@ export function useAutomationStream() {
         const failedStage = findResumableFailedStage(job)
         const message = failedStage?.error_message || '未知错误'
         addLog('error', `一键流程失败: ${message}`)
-        promptResumeFailedStage(job, failedStage, resumePromptRef.current)
+        queueResumeFailedStagePrompt(job, failedStage, resumePromptRef.current, setResumePrompt)
       } else if (job.status === 'paused' || job.status === 'cancelled') {
         const failedStage = job.steps.find((step) => step.error_message)
         const message = failedStage?.error_message || (job.status === 'paused' ? '任务已暂停' : '任务已取消')
@@ -132,6 +143,24 @@ export function useAutomationStream() {
 
     return () => sources.forEach((source) => source.close())
   }, [activeKey])
+
+  return (
+    <ResumeFailedStageDialog
+      prompt={resumePrompt}
+      onOpenChange={(open) => !open && setResumePrompt(null)}
+      onResume={() => {
+        if (!resumePrompt) return
+        resumeFailedStage(resumePrompt.jobId)
+        setResumePrompt(null)
+      }}
+    />
+  )
+}
+
+type ResumePromptState = {
+  jobId: string
+  stageLabel: string
+  message: string
 }
 
 /** 找出需要弹继续提示的失败阶段；只处理用户要求的字幕和配音 */
@@ -139,29 +168,66 @@ function findResumableFailedStage(job: AutomationJob): AutomationStep | undefine
   return job.steps.find((step) => (step.key === 'subtitle' || step.key === 'voice') && step.status === 'failed')
 }
 
-/** 字幕或配音失败时弹确认框；取消后任务仍保留在队列里，随时能继续 */
-function promptResumeFailedStage(job: AutomationJob, failedStage: AutomationStep | undefined, promptedKeys: Set<string>) {
+/** 字幕或配音失败时排队弹应用内确认框；取消后任务仍保留在队列里，随时能继续 */
+function queueResumeFailedStagePrompt(
+  job: AutomationJob,
+  failedStage: AutomationStep | undefined,
+  promptedKeys: Set<string>,
+  setResumePrompt: (prompt: ResumePromptState) => void,
+) {
   if (!failedStage || !job.can_resume || typeof window === 'undefined') return
   const promptKey = `${job.id}:${failedStage.key}:${job.completed_at || failedStage.error_message || ''}`
   if (promptedKeys.has(promptKey)) return
   promptedKeys.add(promptKey)
 
   const message = failedStage.error_message || '重试次数已用完或当前阶段失败'
-  const shouldResume = window.confirm(
-    `${failedStage.label}失败，任务已停在当前阶段。\n\n${message}\n\n是否现在继续完成？如果还没修好 API、额度或配置，可以点取消，之后在任务队列继续。`,
-  )
-  if (!shouldResume) return
+  setResumePrompt({ jobId: job.id, stageLabel: failedStage.label, message })
+}
 
+function resumeFailedStage(jobId: string) {
   const addLog = useLogStore.getState().addLog
-  automationApi.resume(job.id)
+  automationApi.resume(jobId)
     .then((result) => {
       addLog('info', result.message || '自动化任务已从断点继续')
       toast.success('已从断点继续处理')
-      return syncAutomationJob(job.id)
+      return syncAutomationJob(jobId)
     })
     .catch((error) => {
       const detail = error instanceof Error ? error.message : '未知错误'
       addLog('error', `继续完成失败: ${detail}`)
       toast.error(`继续完成失败：${detail}`)
     })
+}
+
+function ResumeFailedStageDialog({
+  prompt,
+  onOpenChange,
+  onResume,
+}: {
+  prompt: ResumePromptState | null
+  onOpenChange: (open: boolean) => void
+  onResume: () => void
+}) {
+  return (
+    <AlertDialog open={Boolean(prompt)} onOpenChange={onOpenChange}>
+      <AlertDialogContent className="glass-strong sm:max-w-xl">
+        <AlertDialogHeader>
+          <AlertDialogTitle>{prompt?.stageLabel || '当前阶段'}失败</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3 text-left">
+              <p>任务已停在当前阶段。修正 API、额度或配置后，可以从断点继续。</p>
+              <p className="max-h-40 overflow-auto rounded-md border bg-muted/40 p-3 text-xs leading-relaxed text-foreground/85">
+                {prompt?.message || '未知错误'}
+              </p>
+              <p>现在继续会复用已经完成的下载、字幕等产物，不会从头重跑。</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>稍后处理</AlertDialogCancel>
+          <AlertDialogAction onClick={onResume}>继续完成</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
 }

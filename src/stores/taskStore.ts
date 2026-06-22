@@ -10,7 +10,7 @@ const AUTOMATION_STEPS: AutomationStep[] = [
   { key: 'parse', label: '解析视频', description: '读取 YouTube 元数据和字幕轨', status: 'pending', progress: 0 },
   { key: 'download', label: '下载入库', description: '下载原视频并归档到项目目录', status: 'pending', progress: 0 },
   { key: 'effects', label: '画面处理', description: '应用画面差异化和输出参数', status: 'pending', progress: 0 },
-  { key: 'subtitle', label: '字幕处理', description: '生成、翻译、润色并渲染字幕', status: 'pending', progress: 0 },
+  { key: 'subtitle', label: '字幕准备', description: '按设置读取原字幕、生成字幕或跳过字幕加工', status: 'pending', progress: 0 },
   { key: 'voice', label: '配音生成', description: '按配置生成或跳过配音', status: 'pending', progress: 0 },
   { key: 'export', label: '合成导出', description: '合成视频、字幕、配音并导出成品', status: 'pending', progress: 0 },
 ]

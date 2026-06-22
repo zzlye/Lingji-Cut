@@ -16,21 +16,23 @@ export function ActivityDrawer() {
 
   return (
     <Sheet open={isOpen} onOpenChange={setActivityOpen}>
-      <SheetContent className="glass-strong flex w-[420px] flex-col gap-0 p-0 sm:max-w-[420px]">
+      <SheetContent className="glass-strong flex w-[min(92vw,560px)] flex-col gap-0 p-0 sm:max-w-[560px]">
         <SheetHeader className="border-b px-4 py-3">
           <SheetTitle className="text-sm">活动日志</SheetTitle>
         </SheetHeader>
 
-        <ScrollArea className="min-h-0 flex-1 px-4 py-3">
+        <ScrollArea className="min-h-0 min-w-0 flex-1 px-4 py-3">
           {logs.length === 0 ? (
             <p className="text-xs text-muted-foreground">暂无日志记录</p>
           ) : (
             <div className="space-y-1.5">
               {[...logs].reverse().map((log, index) => (
-                <div key={index} className="flex gap-2 text-xs leading-relaxed">
+                <div key={index} className="flex min-w-0 gap-2 text-xs leading-relaxed">
                   <span className="shrink-0 tabular-nums text-muted-foreground">{formatClockTime(log.timestamp)}</span>
                   <span
+                    style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
                     className={cn(
+                      'min-w-0 max-w-full flex-1 whitespace-pre-wrap',
                       log.level === 'error'
                         ? 'text-destructive'
                         : log.level === 'warn'
