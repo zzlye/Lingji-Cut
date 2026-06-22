@@ -481,9 +481,12 @@ export type AutomationStartParams = {
   export_subtitle_only_when_voice?: boolean
   voice_profile_id?: number
   voice_text?: string
-  voice_mode?: 'full' | 'segmented'
+  voice_mode?: 'full' | 'batched' | 'segmented'
   audio_mode?: 'replace' | 'mix'
   original_volume?: number
+  voice_batch_size?: number
+  voice_batch_chars?: number
+  voice_concurrency?: number
   multi_speaker_enabled?: boolean
   speaker_voice_map?: Record<string, string>
   glossary_terms?: import('@/types').GlossaryTerm[]

@@ -140,6 +140,29 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(temp_dir_calls, [output_dir])
         self.assertTrue(os.path.exists(output_audio))
 
+    def test_batched_voice_groups_segments_by_size_and_voice(self):
+        """批量配音会按条数和音色切批，避免不同角色串到同一段音频"""
+        segments = [
+            {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
+            {"start_ms": 500, "end_ms": 1000, "text": "第二句", "speaker": "旁白"},
+            {"start_ms": 1000, "end_ms": 1500, "text": "第三句", "speaker": "角色A"},
+            {"start_ms": 1500, "end_ms": 2000, "text": "第四句", "speaker": "角色A"},
+            {"start_ms": 2000, "end_ms": 2500, "text": "第五句", "speaker": "角色A"},
+        ]
+
+        batches = self.voice_engine._batch_timed_segments(
+            segments,
+            batch_size=2,
+            max_chars=100,
+            voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
+            default_voice="alloy",
+        )
+
+        self.assertEqual([batch["count"] for batch in batches], [2, 2, 1])
+        self.assertEqual([batch["voice"] for batch in batches], ["alloy", "nova", "nova"])
+        self.assertEqual(batches[0]["start_ms"], 0)
+        self.assertEqual(batches[1]["start_ms"], 1000)
+
     def test_auto_acceleration_prefers_available_gpu_encoder(self):
         """自动硬件加速会优先选择可用 GPU 编码器"""
         with patch("backend.core.ffmpeg_processor.working_gpu_encoders", return_value=("h264_nvenc",)):

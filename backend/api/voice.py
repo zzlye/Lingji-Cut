@@ -14,6 +14,7 @@ from typing import Any, Optional
 from ..models import get_db, VoiceProviderProfile
 from ..utils import decrypt_api_key
 from ..core import VoiceEngine
+from ..core.voice_engine import provider_audio_format
 
 # 创建路由器
 router = APIRouter(prefix="/voice", tags=["voice"])
@@ -113,22 +114,11 @@ VOICE_CATALOGS = {
 
 def _audio_format_for_preview(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """读取试听文件格式，保持和配音引擎一致"""
-    effective_provider_type = VoiceEngine.resolve_provider_type(provider_type, model)
-    if effective_provider_type == "gemini_tts":
-        return "wav"
-    if effective_provider_type == "xiaomi_mimo_tts":
-        value = str(settings.get("format") or "wav").lower()
-        return value if value in {"wav", "pcm16"} else "wav"
-    value = str(settings.get("format") or "mp3").lower()
-    return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
+    return provider_audio_format(VoiceEngine.resolve_provider_type(provider_type, model), settings, model)
 
 
 def _voice_catalog_key(provider_type: str, model: str = "") -> str:
-    """音色目录按模型提示展示，调用协议仍由 VoiceEngine 单独决定"""
-    normalized_provider = str(provider_type or "").strip()
-    normalized_model = str(model or "").strip().lower()
-    if normalized_provider == "custom_tts" and "gemini" in normalized_model and "tts" in normalized_model:
-        return "gemini_tts"
+    """音色目录只按用户选择的渠道展示，避免模型名隐式改协议"""
     return VoiceEngine.resolve_provider_type(provider_type, model)
 
 

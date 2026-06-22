@@ -16,6 +16,7 @@ import uuid
 from glob import glob
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from difflib import SequenceMatcher
 from threading import Lock, Semaphore
 from typing import Any, Callable, Optional
 
@@ -25,6 +26,7 @@ from starlette.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
+from ..core.voice_engine import provider_audio_format
 from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
@@ -141,9 +143,12 @@ class AutomationRunRequest(BaseModel):
     export_subtitle_only_when_voice: bool = False
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
-    voice_mode: str = "segmented"
+    voice_mode: str = "batched"
     audio_mode: str = "mix"
     original_volume: float = 0.25
+    voice_batch_size: int = 16
+    voice_batch_chars: int = 1800
+    voice_concurrency: int = 2
     multi_speaker_enabled: bool = False
     speaker_voice_map: dict[str, str] = Field(default_factory=dict)
     glossary_terms: list[dict[str, Any]] = Field(default_factory=list)
@@ -1785,6 +1790,12 @@ def _extract_speaker_from_text(text: str) -> tuple[Optional[str], str]:
     normalized = str(text or "").strip()
     if not normalized:
         return None, ""
+    bracket_match = re.match(r"^[【\[(（]([^】\])）]{1,24})[】\])）]\s*(.+)$", normalized)
+    if bracket_match:
+        speaker = bracket_match.group(1).strip()
+        content = bracket_match.group(2).strip()
+        if speaker and content:
+            return speaker, content
     for separator in ("：", ":", " - ", "-"):
         if separator not in normalized:
             continue
@@ -1796,21 +1807,70 @@ def _extract_speaker_from_text(text: str) -> tuple[Optional[str], str]:
     return None, normalized
 
 
+def _normalize_speaker_key(value: str) -> str:
+    """规范说话人标签，自动匹配空格和大小写差异"""
+    return re.sub(r"[\s_\-：:【】\[\]()（）]+", "", str(value or "").strip()).lower()
+
+
 def _voice_for_segment(segment: dict[str, Any], default_voice: str, speaker_voice_map: dict[str, str]) -> str:
     """按说话人标签选择分段配音音色"""
     speaker = str(segment.get("speaker") or "").strip()
     if not speaker:
         return default_voice
-    return speaker_voice_map.get(speaker) or speaker_voice_map.get(speaker.lower()) or default_voice
+    direct = speaker_voice_map.get(speaker) or speaker_voice_map.get(speaker.lower())
+    if direct:
+        return direct
+    speaker_key = _normalize_speaker_key(speaker)
+    normalized_map = {
+        _normalize_speaker_key(label): voice
+        for label, voice in speaker_voice_map.items()
+        if _normalize_speaker_key(label) and str(voice or "").strip()
+    }
+    if speaker_key in normalized_map:
+        return normalized_map[speaker_key]
+    best_label = max(normalized_map, key=lambda label: SequenceMatcher(None, speaker_key, label).ratio(), default="")
+    if best_label and SequenceMatcher(None, speaker_key, best_label).ratio() >= 0.82:
+        return normalized_map[best_label]
+    return default_voice
+
+
+def _segments_have_speakers(segments: list[dict[str, Any]]) -> bool:
+    """判断字幕分段里是否出现说话人标签"""
+    return any(str(segment.get("speaker") or "").strip() for segment in segments)
+
+
+def _build_auto_voice_selector(default_voice: str, speaker_voice_map: dict[str, str]) -> Callable[[dict[str, Any]], str]:
+    """构造自动多人音色选择器，未配置的新说话人按已有音色轮换"""
+    fallback_voice = str(default_voice or "alloy").strip() or "alloy"
+    configured_voices = [
+        str(voice or "").strip()
+        for voice in speaker_voice_map.values()
+        if str(voice or "").strip()
+    ]
+    voice_pool = list(dict.fromkeys([voice for voice in configured_voices if voice != fallback_voice] + [fallback_voice]))
+    assigned: dict[str, str] = {}
+
+    def select_voice(segment: dict[str, Any]) -> str:
+        """按说话人标签选择音色，未知标签自动分配一个稳定音色"""
+        speaker = str(segment.get("speaker") or "").strip()
+        if not speaker:
+            return fallback_voice
+        mapped_voice = _voice_for_segment(segment, fallback_voice, speaker_voice_map)
+        if mapped_voice != fallback_voice:
+            return mapped_voice
+        speaker_key = _normalize_speaker_key(speaker)
+        if not speaker_key:
+            return fallback_voice
+        if speaker_key not in assigned:
+            assigned[speaker_key] = voice_pool[len(assigned) % len(voice_pool)] if voice_pool else fallback_voice
+        return assigned[speaker_key] or fallback_voice
+
+    return select_voice
 
 
 def _voice_output_extension(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
     """按配音渠道和设置决定输出音频扩展名"""
-    effective_provider_type = VoiceEngine.resolve_provider_type(provider_type, model)
-    value = str(settings.get("format") or "").lower()
-    if value:
-        return "wav" if value == "pcm16" else value
-    return "wav" if effective_provider_type == "xiaomi_mimo_tts" else "mp3"
+    return provider_audio_format(VoiceEngine.resolve_provider_type(provider_type, model), settings, model)
 
 
 def _srt_time_to_milliseconds(value: str) -> int:
@@ -2633,6 +2693,9 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, voice_task)
             settings = _load_profile_settings(voice_profile)
+            settings["voice_batch_size"] = max(1, min(80, int(request.voice_batch_size or settings.get("voice_batch_size") or 16)))
+            settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
+            settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
             voice_text = (request.voice_text or subtitle_text or _fallback_voice_text(video)).strip()
             voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text
@@ -2645,36 +2708,54 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             voice_engine = VoiceEngine()
             api_key = decrypt_api_key(voice_profile.api_key_encrypted)
             segments = subtitle_entries_to_voice_segments(subtitle_entries)
-            if request.voice_mode == "segmented" and segments and not request.voice_text:
+            voice_mode = str(request.voice_mode or "batched").strip().lower()
+            has_speakers = _segments_have_speakers(segments)
+            should_use_speaker_map = bool(request.multi_speaker_enabled and has_speakers)
+            voice_selector = _build_auto_voice_selector(voice, request.speaker_voice_map) if should_use_speaker_map else None
+            if voice_mode in {"segmented", "batched"} and segments and not request.voice_text:
                 try:
-                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_timed.{output_ext}")
+                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_{voice_mode}.{output_ext}")
 
                     def on_voice_progress(progress: float) -> None:
-                        """同步分段配音进度到后台任务"""
+                        """同步分段或批量配音进度到后台任务"""
                         _check_control(db, job, voice_task)
                         voice_task.progress = progress
                         db.commit()
                         if job:
                             _update_job_stage(db, job, "voice", "running", progress=progress, task_id=voice_task.id)
 
-                    audio_path = asyncio.run(voice_engine.generate_timed_voice_track(
-                        segments=segments,
-                        output_path=audio_path,
-                        provider_type=voice_profile.provider_type,
-                        voice=voice,
-                        voice_selector=(lambda segment: _voice_for_segment(segment, voice, request.speaker_voice_map)) if request.multi_speaker_enabled else None,
-                        api_key=api_key,
-                        base_url=voice_profile.base_url,
-                        model=model,
-                        settings=settings,
-                        progress_callback=on_voice_progress,
-                    ))
+                    if voice_mode == "batched":
+                        audio_path = asyncio.run(voice_engine.generate_batched_timed_voice_track(
+                            segments=segments,
+                            output_path=audio_path,
+                            provider_type=voice_profile.provider_type,
+                            voice=voice,
+                            voice_selector=voice_selector,
+                            api_key=api_key,
+                            base_url=voice_profile.base_url,
+                            model=model,
+                            settings=settings,
+                            progress_callback=on_voice_progress,
+                        ))
+                    else:
+                        audio_path = asyncio.run(voice_engine.generate_timed_voice_track(
+                            segments=segments,
+                            output_path=audio_path,
+                            provider_type=voice_profile.provider_type,
+                            voice=voice,
+                            voice_selector=voice_selector,
+                            api_key=api_key,
+                            base_url=voice_profile.base_url,
+                            model=model,
+                            settings=settings,
+                            progress_callback=on_voice_progress,
+                        ))
                     _check_control(db, job, voice_task)
                 except TaskControlRequested:
                     raise
                 except Exception as segmented_exc:
                     if job:
-                        _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"分段配音失败，回退整段配音: {segmented_exc}")
+                        _update_job_stage(db, job, "voice", "running", progress=20, task_id=voice_task.id, error_message=f"批量/分段配音失败，回退整段配音: {segmented_exc}")
                     audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice.{output_ext}")
                     audio_path = asyncio.run(voice_engine.generate_voice(
                         text=voice_text,

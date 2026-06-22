@@ -2,7 +2,8 @@
 // 配音配置面板 - 管理配音 API、音色、试听和生成参数
 // 交互重做：渠道/音色/试听露出，生成参数与多说话人收进高级折叠
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { Pause, Play, Volume2 } from 'lucide-react'
 import { BASE_URL, profileApi, voiceApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextModelOption, VoiceGenerateSettings, VoiceOption, VoiceSpeakerProfile } from '@/types'
@@ -11,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { cn } from '@/lib/utils'
-import { TextField, SecretField, SelectField, SwitchField, SliderField, TextareaField, type FieldOption } from '@/components/fields'
+import { TextField, SecretField, SelectField, SwitchField, SliderField, TextareaField, NumberField, type FieldOption } from '@/components/fields'
 
 /** 配音渠道配置 */
 const VOICE_PROVIDERS = [
@@ -32,6 +33,7 @@ function createDefaultSettings(): VoiceGenerateSettings {
   return {
     speed: 1, volume: 1, pitch: 0, format: 'mp3', sample_rate: 32000, bitrate: 128000, channel: 1,
     emotion: '', style_prompt: '', language_boost: 'auto', intensity: 0, timbre: 0, voice_pitch: 0, sound_effects: '',
+    retry_count: 2, retry_interval_ms: 1200,
   }
 }
 
@@ -73,10 +75,14 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const [isGenerating, setIsGenerating] = useState(false)
   const [isLocalSpeaking, setIsLocalSpeaking] = useState(false)
   const [isLoadingVoices, setIsLoadingVoices] = useState(false)
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false)
+  const [audioDuration, setAudioDuration] = useState(0)
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0)
   const [showApiKey, setShowApiKey] = useState(false)
   const [notice, setNotice] = useState<PanelNotice>(null)
   const { addLog } = useTaskStore()
   const profileRequestRef = useRef(0)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   const activeProvider = profileForm.provider_type
   const activeProviderMeta = VOICE_PROVIDERS.find((p) => p.id === activeProvider) || VOICE_PROVIDERS[0]
@@ -109,13 +115,20 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     if (profile.extra_params) {
       try {
         const parsed = JSON.parse(profile.extra_params)
+        const savedVoice = String(parsed.voice || '').trim()
         setSettings({ ...createDefaultSettings(), ...parsed })
-        if (parsed.voice) setVoice(parsed.voice)
+        if (profile.provider_type === 'custom_tts') {
+          setVoice('custom')
+          setCustomVoice(savedVoice)
+        } else if (savedVoice) {
+          setVoice(savedVoice)
+          setCustomVoice('')
+        }
       } catch { setSettings(createDefaultSettings()) }
     } else {
       setSettings(createDefaultSettings())
+      setCustomVoice('')
     }
-    setCustomVoice('')
     setModelOptions(profile.model ? [{ id: profile.model, label: profile.model, owned_by: profile.provider_type }] : [])
     setNotice({ type: 'info', message: `已选择配音配置：${profile.name}` })
   }
@@ -145,6 +158,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
       }
     }
   }, [])
+
+  useEffect(() => {
+    setIsAudioPlaying(false)
+    setAudioDuration(0)
+    setAudioCurrentTime(0)
+  }, [audioUrl])
 
   const createNewProfile = () => {
     profileRequestRef.current += 1
@@ -197,7 +216,12 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const result = await voiceApi.voices(providerType, model)
       setVoices(result.voices)
-      if (result.voices.length > 0) setVoice(result.voices[0].id)
+      if (providerType === 'custom_tts') {
+        // 自定义 OpenAI 兼容渠道要保留用户填写的 voice id，不能用占位音色覆盖。
+        setVoice((current) => current || result.voices[0]?.id || 'custom')
+      } else if (result.voices.length > 0) {
+        setVoice((current) => result.voices.some((item) => item.id === current) ? current : result.voices[0].id)
+      }
       setNotice({ type: 'success', message: `已获取 ${result.voices.length} 个音色` })
     } catch (error) {
       const message = `获取音色失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -303,6 +327,23 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     } finally { setIsGenerating(false) }
   }
 
+  const togglePreviewPlayback = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    if (audio.paused) {
+      void audio.play()
+    } else {
+      audio.pause()
+    }
+  }
+
+  const seekPreviewAudio = (value: number) => {
+    const audio = audioRef.current
+    if (!audio || !Number.isFinite(value)) return
+    audio.currentTime = Math.max(0, Math.min(value, audio.duration || value))
+    setAudioCurrentTime(audio.currentTime)
+  }
+
   const updateSetting = <K extends keyof VoiceGenerateSettings>(key: K, value: VoiceGenerateSettings[K]) => setSettings((current) => ({ ...current, [key]: value }))
 
   const updateSpeaker = (id: string, patch: Partial<VoiceSpeakerProfile>) => {
@@ -402,7 +443,20 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <Button onClick={handlePreview} disabled={isGenerating || !previewText.trim()}>{isGenerating ? '生成中…' : '生成试听'}</Button>
             <span className="text-xs text-muted-foreground">当前音色：{selectedVoiceLabel}</span>
           </div>
-          {audioUrl && <audio className="w-full" controls src={audioUrl}><track kind="captions" /></audio>}
+          {audioUrl && (
+            <VoicePreviewPlayer
+              audioRef={audioRef}
+              audioUrl={audioUrl}
+              isPlaying={isAudioPlaying}
+              duration={audioDuration}
+              currentTime={audioCurrentTime}
+              onToggle={togglePreviewPlayback}
+              onSeek={seekPreviewAudio}
+              onLoadedMetadata={(duration) => setAudioDuration(duration)}
+              onTimeUpdate={(currentTime) => setAudioCurrentTime(currentTime)}
+              onPlayingChange={setIsAudioPlaying}
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -419,6 +473,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               <SelectField label="采样率" value={String(settings.sample_rate)} options={SAMPLE_RATE_OPTIONS} onChange={(v) => updateSetting('sample_rate', Number(v))} />
               <SelectField label="码率" value={String(settings.bitrate)} options={BITRATE_OPTIONS} onChange={(v) => updateSetting('bitrate', Number(v))} />
               <SelectField label="声道" value={String(settings.channel)} options={CHANNEL_OPTIONS} onChange={(v) => updateSetting('channel', Number(v))} />
+              <NumberField label="失败重试" value={settings.retry_count} min={0} max={10} step={1} suffix="次" onChange={(v) => updateSetting('retry_count', Math.max(0, Math.round(v)))} />
+              <NumberField label="重试间隔" value={settings.retry_interval_ms} min={0} max={30000} step={100} suffix="ms" onChange={(v) => updateSetting('retry_interval_ms', Math.max(0, Math.round(v)))} />
             </div>
             {supportsMiniMaxAdvanced && (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -439,8 +495,13 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
             <SwitchField label="同时导出无配音字幕版" description="开启配音时额外保留一个只有字幕、没有配音的视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
-            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['segmented', '按字幕分段'], ['full', '整段生成']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
-            <SwitchField label="多人对话" description="字幕出现说话人标签时按映射选音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v, voice_mode: v ? 'segmented' : automationOptions.voice_mode }))} />
+            <SelectField label="生成方式" value={automationOptions.voice_mode} options={[['batched', '批量分段（推荐）'], ['full', '整段生成'], ['segmented', '逐句分段']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
+            <div className="grid gap-3 sm:grid-cols-3">
+              <NumberField label="批次条数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
+              <NumberField label="批次字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
+              <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+            </div>
+            <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
             <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['mix', '保留原声并混合'], ['replace', '替换原声']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             <SliderField label="原声音量" value={automationOptions.original_volume} min={0} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ original_volume: v }))} />
           </AccordionContent>
@@ -492,4 +553,78 @@ function NoticeBox({ notice }: { notice: PanelNotice }) {
     error: 'border-destructive/30 bg-destructive/10 text-destructive',
   }[notice.type]
   return <div className={cn('rounded-md border px-3 py-2 text-xs', classes)} role={notice.type === 'error' ? 'alert' : 'status'}>{notice.message}</div>
+}
+
+function VoicePreviewPlayer({
+  audioRef,
+  audioUrl,
+  isPlaying,
+  duration,
+  currentTime,
+  onToggle,
+  onSeek,
+  onLoadedMetadata,
+  onTimeUpdate,
+  onPlayingChange,
+}: {
+  audioRef: MutableRefObject<HTMLAudioElement | null>
+  audioUrl: string
+  isPlaying: boolean
+  duration: number
+  currentTime: number
+  onToggle: () => void
+  onSeek: (value: number) => void
+  onLoadedMetadata: (duration: number) => void
+  onTimeUpdate: (currentTime: number) => void
+  onPlayingChange: (playing: boolean) => void
+}) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0
+  const safeCurrentTime = Math.min(currentTime, safeDuration || currentTime)
+
+  return (
+    <div className="rounded-lg border bg-card/80 p-3">
+      <audio
+        ref={audioRef}
+        src={audioUrl}
+        preload="metadata"
+        onLoadedMetadata={(event) => onLoadedMetadata(event.currentTarget.duration || 0)}
+        onTimeUpdate={(event) => onTimeUpdate(event.currentTarget.currentTime || 0)}
+        onPlay={() => onPlayingChange(true)}
+        onPause={() => onPlayingChange(false)}
+        onEnded={() => onPlayingChange(false)}
+      >
+        <track kind="captions" />
+      </audio>
+      <div className="flex items-center gap-3">
+        <Button type="button" variant="outline" size="icon-sm" onClick={onToggle} aria-label={isPlaying ? '暂停试听' : '播放试听'}>
+          {isPlaying ? <Pause className="size-4" /> : <Play className="size-4" />}
+        </Button>
+        <div className="min-w-0 flex-1">
+          <input
+            type="range"
+            min={0}
+            max={safeDuration || 0}
+            step={0.01}
+            value={safeDuration ? safeCurrentTime : 0}
+            onChange={(event) => onSeek(Number(event.target.value))}
+            className="h-2 w-full accent-primary"
+            aria-label="试听进度"
+          />
+          <div className="mt-1 flex items-center justify-between text-xs tabular-nums text-muted-foreground">
+            <span>{formatAudioClock(safeCurrentTime)}</span>
+            <span>{formatAudioClock(safeDuration)}</span>
+          </div>
+        </div>
+        <Volume2 className="size-4 shrink-0 text-muted-foreground" />
+      </div>
+    </div>
+  )
+}
+
+function formatAudioClock(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
+  const total = Math.floor(seconds)
+  const minutes = Math.floor(total / 60)
+  const rest = String(total % 60).padStart(2, '0')
+  return `${minutes}:${rest}`
 }

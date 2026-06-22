@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+import wave
 from unittest.mock import AsyncMock, patch
 
 
@@ -125,7 +126,130 @@ class VoiceProfileTests(unittest.TestCase):
         """Gemini TTS 返回 PCM，试听文件需要封装为浏览器可播放的 WAV"""
         self.assertEqual(_audio_format_for_preview("gemini_tts", {"format": "mp3"}), "wav")
         self.assertEqual(VoiceEngine()._provider_audio_format("gemini_tts", {"format": "mp3"}), "wav")
-        self.assertEqual(_audio_format_for_preview("custom_tts", {"format": "mp3"}, "mimo-v2.5-tts"), "wav")
+        self.assertEqual(_audio_format_for_preview("custom_tts", {"format": "mp3"}, "mimo-v2.5-tts"), "mp3")
+        self.assertEqual(_audio_format_for_preview("custom_tts", {"format": "mp3"}, "gemini-3.1-flash-tts-preview"), "mp3")
+        self.assertEqual(
+            VoiceEngine()._provider_audio_format("custom_tts", {"format": "mp3"}, "gemini-3.1-flash-tts-preview"),
+            "mp3",
+        )
+
+    def test_openai_compatible_gemini_model_keeps_requested_format(self):
+        """OpenAI 兼容渠道由渠道决定协议，不能因为模型名包含 Gemini 就强行改格式"""
+        engine = VoiceEngine()
+        captured_payloads = []
+
+        class FakeResponse:
+            status_code = 200
+            content = b"RIFF" + (b"\0" * 2048)
+            headers = {"content-type": "audio/wav"}
+
+            @property
+            def text(self):
+                return ""
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *_args, **kwargs):
+                captured_payloads.append(kwargs["json"])
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory(prefix="voice_payload_") as temp_dir:
+            output_path = os.path.join(temp_dir, "voice.wav")
+            with patch("httpx.AsyncClient", FakeClient):
+                asyncio.run(engine._generate_openai_tts(
+                    text="格式测试",
+                    output_path=output_path,
+                    voice="Kore",
+                    api_key="key",
+                    base_url="https://api.example.com/v1",
+                    model="gemini-3.1-flash-tts-preview",
+                    settings={"format": "mp3"},
+                    provider_type="custom_tts",
+                ))
+
+        self.assertEqual(captured_payloads[0]["response_format"], "mp3")
+
+    def test_custom_openai_compatible_gemini_model_uses_openai_route(self):
+        """自定义 OpenAI 兼容渠道必须走 audio/speech，模型名不能改成 Gemini 协议"""
+        engine = VoiceEngine()
+        calls = {"openai": 0, "gemini": 0}
+
+        async def fake_openai(*_args, **_kwargs):
+            """记录 OpenAI 兼容调用"""
+            calls["openai"] += 1
+            return "ok.mp3"
+
+        async def fake_gemini(*_args, **_kwargs):
+            """如果走到 Gemini 分支，说明协议选择被模型名带偏"""
+            calls["gemini"] += 1
+            return "bad.wav"
+
+        with tempfile.TemporaryDirectory(prefix="voice_route_") as temp_dir:
+            output_path = os.path.join(temp_dir, "ignored.mp3")
+            with (
+                patch.object(engine, "_generate_openai_tts", side_effect=fake_openai),
+                patch.object(engine, "_generate_gemini_tts", side_effect=fake_gemini),
+                patch.object(engine, "_validate_voice_output"),
+            ):
+                result = asyncio.run(engine.generate_voice(
+                    text="OpenAI 兼容路由测试",
+                    output_path=output_path,
+                    provider_type="custom_tts",
+                    voice="Kore",
+                    api_key="key",
+                    base_url="https://api.example.com/v1",
+                    model="gemini-3.1-flash-tts-preview",
+                    settings={"format": "mp3", "retry_count": 0},
+                ))
+
+        self.assertEqual(result, "ok.mp3")
+        self.assertEqual(calls, {"openai": 1, "gemini": 0})
+
+    def test_custom_openai_compatible_requires_explicit_model(self):
+        """自定义 OpenAI 兼容不能静默回退默认模型，避免 NewAPI 分组模型不匹配"""
+        engine = VoiceEngine()
+
+        with tempfile.TemporaryDirectory(prefix="voice_custom_model_") as temp_dir:
+            output_path = os.path.join(temp_dir, "voice.mp3")
+            with self.assertRaises(ValueError) as context:
+                asyncio.run(engine._generate_openai_tts(
+                    text="缺少模型测试",
+                    output_path=output_path,
+                    voice="Kore",
+                    api_key="key",
+                    base_url="https://api.example.com/v1",
+                    model="",
+                    settings={"format": "mp3"},
+                    provider_type="custom_tts",
+                ))
+
+        self.assertIn("必须填写模型", str(context.exception))
+
+    def test_newapi_error_message_is_human_readable(self):
+        """NewAPI 返回 JSON 错误时，只展示真正的错误消息"""
+        class FakeResponse:
+            status_code = 503
+            text = '{"error":{"code":"model_not_found","message":"模型无可用渠道","type":"new_api_error"}}'
+
+            def json(self):
+                """模拟 NewAPI 错误响应"""
+                return {"error": {"code": "model_not_found", "message": "模型无可用渠道"}}
+
+        message = VoiceEngine()._response_error_message(FakeResponse())
+
+        self.assertEqual(message, "模型无可用渠道（model_not_found）")
+
+    def test_empty_exception_message_uses_exception_type(self):
+        """底层异常没有文本时也要给前端可读内容"""
+        self.assertEqual(VoiceEngine()._exception_message(TimeoutError()), "TimeoutError")
 
     def test_xiaomi_mimo_headers_support_newapi_bearer_token(self):
         """小米 MiMo 经过 NewAPI 时必须发送 Bearer Token，否则会被判定为 Invalid token"""
@@ -135,14 +259,14 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(headers["api-key"], "sk-test")
         self.assertEqual(headers["x-api-key"], "sk-test")
 
-    def test_mimo_model_uses_mimo_protocol_even_in_custom_channel(self):
-        """NewAPI 里的 MiMo 模型即使放在自定义渠道，也不能走 OpenAI audio/speech"""
-        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "mimo-v2.5-tts"), "xiaomi_mimo_tts")
-        self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "mimo-v2-tts"), "xiaomi_mimo_tts")
+    def test_model_name_does_not_override_selected_voice_provider(self):
+        """用户选择 OpenAI 兼容渠道时，不能因为模型名像其他渠道就隐式改协议"""
+        self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "mimo-v2.5-tts"), "custom_tts")
+        self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "mimo-v2-tts"), "openai_tts")
         self.assertEqual(VoiceEngine.resolve_provider_type("openai_tts", "gpt-4o-mini-tts"), "openai_tts")
 
     def test_gemini_tts_model_uses_gemini_voice_catalog_in_custom_channel(self):
-        """NewAPI 自定义渠道里选择 Gemini TTS 模型时，音色目录显示 Gemini 音色但调用仍走兼容协议"""
+        """自定义 OpenAI 兼容渠道不能因为模型名像 Gemini 就强行切换音色目录"""
         self.assertEqual(VoiceEngine.resolve_provider_type("custom_tts", "gemini-3.1-flash-tts-preview"), "custom_tts")
 
         result = asyncio.run(get_voice_catalog(VoiceCatalogRequest(
@@ -151,9 +275,8 @@ class VoiceProfileTests(unittest.TestCase):
         )))
 
         voice_ids = [voice["id"] for voice in result["voices"]]
-        self.assertIn("Kore", voice_ids)
-        self.assertIn("Puck", voice_ids)
-        self.assertNotIn("custom", voice_ids)
+        self.assertIn("custom", voice_ids)
+        self.assertNotIn("Kore", voice_ids)
 
     def test_generate_voice_retries_before_success(self):
         """配音生成遇到临时失败会按配置自动重试"""
@@ -218,6 +341,64 @@ class VoiceProfileTests(unittest.TestCase):
 
         self.assertEqual(result, output_path)
         self.assertEqual(calls["count"], 2)
+
+    def test_generate_voice_rejects_unreadable_audio_duration(self):
+        """接口返回不可解码音频时不能显示成功，否则前端播放器会变成 0:00"""
+        with tempfile.TemporaryDirectory(prefix="voice_bad_audio_") as temp_dir:
+            output_path = os.path.join(temp_dir, "bad.mp3")
+            engine = VoiceEngine()
+
+            async def fake_once(*_args, **_kwargs):
+                """写入大于 1KB 但不可播放的假音频"""
+                with open(output_path, "wb") as file:
+                    file.write(b"not-a-real-audio" * 200)
+                return output_path
+
+            with (
+                patch.object(engine, "_generate_voice_once", side_effect=fake_once),
+                patch.object(engine, "_audio_duration_seconds", return_value=None),
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    asyncio.run(engine.generate_voice(
+                        text="不可解码音频测试",
+                        output_path=output_path,
+                        provider_type="openai_tts",
+                        api_key="key",
+                        base_url="https://api.example.com/v1",
+                        model="gpt-4o-mini-tts",
+                        settings={"retry_count": 0},
+                    ))
+
+        self.assertIn("无法读取时长", str(context.exception))
+
+    def test_generate_voice_rejects_silent_wav_output(self):
+        """接口返回只有 WAV 头和静音数据时不能显示成功，否则试听播放器会是 0:00"""
+        with tempfile.TemporaryDirectory(prefix="voice_silent_audio_") as temp_dir:
+            output_path = os.path.join(temp_dir, "silent.wav")
+            engine = VoiceEngine()
+
+            async def fake_once(*_args, **_kwargs):
+                """写入足够大但没有声音的 WAV"""
+                with wave.open(output_path, "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(24000)
+                    wav_file.writeframes(b"\0" * 24000)
+                return output_path
+
+            with patch.object(engine, "_generate_voice_once", side_effect=fake_once):
+                with self.assertRaises(RuntimeError) as context:
+                    asyncio.run(engine.generate_voice(
+                        text="静音音频测试",
+                        output_path=output_path,
+                        provider_type="custom_tts",
+                        api_key="key",
+                        base_url="https://api.example.com/v1",
+                        model="gemini-3.1-flash-tts-preview",
+                        settings={"retry_count": 0, "format": "wav"},
+                    ))
+
+        self.assertIn("接近静音", str(context.exception))
 
 
 if __name__ == "__main__":

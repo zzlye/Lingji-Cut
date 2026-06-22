@@ -353,9 +353,12 @@ export interface AutomationPreferences {
   enable_voice: boolean
   export_subtitle_only_when_voice: boolean
   voice_profile_id: number | null
-  voice_mode: 'full' | 'segmented'
+  voice_mode: 'full' | 'batched' | 'segmented'
   audio_mode: 'replace' | 'mix'
   original_volume: number
+  voice_batch_size: number
+  voice_batch_chars: number
+  voice_concurrency: number
   multi_speaker_enabled: boolean
   voice_speakers: VoiceSpeakerProfile[]
   glossary_terms: GlossaryTerm[]
@@ -387,6 +390,8 @@ export interface VoiceGenerateSettings {
   timbre: number
   voice_pitch: number
   sound_effects: string
+  retry_count: number
+  retry_interval_ms: number
 }
 
 /** 固定值或随机范围 */

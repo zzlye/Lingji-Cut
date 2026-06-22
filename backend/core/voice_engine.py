@@ -18,6 +18,23 @@ from .tooling import get_ffmpeg_command
 logger = get_logger("voice")
 
 
+def resolve_voice_provider_type(provider_type: str, model: str = "") -> str:
+    """按用户选择的渠道决定真实调用协议，模型名只作为请求参数传递"""
+    return str(provider_type or "").strip()
+
+
+def provider_audio_format(provider_type: str, settings: dict[str, Any], model: str = "") -> str:
+    """按渠道读取音频格式；OpenAI 兼容渠道不根据模型名改协议或格式"""
+    normalized_provider = resolve_voice_provider_type(provider_type, model)
+    if normalized_provider == "gemini_tts":
+        return "wav"
+    if normalized_provider == "xiaomi_mimo_tts":
+        value = str((settings or {}).get("format") or "wav").lower()
+        return value if value in {"wav", "pcm16"} else "wav"
+    value = str((settings or {}).get("format") or "mp3").lower()
+    return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
+
+
 class VoiceEngine:
     """配音引擎"""
 
@@ -46,7 +63,7 @@ class VoiceEngine:
 
         options = settings or {}
         effective_provider_type = self.resolve_provider_type(provider_type, model)
-        audio_format = self._provider_audio_format(effective_provider_type, options)
+        audio_format = self._provider_audio_format(effective_provider_type, options, model)
         if output_path is None:
             output_path = os.path.join(ensure_project_dirs()["output_dir"], f"voice_output.{audio_format}")
 
@@ -94,7 +111,9 @@ class VoiceEngine:
                 if retry_interval_ms > 0:
                     await asyncio.sleep(retry_interval_ms / 1000)
 
-        raise RuntimeError(f"配音 API 重试次数已用完: {last_error}" if last_error else "配音 API 调用失败")
+        if last_error:
+            raise RuntimeError(f"配音 API 重试次数已用完: {self._exception_message(last_error)}")
+        raise RuntimeError("配音 API 调用失败")
 
     async def _generate_voice_once(
         self,
@@ -109,7 +128,7 @@ class VoiceEngine:
     ) -> str:
         """根据渠道类型执行一次配音请求"""
         if provider_type == "openai_tts":
-            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings)
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings, provider_type)
         if provider_type == "gemini_tts":
             return await self._generate_gemini_tts(text, output_path, voice, api_key, base_url, model, settings)
         if provider_type == "minimax_tts":
@@ -117,18 +136,89 @@ class VoiceEngine:
         if provider_type == "xiaomi_mimo_tts":
             return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, settings)
         if provider_type == "custom_tts":
-            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings)
+            return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings, provider_type)
 
         raise ValueError(f"不支持的 TTS 提供商: {provider_type}")
 
     @staticmethod
     def resolve_provider_type(provider_type: str, model: str = "") -> str:
-        """按模型修正真实调用协议，自定义兼容渠道默认仍走 OpenAI audio/speech"""
-        normalized_provider = str(provider_type or "").strip()
-        normalized_model = str(model or "").strip().lower()
-        if normalized_provider in {"openai_tts", "custom_tts"} and normalized_model.startswith("mimo-"):
-            return "xiaomi_mimo_tts"
-        return normalized_provider
+        """按用户选择的渠道决定真实调用协议，模型名只作为请求参数传递"""
+        return resolve_voice_provider_type(provider_type, model)
+
+    async def generate_batched_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        # 多人对话配音时按批次首段的说话人挑选音色；批次会避免跨音色合并。
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """按字幕批次生成配音，减少 TTS 请求次数并保留大致时间轴"""
+        normalized_segments = self._normalize_timed_segments(segments)
+        if not normalized_segments:
+            raise ValueError("没有可生成配音的字幕分段")
+
+        options = settings or {}
+        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        batches = self._batch_timed_segments(
+            normalized_segments,
+            batch_size=max(1, min(80, self._int(options.get("voice_batch_size"), 16))),
+            max_chars=max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800))),
+            voice_selector=voice_selector,
+            default_voice=voice,
+        )
+        if not batches:
+            raise ValueError("没有可生成配音的字幕批次")
+
+        concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
+        semaphore = asyncio.Semaphore(concurrency)
+        temp_dir = tempfile.mkdtemp(prefix="voice_batches_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
+        completed = 0
+        timed_audio_paths: list[dict[str, Any]] = []
+
+        async def generate_batch(index: int, batch: dict[str, Any]) -> dict[str, Any]:
+            """生成单个批次音频，外层负责并发调度"""
+            async with semaphore:
+                batch_path = os.path.join(temp_dir, f"batch_{index:04d}.{audio_format}")
+                await self.generate_voice(
+                    text=str(batch["text"]),
+                    output_path=batch_path,
+                    provider_type=provider_type,
+                    voice=str(batch.get("voice") or voice),
+                    api_key=api_key,
+                    base_url=base_url,
+                    model=model,
+                    settings=options,
+                )
+                return {
+                    "path": batch_path,
+                    "start_ms": int(batch["start_ms"]),
+                    "duration_ms": max(1, int(batch["end_ms"]) - int(batch["start_ms"])),
+                }
+
+        try:
+            tasks = [asyncio.create_task(generate_batch(index, batch)) for index, batch in enumerate(batches, 1)]
+            for task in asyncio.as_completed(tasks):
+                timed_audio_paths.append(await task)
+                completed += 1
+                if progress_callback:
+                    progress_callback(10 + completed / max(len(batches), 1) * 75)
+
+            timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
+            result = self.mix_timed_audio_files(timed_audio_paths, output_path)
+            if progress_callback:
+                progress_callback(95)
+            return result
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def generate_timed_voice_track(
         self,
@@ -153,7 +243,7 @@ class VoiceEngine:
             raise ValueError("没有可生成配音的字幕分段")
 
         options = settings or {}
-        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options)
+        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # 分段音频临时目录跟最终输出放在同一视频目录，避免又落回全局 output 里。
@@ -272,6 +362,7 @@ class VoiceEngine:
         base_url: str,
         model: str,
         settings: dict[str, Any],
+        provider_type: str = "openai_tts",
     ) -> str:
         """使用 OpenAI 兼容 TTS API 生成配音"""
         import httpx
@@ -283,12 +374,15 @@ class VoiceEngine:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        resolved_model = str(model or "").strip()
+        if provider_type == "custom_tts" and not resolved_model:
+            raise ValueError("自定义 OpenAI 兼容配音必须填写模型，请先选择或手动输入 NewAPI 中可用的 TTS 模型")
 
         payload: dict[str, Any] = {
-            "model": model or "gpt-4o-mini-tts",
+            "model": resolved_model or "gpt-4o-mini-tts",
             "input": text,
             "voice": voice,
-            "response_format": self._audio_format(settings),
+            "response_format": self._provider_audio_format(provider_type, settings, model),
             "speed": self._float(settings.get("speed"), 1.0),
         }
         instructions = settings.get("style_prompt")
@@ -303,10 +397,10 @@ class VoiceEngine:
             )
 
             if response.status_code != 200:
-                raise RuntimeError(f"OpenAI TTS 调用失败: {response.text}")
+                raise RuntimeError(f"OpenAI TTS 调用失败: {self._response_error_message(response)}")
             content_type = response.headers.get("content-type", "")
             if "json" in content_type.lower() or "text/" in content_type.lower():
-                raise RuntimeError(f"OpenAI TTS 未返回音频数据: {response.text[:300]}")
+                raise RuntimeError(f"OpenAI TTS 未返回音频数据: {self._response_error_message(response)}")
 
             with open(output_path, "wb") as file:
                 file.write(response.content)
@@ -357,7 +451,7 @@ class VoiceEngine:
             )
 
             if response.status_code != 200:
-                raise RuntimeError(f"Gemini TTS 调用失败: {response.text}")
+                raise RuntimeError(f"Gemini TTS 调用失败: {self._response_error_message(response)}")
 
             data = response.json()
             inline_data = data["candidates"][0]["content"]["parts"][0]["inlineData"]
@@ -424,7 +518,7 @@ class VoiceEngine:
             )
 
             if response.status_code != 200:
-                raise RuntimeError(f"MiniMax TTS 调用失败: {response.text}")
+                raise RuntimeError(f"MiniMax TTS 调用失败: {self._response_error_message(response)}")
 
             data = response.json()
             base_resp = data.get("base_resp") or {}
@@ -479,7 +573,7 @@ class VoiceEngine:
             )
 
             if response.status_code != 200:
-                raise RuntimeError(f"小米 MiMo TTS 调用失败: {response.text}")
+                raise RuntimeError(f"小米 MiMo TTS 调用失败: {self._response_error_message(response)}")
 
             data = response.json()
             message = data["choices"][0]["message"]
@@ -502,6 +596,33 @@ class VoiceEngine:
             "x-api-key": api_key,
             "Content-Type": "application/json",
         }
+
+    def _exception_message(self, exc: Exception) -> str:
+        """把空异常转换成可读文本，避免前端只显示空错误"""
+        message = str(exc).strip()
+        return message or exc.__class__.__name__
+
+    def _response_error_message(self, response: Any) -> str:
+        """提取 OpenAI/NewAPI 风格错误信息，减少前端展示整段 JSON"""
+        text = str(getattr(response, "text", "") or "").strip()
+        try:
+            data = response.json()
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+                code = str(error.get("code") or "").strip()
+                if message and code:
+                    return f"{message}（{code}）"
+                if message:
+                    return message
+            for key in ("message", "detail"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return text[:500] if text else f"HTTP {getattr(response, 'status_code', '未知状态')}"
 
     def merge_segments(self, audio_paths: List[str], output_path: str) -> str:
         """合并多个音频片段"""
@@ -551,14 +672,9 @@ class VoiceEngine:
         value = str(settings.get("format") or "mp3").lower()
         return value if value in {"mp3", "wav", "flac", "pcm", "opus"} else "mp3"
 
-    def _provider_audio_format(self, provider_type: str, settings: dict[str, Any]) -> str:
-        """按渠道读取音频格式"""
-        if provider_type == "gemini_tts":
-            return "wav"
-        if provider_type == "xiaomi_mimo_tts":
-            value = str(settings.get("format") or "wav").lower()
-            return value if value in {"wav", "pcm16"} else "wav"
-        return self._audio_format(settings)
+    def _provider_audio_format(self, provider_type: str, settings: dict[str, Any], model: str = "") -> str:
+        """按渠道读取音频格式；OpenAI 兼容渠道不根据模型名改协议或格式"""
+        return provider_audio_format(provider_type, settings, model)
 
     def _write_gemini_audio(self, output_path: str, audio_bytes: bytes, mime_type: Optional[str]) -> None:
         """写入 Gemini TTS 音频，裸 PCM 自动封装为 WAV 方便浏览器播放"""
@@ -590,6 +706,56 @@ class VoiceEngine:
                 "end_ms": max(start_ms + 1, end_ms),
             })
         return normalized
+
+    def _batch_timed_segments(
+        self,
+        segments: list[dict[str, Any]],
+        batch_size: int,
+        max_chars: int,
+        voice_selector: Optional[Callable[[dict[str, Any]], str]],
+        default_voice: str,
+    ) -> list[dict[str, Any]]:
+        """把相邻字幕合并成批次；不同音色不跨批，避免多人对话串音"""
+        batches: list[dict[str, Any]] = []
+        current: list[dict[str, Any]] = []
+        current_voice = ""
+        current_chars = 0
+        safe_batch_size = max(1, batch_size)
+        safe_max_chars = max(100, max_chars)
+
+        def flush() -> None:
+            """提交当前批次"""
+            nonlocal current, current_voice, current_chars
+            if not current:
+                return
+            batches.append({
+                "text": "\n".join(str(item["text"]) for item in current if str(item.get("text") or "").strip()),
+                "voice": current_voice or default_voice,
+                "start_ms": int(current[0]["start_ms"]),
+                "end_ms": int(current[-1]["end_ms"]),
+                "count": len(current),
+            })
+            current = []
+            current_voice = ""
+            current_chars = 0
+
+        for segment in segments:
+            segment_voice = voice_selector(segment) if voice_selector else default_voice
+            segment_voice = str(segment_voice or default_voice)
+            text_len = len(str(segment.get("text") or ""))
+            should_flush = bool(current) and (
+                segment_voice != current_voice
+                or len(current) >= safe_batch_size
+                or current_chars + text_len > safe_max_chars
+            )
+            if should_flush:
+                flush()
+            current.append(segment)
+            current_voice = segment_voice
+            current_chars += text_len
+
+        flush()
+        return [batch for batch in batches if str(batch.get("text") or "").strip()]
 
     def _normalize_timed_audio_paths(self, timed_audio_paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """清理带时间轴的音频路径"""
@@ -625,9 +791,24 @@ class VoiceEngine:
         size = os.path.getsize(output_path)
         if size < 1024:
             raise RuntimeError(f"配音音频文件过小: {size} bytes")
+        if self._looks_like_json_or_text(output_path):
+            raise RuntimeError("配音接口返回的不是可播放音频")
         duration = self._audio_duration_seconds(output_path)
-        if duration is not None and duration < 0.12:
+        if duration is None:
+            raise RuntimeError("配音音频无法读取时长，可能不是浏览器可播放格式")
+        if duration < 0.12:
             raise RuntimeError(f"配音音频时长异常: {duration:.2f}s")
+        if self._is_probably_silent_wav(output_path):
+            raise RuntimeError("配音音频为空或接近静音，接口可能没有真正生成语音")
+
+    def _looks_like_json_or_text(self, output_path: str) -> bool:
+        """粗略识别 API 把错误 JSON/文本写成音频文件的情况"""
+        try:
+            with open(output_path, "rb") as file:
+                head = file.read(64).lstrip()
+        except OSError:
+            return False
+        return head.startswith((b"{", b"[", b"<")) or head[:16].lower().startswith((b"error", b"invalid"))
 
     def _audio_duration_seconds(self, output_path: str) -> Optional[float]:
         """优先用 ffprobe 读取音频时长，失败时对 WAV 做轻量兜底解析"""
@@ -663,6 +844,35 @@ class VoiceEngine:
                 return wav_file.getnframes() / rate if rate else None
         except Exception:
             return None
+
+    def _is_probably_silent_wav(self, output_path: str) -> bool:
+        """检测 WAV 是否全静音，避免 0:00 或空白试听被误判为成功"""
+        if os.path.splitext(output_path)[1].lower() != ".wav":
+            return False
+        try:
+            with wave.open(output_path, "rb") as wav_file:
+                sample_width = wav_file.getsampwidth()
+                frame_rate = wav_file.getframerate() or 24000
+                frame_count = min(wav_file.getnframes(), max(frame_rate * 3, 1))
+                audio_data = wav_file.readframes(frame_count)
+        except Exception:
+            return False
+
+        if not audio_data:
+            return True
+        if all(byte == 0 for byte in audio_data):
+            return True
+        if sample_width != 2:
+            return False
+
+        max_amplitude = 0
+        usable_length = len(audio_data) - (len(audio_data) % 2)
+        for index in range(0, usable_length, 2):
+            sample = int.from_bytes(audio_data[index:index + 2], "little", signed=True)
+            max_amplitude = max(max_amplitude, abs(sample))
+            if max_amplitude > 8:
+                return False
+        return True
 
     def _remove_partial_output(self, output_path: str) -> None:
         """重试前清理上一次失败留下的半成品音频"""

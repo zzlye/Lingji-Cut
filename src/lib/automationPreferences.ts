@@ -34,9 +34,12 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   enable_voice: false,
   export_subtitle_only_when_voice: false,
   voice_profile_id: null,
-  voice_mode: 'segmented',
+  voice_mode: 'batched',
   audio_mode: 'mix',
   original_volume: 0.25,
+  voice_batch_size: 16,
+  voice_batch_chars: 1800,
+  voice_concurrency: 2,
   multi_speaker_enabled: false,
   voice_speakers: [
     { id: 'narrator', label: '旁白', voice: 'alloy', sample_text: '旁白负责解释画面和推进节奏。' },
@@ -102,6 +105,20 @@ function normalizeBannedWords(value: unknown): string[] {
   return Array.from(new Set(raw.map((item) => String(item).trim()).filter(Boolean)))
 }
 
+/** 规范一键配音生成模式，旧版 segmented 继续保留 */
+function normalizeVoiceMode(value: unknown): AutomationPreferences['voice_mode'] {
+  const mode = String(value || '')
+  return ['full', 'batched', 'segmented'].includes(mode)
+    ? mode as AutomationPreferences['voice_mode']
+    : DEFAULT_AUTOMATION_PREFERENCES.voice_mode
+}
+
+/** 规范配音批处理数值，避免缓存里写入过大值拖垮接口 */
+function normalizeVoiceNumber(value: unknown, defaultValue: number, min: number, max: number): number {
+  const numberValue = Math.round(Number(value ?? defaultValue))
+  return Math.min(max, Math.max(min, Number.isFinite(numberValue) ? numberValue : defaultValue))
+}
+
 /** 规范最终导出设置，保证旧缓存升级后仍有完整默认值 */
 function normalizeExportSettings(value: unknown): AutomationPreferences['export_settings'] {
   const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -153,7 +170,11 @@ export function loadAutomationPreferences(): AutomationPreferences {
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),
       voice_profile_id: normalizeId(parsed.voice_profile_id),
+      voice_mode: normalizeVoiceMode(parsed.voice_mode),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
+      voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
+      voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
+      voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
       voice_speakers: normalizeVoiceSpeakers(parsed.voice_speakers),
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),

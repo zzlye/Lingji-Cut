@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..core import VoiceEngine
+from ..core.voice_engine import provider_audio_format
 from ..models import get_db, TextProviderProfile, VoiceProviderProfile
 from ..utils import encrypt_api_key, decrypt_api_key
 from .voice import VOICE_CATALOGS
@@ -347,8 +348,11 @@ async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> No
             settings = {}
     voice = settings.get("voice") or _default_voice_id(profile.provider_type)
     model = profile.voice or _default_voice_model(profile.provider_type)
-    effective_provider_type = VoiceEngine.resolve_provider_type(profile.provider_type, model)
-    audio_format = "wav" if effective_provider_type == "xiaomi_mimo_tts" else str(settings.get("format") or "mp3")
+    audio_format = provider_audio_format(
+        VoiceEngine.resolve_provider_type(profile.provider_type, model),
+        settings,
+        model,
+    )
     output_path = os.path.join(tempfile.gettempdir(), f"youtube_voice_test_{profile.id}.{audio_format}")
     engine = VoiceEngine()
     await engine.generate_voice(
