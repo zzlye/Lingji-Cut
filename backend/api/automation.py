@@ -112,9 +112,9 @@ def _control_keys(job: Optional[AutomationJobRecord] = None, task: Optional[Down
 
 
 def _normalize_audio_mode(value: Any) -> str:
-    """规范配音合成模式，默认保留原视频声音"""
+    """规范配音合成模式，默认用本地 AI 去人声保留背景声"""
     mode = str(value or "").strip().lower()
-    return mode if mode in {"mix", "replace", "background"} else "mix"
+    return mode if mode in {"mix", "replace", "background"} else "background"
 
 
 def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
@@ -172,7 +172,7 @@ class AutomationRunRequest(BaseModel):
     voice_profile_id: Optional[int] = None
     voice_text: Optional[str] = None
     voice_mode: str = "batched"
-    audio_mode: str = "mix"
+    audio_mode: str = "background"
     original_volume: float = 0.25
     voice_batch_size: int = 16
     voice_batch_chars: int = 1800

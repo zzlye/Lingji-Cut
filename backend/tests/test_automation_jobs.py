@@ -2895,8 +2895,8 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.settings["voice_batch_chars"], 1800)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
         self.assertEqual(voice_engine.settings["speed"], 1.0)
-        self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
-        self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 0.25)
+        self.assertEqual(fake_processor.merge_calls[0]["mode"], "background")
+        self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 1.0)
 
     def test_automation_voice_legacy_grouped_mode_uses_smart_timeline(self):
         """旧分组参数会被兼容接收，但一键配音统一走智能时间轴"""
@@ -3005,8 +3005,8 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.settings["voice_batch_chars"], 1800)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
 
-    def test_automation_voice_invalid_audio_mode_falls_back_to_mix(self):
-        """一键配音遇到异常音频模式时默认混合原声，避免误静音 BGM 和游戏声音"""
+    def test_automation_voice_invalid_audio_mode_falls_back_to_background(self):
+        """一键配音遇到异常音频模式时默认 AI 去人声，避免把原人声混回成片"""
         with tempfile.TemporaryDirectory(prefix="automation_voice_audio_mode_") as temp_dir:
             downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
             with open(downloaded_path, "wb") as file:
@@ -3065,7 +3065,7 @@ class AutomationJobTests(unittest.TestCase):
                     FakeDb([]),
                 )
 
-        self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
+        self.assertEqual(fake_processor.merge_calls[0]["mode"], "background")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 1.0)
 
     def test_background_audio_mode_keeps_ai_background_at_full_volume(self):
@@ -3073,6 +3073,58 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(_audio_merge_volume("background", 0.25), 1.0)
         self.assertEqual(_audio_merge_volume("background", 0), 1.0)
         self.assertEqual(_audio_merge_volume("mix", 0.25), 0.25)
+
+    def test_subtitle_only_flow_does_not_sync_to_voice_timeline(self):
+        """不开配音时字幕烧录只使用字幕时间轴，不读取配音元数据"""
+        with tempfile.TemporaryDirectory(prefix="automation_subtitle_only_no_voice_sync_") as temp_dir:
+            downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
+            with open(downloaded_path, "wb") as file:
+                file.write(b"video")
+            fake_downloader = FakeAutomationDownloader(downloaded_path)
+            fake_processor = FakeAutomationProcessor(temp_dir)
+            video = VideoSource(id=1, platform="youtube", video_id="subtitle-only", url="https://example.test/video", title="字幕-only")
+            task_ids = iter(range(150, 165))
+            workspace_paths = {
+                "workspace_dir": temp_dir,
+                "workspace_name": "subtitle-only",
+                "downloads_dir": temp_dir,
+                "output_dir": temp_dir,
+                "exports_dir": temp_dir,
+            }
+
+            def fake_create_task(_db, video_id, task_type, params=None, parent_job_id=None):
+                """创建测试任务对象"""
+                task = DownloadTask(video_id=video_id, task_type=task_type, params=json.dumps(params or {}, ensure_ascii=False), parent_job_id=parent_job_id)
+                task.id = next(task_ids)
+                return task
+
+            with (
+                patch("backend.api.automation.assert_required_tools_available"),
+                patch("backend.api.automation.Downloader", return_value=fake_downloader),
+                patch("backend.api.automation.FFmpegProcessor", return_value=fake_processor),
+                patch("backend.api.automation.LocalSpeechRecognizer", return_value=FakeAutomationRecognizer()),
+                patch("backend.api.automation.CoreVoiceEngine.load_timeline_metadata", side_effect=AssertionError("字幕-only 不应读取配音时间轴")),
+                patch("backend.api.automation._parse_or_update_video", return_value=video),
+                patch("backend.api.automation._create_task", side_effect=fake_create_task),
+                patch("backend.api.automation._pick_subtitle_preset", return_value=None),
+                patch("backend.api.automation._pick_text_profile", return_value=None),
+                patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
+            ):
+                response = _run_automation_sync(
+                    AutomationRunRequest(
+                        url=video.url,
+                        enable_effects=False,
+                        enable_voice=False,
+                        burn_subtitles=True,
+                        output_format="mp4",
+                    ),
+                    FakeDb([]),
+                )
+
+        stage_by_key = {stage.key: stage for stage in response.stages}
+        self.assertEqual(stage_by_key["voice"].status, "skipped")
+        self.assertEqual(len(fake_processor.merge_calls), 0)
+        self.assertTrue(fake_processor.burn_calls)
 
     def test_automation_voice_failure_stops_for_resume(self):
         """配音重试耗尽后停在配音阶段，不应导出无配音视频"""

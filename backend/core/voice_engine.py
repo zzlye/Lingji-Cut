@@ -270,7 +270,7 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """VideoLingo 式配音：生成真实音频、按块规划新时间轴、再顺序拼接整轨"""
+        """智能配音：逐条生成真实音频，再按真实尾音顺序拼接整轨"""
         normalized_segments = self._normalize_timed_segments(segments)
         if not normalized_segments:
             raise ValueError("没有可生成配音的字幕分段")
@@ -334,7 +334,7 @@ class VoiceEngine:
                         progress_callback(10 + completed / max(total, 1) * 70)
                 index_offset += len(chunk)
 
-            timed_audio_paths = self._plan_videolingo_dubbing_timeline(timed_audio_paths, options, temp_dir)
+            timed_audio_paths = self._plan_smart_dubbing_timeline(timed_audio_paths, options, temp_dir)
             if progress_callback:
                 progress_callback(88)
             result = self.stitch_timed_audio_files(timed_audio_paths, output_path)
@@ -1321,8 +1321,8 @@ class VoiceEngine:
         settings: dict[str, Any],
         temp_dir: str,
     ) -> list[dict[str, Any]]:
-        """旧函数名兼容：统一走 VideoLingo 式配音时间轴"""
-        return self._plan_videolingo_dubbing_timeline(timed_audio_paths, settings, temp_dir)
+        """旧函数名兼容：统一走智能配音时间轴"""
+        return self._plan_smart_dubbing_timeline(timed_audio_paths, settings, temp_dir)
 
     def _plan_videolingo_dubbing_timeline(
         self,
@@ -1330,7 +1330,16 @@ class VoiceEngine:
         settings: dict[str, Any],
         temp_dir: str,
     ) -> list[dict[str, Any]]:
-        """按真实音频时长重排配音时间轴，不漏句、不叠句、不截断"""
+        """旧函数名兼容：统一走智能配音时间轴"""
+        return self._plan_smart_dubbing_timeline(timed_audio_paths, settings, temp_dir)
+
+    def _plan_smart_dubbing_timeline(
+        self,
+        timed_audio_paths: list[dict[str, Any]],
+        settings: dict[str, Any],
+        temp_dir: str,
+    ) -> list[dict[str, Any]]:
+        """按逐句真实音频排队，轻微超时才自动提速，绝不裁切或混叠"""
         items = sorted(
             self._normalize_timed_audio_paths(timed_audio_paths),
             key=lambda value: self._int(value.get("start_ms"), 0),
@@ -1339,70 +1348,67 @@ class VoiceEngine:
             return []
 
         min_gap_ms = self._voice_min_gap_ms(settings)
-        tolerance_ms = max(0, min(5000, self._int(settings.get("voice_tolerance_ms"), 1500)))
-        accept = max(1.0, min(1.4, self._float(settings.get("voice_speed_accept", settings.get("voice_max_speed")), 1.12)))
-        max_speed = max(accept, min(1.5, self._float(settings.get("voice_speed_max", settings.get("voice_max_speed")), accept)))
-        min_speed = max(0.7, min(1.2, self._float(settings.get("voice_speed_min"), 1.0)))
-        max_chunk_lines = max(1, min(8, self._int(settings.get("voice_chunk_max_lines"), 4)))
-
-        prepared = self._prepare_videolingo_items(items, tolerance_ms)
-        chunks = self._build_stable_voice_chunks(prepared, tolerance_ms, max_chunk_lines)
+        max_auto_speed = self._voice_auto_speed_max(settings)
         planned: list[dict[str, Any]] = []
         previous_audio_end_ms: Optional[int] = None
 
-        for chunk_index, chunk in enumerate(chunks):
-            speed_factor, keep_gaps = self._videolingo_chunk_speed(chunk, accept, min_speed)
-            speed_factor = max(min_speed, min(max_speed, speed_factor))
-            if speed_factor < 1.01:
-                speed_factor = 1.0
-
-            chunk_start_ms = self._int(chunk[0].get("original_start_ms"), chunk[0].get("start_ms", 0))
+        for index, item in enumerate(items):
+            planned_item = dict(item)
+            original_start_ms = max(0, self._int(planned_item.get("original_start_ms"), planned_item.get("start_ms", 0)))
+            start_ms = original_start_ms
             if previous_audio_end_ms is not None:
-                chunk_start_ms = max(chunk_start_ms, previous_audio_end_ms + min_gap_ms)
-            cursor_ms = chunk_start_ms
+                start_ms = max(start_ms, previous_audio_end_ms + min_gap_ms)
 
-            for item_index, item in enumerate(chunk):
-                original_start_ms = max(0, self._int(item.get("original_start_ms"), item.get("start_ms", 0)))
-                if item_index > 0 and keep_gaps:
-                    previous_gap_ms = max(0, self._int(chunk[item_index - 1].get("gap_ms"), 0))
-                    cursor_ms += int(previous_gap_ms / max(speed_factor, 0.1))
-                cursor_ms = max(cursor_ms, original_start_ms)
+            source_duration_ms = max(1, self._int(planned_item.get("source_duration_ms"), planned_item.get("duration_ms", 0)))
+            next_original_start_ms = self._next_original_start_ms(items, index)
+            speed_factor = 1.0
 
-                planned_item = dict(item)
-                source_duration_ms = max(1, self._int(planned_item.get("source_duration_ms"), planned_item.get("duration_ms", 0)))
-
-                if abs(speed_factor - 1.0) > 0.01:
+            if next_original_start_ms is not None:
+                available_ms = max(1, next_original_start_ms - min_gap_ms - start_ms)
+                needed_speed = source_duration_ms / available_ms
+                if 1.01 <= needed_speed <= max_auto_speed:
                     speed_path = self._speed_adjust_audio(
                         str(planned_item["path"]),
                         temp_dir,
-                        suffix=f"chunk_{chunk_index:04d}_{item_index:04d}",
-                        speed_factor=speed_factor,
+                        suffix=f"smart_{index:04d}",
+                        speed_factor=needed_speed,
                     )
                     planned_item["path"] = speed_path
                     adjusted_duration = self._audio_duration_seconds(speed_path)
-                    source_duration_ms = max(1, int((adjusted_duration or (source_duration_ms / speed_factor / 1000)) * 1000))
+                    source_duration_ms = max(1, int((adjusted_duration or (source_duration_ms / needed_speed / 1000)) * 1000))
+                    speed_factor = needed_speed
 
-                if previous_audio_end_ms is not None:
-                    cursor_ms = max(cursor_ms, previous_audio_end_ms + min_gap_ms)
+            planned_item["original_start_ms"] = original_start_ms
+            planned_item["start_ms"] = start_ms
+            planned_item["source_duration_ms"] = source_duration_ms
+            planned_item["real_duration_ms"] = source_duration_ms
+            planned_item["audio_end_ms"] = start_ms + source_duration_ms
+            planned_item["speed_factor"] = round(speed_factor, 3)
 
-                planned_item["original_start_ms"] = original_start_ms
-                planned_item["start_ms"] = cursor_ms
-                planned_item["source_duration_ms"] = source_duration_ms
-                planned_item["real_duration_ms"] = source_duration_ms
-                planned_item["audio_end_ms"] = cursor_ms + source_duration_ms
-                planned_item["speed_factor"] = round(speed_factor, 3)
-                planned_item["keep_gaps"] = keep_gaps
-                planned_item["chunk_index"] = chunk_index
+            shift_ms = start_ms - original_start_ms
+            if shift_ms > 500:
+                logger.warning(f"配音片段按真实时长顺延 {shift_ms}ms（原 {original_start_ms}ms → {start_ms}ms）")
 
-                shift_ms = cursor_ms - original_start_ms
-                if shift_ms > 500:
-                    logger.warning(f"配音片段按真实时长顺延 {shift_ms}ms（原 {original_start_ms}ms → {cursor_ms}ms）")
-
-                planned.append(planned_item)
-                previous_audio_end_ms = planned_item["audio_end_ms"]
-                cursor_ms = previous_audio_end_ms
+            planned.append(planned_item)
+            previous_audio_end_ms = planned_item["audio_end_ms"]
 
         return planned
+
+    def _voice_auto_speed_max(self, settings: dict[str, Any]) -> float:
+        """读取智能配音的自动轻微提速上限，默认最多 1.12 倍"""
+        raw_value = settings.get("voice_auto_speed_max") if isinstance(settings, dict) else None
+        if raw_value is None:
+            raw_value = settings.get("voice_speed_max") if isinstance(settings, dict) else None
+        if raw_value is None:
+            raw_value = settings.get("voice_max_speed") if isinstance(settings, dict) else None
+        return max(1.0, min(1.2, self._float(raw_value, 1.12)))
+
+    def _next_original_start_ms(self, items: list[dict[str, Any]], index: int) -> Optional[int]:
+        """读取下一条字幕原始开始时间，用于判断是否需要轻微提速避让"""
+        if index + 1 >= len(items):
+            return None
+        next_item = items[index + 1]
+        return max(0, self._int(next_item.get("original_start_ms"), next_item.get("start_ms", 0)))
 
     def _prepare_videolingo_items(self, items: list[dict[str, Any]], tolerance_ms: int) -> list[dict[str, Any]]:
         """补齐 VideoLingo 任务表需要的时长、间隔、容忍窗口和预估朗读时长
