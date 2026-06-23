@@ -2078,11 +2078,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _sync_subtitle_entries_to_voice_timeline(
     entries: list[dict[str, Any]],
     voice_timeline: list[dict[str, Any]],
-    max_extension_ms: int = 1200,
     tail_padding_ms: int = 120,
     min_gap_ms: int = 60,
 ) -> list[dict[str, Any]]:
-    """按真实配音尾音延长字幕显示时间，避免话还没说完字幕先消失"""
+    """按真实配音时间轴同步字幕，避免配音顺延后字幕仍停在旧时间"""
     if not entries or not voice_timeline:
         return [dict(entry) for entry in entries]
 
@@ -2130,9 +2129,15 @@ def _sync_subtitle_entries_to_voice_timeline(
             if voice_start_ms > start_ms + 120:
                 start_ms = voice_start_ms
         if desired_end_ms > end_ms:
-            desired_end_ms = min(desired_end_ms, end_ms + max_extension_ms)
             if next_start_ms is not None and next_start_ms > start_ms:
-                desired_end_ms = min(desired_end_ms, max(end_ms, next_start_ms - min_gap_ms))
+                next_voice_start_ms = None
+                for segment in segments:
+                    if segment.get("original_start_ms", segment["start_ms"]) > end_ms + 80:
+                        next_voice_start_ms = segment["start_ms"]
+                        break
+                next_limit_ms = next_voice_start_ms if next_voice_start_ms is not None else next_start_ms
+                if next_limit_ms > start_ms:
+                    desired_end_ms = min(desired_end_ms, max(start_ms + 1, next_limit_ms - min_gap_ms))
 
         next_entry = dict(entry)
         next_entry["index"] = len(synced) + 1

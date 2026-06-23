@@ -1203,14 +1203,13 @@ class VoiceEngine:
         return merged
 
     def _settings_with_timing_prompt(self, settings: dict[str, Any], style_prompt: str, window_ms: int) -> dict[str, Any]:
-        """给单条配音追加目标时长提示，让 TTS 模型尽量贴近字幕窗口
-
-        参考 VideoLingo 的思路：给出明确的目标时长，但不过度压制情绪风格。
-        后续还有速度调整兜底，所以这里主要是引导 TTS 生成合理长度的音频。
-        """
+        """给单条配音追加参考时长提示，优先保证自然完整，不强迫模型硬卡点"""
         target_seconds = max(0.3, window_ms / 1000.0)
-        # 明确告诉 TTS 模型目标时长，让它尽量控制语速
-        timing_prompt = f"请在 {target_seconds:.1f} 秒内自然说完以上内容，语速适中，不要刻意拖慢或加快。"
+        # 这里只做轻提示，后续时间轴会兜底顺延；不要逼模型把一句话压到不自然。
+        timing_prompt = (
+            f"参考字幕显示时长约 {target_seconds:.1f} 秒。"
+            "请自然、完整、有情绪地说完，不要拖长停顿，也不要为了卡时长硬读快。"
+        )
         base_style = str(style_prompt or settings.get("style_prompt") or "").strip()
         merged = dict(settings)
         merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
@@ -1331,15 +1330,7 @@ class VoiceEngine:
         settings: dict[str, Any],
         temp_dir: str,
     ) -> list[dict[str, Any]]:
-        """按 VideoLingo 的任务表思路重排配音时间轴，不裁掉还没说完的语音
-
-        完整流程（参考 VideoLingo 的 _8_2_dub_chunks + _10_gen_audio）：
-        1. 补齐 gap、tolerance、est_dur 等字段
-        2. 按 if_too_fast 标志分块
-        3. 对每个块计算速度因子
-        4. 对每条音频做变速处理
-        5. 按新时间轴排列
-        """
+        """按真实音频时长重排配音时间轴，不漏句、不叠句、不截断"""
         items = sorted(
             self._normalize_timed_audio_paths(timed_audio_paths),
             key=lambda value: self._int(value.get("start_ms"), 0),
@@ -1347,43 +1338,39 @@ class VoiceEngine:
         if not items:
             return []
 
-        # 读取配置参数
         min_gap_ms = self._voice_min_gap_ms(settings)
         tolerance_ms = max(0, min(5000, self._int(settings.get("voice_tolerance_ms"), 1500)))
-        accept = max(1.0, min(1.8, self._float(settings.get("voice_speed_accept", settings.get("voice_max_speed")), 1.2)))
-        max_speed = max(accept, min(2.0, self._float(settings.get("voice_speed_max", settings.get("voice_max_speed")), max(accept, 1.4))))
+        accept = max(1.0, min(1.4, self._float(settings.get("voice_speed_accept", settings.get("voice_max_speed")), 1.12)))
+        max_speed = max(accept, min(1.5, self._float(settings.get("voice_speed_max", settings.get("voice_max_speed")), accept)))
         min_speed = max(0.7, min(1.2, self._float(settings.get("voice_speed_min"), 1.0)))
-        max_merge_count = max(1, min(8, self._int(settings.get("voice_chunk_max_lines"), 5)))
+        max_chunk_lines = max(1, min(8, self._int(settings.get("voice_chunk_max_lines"), 4)))
 
-        # 第一步：补齐 VideoLingo 任务表字段（gap、tolerance、est_dur、if_too_fast）
         prepared = self._prepare_videolingo_items(items, tolerance_ms)
-        # 第二步：按 if_too_fast 和 gap 分块
-        chunks = self._build_videolingo_chunks(prepared, accept, tolerance_ms, max_merge_count)
-        # 第三步：逐块计算速度因子、变速、规划新时间轴
+        chunks = self._build_stable_voice_chunks(prepared, tolerance_ms, max_chunk_lines)
         planned: list[dict[str, Any]] = []
         previous_audio_end_ms: Optional[int] = None
 
         for chunk_index, chunk in enumerate(chunks):
-            # 计算块级速度因子
             speed_factor, keep_gaps = self._videolingo_chunk_speed(chunk, accept, min_speed)
             speed_factor = max(min_speed, min(max_speed, speed_factor))
+            if speed_factor < 1.01:
+                speed_factor = 1.0
 
-            # 确定块起始时间：优先用原始起始时间，但不能早于上一块结束时间 + 间隔
             chunk_start_ms = self._int(chunk[0].get("original_start_ms"), chunk[0].get("start_ms", 0))
             if previous_audio_end_ms is not None:
                 chunk_start_ms = max(chunk_start_ms, previous_audio_end_ms + min_gap_ms)
             cursor_ms = chunk_start_ms
 
             for item_index, item in enumerate(chunk):
-                # 保留原字幕间隔（按速度因子缩放）
+                original_start_ms = max(0, self._int(item.get("original_start_ms"), item.get("start_ms", 0)))
                 if item_index > 0 and keep_gaps:
                     previous_gap_ms = max(0, self._int(chunk[item_index - 1].get("gap_ms"), 0))
                     cursor_ms += int(previous_gap_ms / max(speed_factor, 0.1))
+                cursor_ms = max(cursor_ms, original_start_ms)
 
                 planned_item = dict(item)
                 source_duration_ms = max(1, self._int(planned_item.get("source_duration_ms"), planned_item.get("duration_ms", 0)))
 
-                # 对音频做变速处理
                 if abs(speed_factor - 1.0) > 0.01:
                     speed_path = self._speed_adjust_audio(
                         str(planned_item["path"]),
@@ -1395,12 +1382,9 @@ class VoiceEngine:
                     adjusted_duration = self._audio_duration_seconds(speed_path)
                     source_duration_ms = max(1, int((adjusted_duration or (source_duration_ms / speed_factor / 1000)) * 1000))
 
-                # 确保不早于上一条结束 + 间隔
                 if previous_audio_end_ms is not None:
                     cursor_ms = max(cursor_ms, previous_audio_end_ms + min_gap_ms)
 
-                # 记录新时间轴
-                original_start_ms = max(0, self._int(planned_item.get("original_start_ms"), planned_item.get("start_ms", 0)))
                 planned_item["original_start_ms"] = original_start_ms
                 planned_item["start_ms"] = cursor_ms
                 planned_item["source_duration_ms"] = source_duration_ms
@@ -1418,56 +1402,7 @@ class VoiceEngine:
                 previous_audio_end_ms = planned_item["audio_end_ms"]
                 cursor_ms = previous_audio_end_ms
 
-            # 块结束后检查是否超出容忍范围，必要时截断最后一条音频的尾音
-            chunk_end_ms = self._int(chunk[-1].get("end_ms"), 0) + max(0, self._int(chunk[-1].get("tolerance_ms"), 0))
-            if previous_audio_end_ms is not None and previous_audio_end_ms > chunk_end_ms:
-                overrun_ms = previous_audio_end_ms - chunk_end_ms
-                # 允许 0.6 秒的溢出，超出则截断最后一条音频
-                if overrun_ms > 600 and len(planned) > 0:
-                    last_planned = planned[-1]
-                    last_path = str(last_planned.get("path") or "")
-                    last_source_ms = max(1, self._int(last_planned.get("source_duration_ms"), 0))
-                    trim_to_ms = max(500, last_source_ms - overrun_ms)
-                    if last_path and os.path.exists(last_path) and trim_to_ms < last_source_ms:
-                        trimmed_path = os.path.join(temp_dir, f"chunk_{chunk_index:04d}_trim.wav")
-                        if self._trim_audio(last_path, trimmed_path, trim_to_ms):
-                            last_planned["path"] = trimmed_path
-                            last_planned["source_duration_ms"] = trim_to_ms
-                            last_planned["real_duration_ms"] = trim_to_ms
-                            last_planned["audio_end_ms"] = last_planned["start_ms"] + trim_to_ms
-                            previous_audio_end_ms = last_planned["audio_end_ms"]
-                            logger.warning(f"块 {chunk_index} 溢出 {overrun_ms}ms，已截断最后一条音频至 {trim_to_ms}ms")
-
         return planned
-
-    def _trim_audio(self, input_path: str, output_path: str, trim_to_ms: int) -> bool:
-        """截断音频到指定时长，用于块溢出时的尾音裁剪"""
-        try:
-            duration_seconds = max(0.001, trim_to_ms / 1000)
-            cmd = [
-                self._ffmpeg_cmd(),
-                "-i", input_path,
-                "-t", f"{duration_seconds:.3f}",
-                "-ac", "2",
-                "-ar", "44100",
-            ]
-            cmd.extend(self._audio_encoder_args(output_path))
-            cmd.extend(["-y", output_path])
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=60,
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-
-    # 最小字幕时长（毫秒），参考 VideoLingo 的 min_subtitle_duration=2.5s
-    # 低于此值的字幕会强制延长 end_ms，避免 TTS 生成的音频被过度压缩
-    MIN_SUBTITLE_DURATION_MS = 2500
 
     def _prepare_videolingo_items(self, items: list[dict[str, Any]], tolerance_ms: int) -> list[dict[str, Any]]:
         """补齐 VideoLingo 任务表需要的时长、间隔、容忍窗口和预估朗读时长
@@ -1489,14 +1424,6 @@ class VoiceEngine:
             gap_ms = max(0, int(next_start_ms) - end_ms) if next_start_ms is not None else 0
             row_tolerance_ms = min(max(0, tolerance_ms), gap_ms) if next_item else max(0, tolerance_ms)
 
-            # 最小时长保护：过短字幕强制延长，参考 VideoLingo 的 min_subtitle_duration 处理
-            if duration_ms < self.MIN_SUBTITLE_DURATION_MS:
-                end_ms = start_ms + self.MIN_SUBTITLE_DURATION_MS
-                duration_ms = self.MIN_SUBTITLE_DURATION_MS
-                # 重新计算 gap（因为 end_ms 变了）
-                gap_ms = max(0, int(next_start_ms) - end_ms) if next_start_ms is not None else 0
-                row_tolerance_ms = min(max(0, tolerance_ms), gap_ms) if next_item else max(0, tolerance_ms)
-
             # 预估朗读时长（毫秒），参考 VideoLingo 的 estimate_duration
             text = str(item.get("text") or "")
             est_dur_seconds = estimate_text_duration(text)
@@ -1517,137 +1444,35 @@ class VoiceEngine:
 
         return prepared
 
-    def _build_videolingo_chunks(
+    def _build_stable_voice_chunks(
         self,
         items: list[dict[str, Any]],
-        accept: float,
         tolerance_ms: int,
-        max_merge_count: int,
+        max_chunk_lines: int,
     ) -> list[list[dict[str, Any]]]:
-        """按 VideoLingo 的 cut_off 思路切块
-
-        参考 VideoLingo 的 process_cutoffs：
-        - gap >= tolerance 时强制切块
-        - if_too_fast <= 0（正常/太慢）的句子单独成块
-        - if_too_fast > 0（太快）的句子尝试和后句合并，直到速度因子可接受
-        """
-        # 先计算每条的 if_too_fast 标志
-        for item in items:
-            item["if_too_fast"] = self._calc_if_too_fast(item, accept)
-
+        """把连续字幕切成稳定配音块，保证每条字幕只进入一个块"""
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
-        idx = 0
 
-        while idx < len(items):
-            item = items[idx]
-
-            # gap >= tolerance 时强制切块
-            if self._int(item.get("gap_ms"), 0) >= tolerance_ms > 0:
-                current.append(item)
+        for item in items:
+            should_flush = False
+            if current:
+                previous = current[-1]
+                previous_gap_ms = max(0, self._int(previous.get("gap_ms"), 0))
+                should_flush = (
+                    len(current) >= max_chunk_lines
+                    or (tolerance_ms > 0 and previous_gap_ms >= tolerance_ms)
+                    or self._videolingo_voice_key(previous) != self._videolingo_voice_key(item)
+                )
+            if should_flush:
                 chunks.append(current)
                 current = []
-                idx += 1
-                continue
-
-            # 太快无法修复的句子单独成块
-            if item.get("if_too_fast") == 2:
-                current.append(item)
-                chunks.append(current)
-                current = []
-                idx += 1
-                continue
-
-            # 正常或太慢的句子：尝试和下一句合并
-            if item.get("if_too_fast", 0) <= 0:
-                current.append(item)
-                # 检查下一句
-                if idx + 1 < len(items):
-                    next_item = items[idx + 1]
-                    # 如果下一句也是正常/太慢，当前块可以结束
-                    if next_item.get("if_too_fast", 0) <= 0:
-                        chunks.append(current)
-                        current = []
-                        idx += 1
-                    else:
-                        # 下一句太快，尝试合并
-                        idx += self._merge_rows_for_chunk(items, idx, current, accept, max_merge_count)
-                else:
-                    # 最后一句
-                    chunks.append(current)
-                    current = []
-                    idx += 1
-            else:
-                # 太快的句子：尝试和后句合并
-                idx += self._merge_rows_for_chunk(items, idx, current, accept, max_merge_count)
+            current.append(item)
 
         if current:
             chunks.append(current)
 
         return chunks
-
-    def _calc_if_too_fast(self, item: dict[str, Any], accept: float) -> int:
-        """计算单条字幕的速度标志，参考 VideoLingo 的 calc_if_too_fast
-
-        返回值：
-        - 2: 太快，即使最大加速也无法适配
-        - 1: 需要加速
-        - 0: 正常
-        - -1: 太慢
-        """
-        est_dur = max(1, self._int(item.get("est_dur_ms"), 0))
-        tol_dur = max(1, self._int(item.get("tol_dur_ms"), 0))
-        duration = max(1, self._int(item.get("duration_ms"), 0))
-        tolerance = max(0, self._int(item.get("tolerance_ms"), 0))
-
-        if est_dur / max(accept, 0.1) > tol_dur:
-            return 2  # 即使最大加速也无法适配
-        elif est_dur > tol_dur:
-            return 1  # 需要加速
-        elif est_dur < duration - tolerance:
-            return -1  # 太慢
-        else:
-            return 0  # 正常
-
-    def _merge_rows_for_chunk(
-        self,
-        items: list[dict[str, Any]],
-        start_idx: int,
-        current: list[dict[str, Any]],
-        accept: float,
-        max_merge_count: int,
-    ) -> int:
-        """尝试合并多条字幕到当前块，参考 VideoLingo 的 merge_rows
-
-        返回消耗的条数
-        """
-        merge_count = 1
-        while merge_count < max_merge_count and (start_idx + merge_count) < len(items):
-            next_item = items[start_idx + merge_count]
-            # 不同音色或风格不合并
-            if self._videolingo_voice_key(items[start_idx]) != self._videolingo_voice_key(next_item):
-                break
-            # gap >= tolerance 不合并
-            if self._int(next_item.get("gap_ms"), 0) >= self._int(next_item.get("tolerance_ms"), 0) > 0:
-                break
-
-            # 检查合并后的速度因子
-            test_chunk = current + items[start_idx + 1:start_idx + merge_count + 1]
-            speed_factor, _ = self._videolingo_chunk_speed(test_chunk, accept, 1.0)
-
-            # 速度因子 <= accept 或已达到合并上限，停止合并
-            if speed_factor <= accept or merge_count == 2:
-                for i in range(1, merge_count + 1):
-                    current.append(items[start_idx + i])
-                return merge_count + 1
-
-            merge_count += 1
-
-        # 没有找到合适的合并点，把已合并的都加入
-        for i in range(1, merge_count + 1):
-            if start_idx + i < len(items):
-                current.append(items[start_idx + i])
-        return merge_count
 
     def _videolingo_voice_key(self, item: dict[str, Any]) -> tuple[str, str]:
         """不同音色或风格不放进同一个速度规划块，避免多人声音被统一拉扯太多"""

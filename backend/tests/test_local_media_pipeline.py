@@ -265,6 +265,30 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([item["start_ms"] for item in metadata["segments"]], [0, 2100])
         self.assertEqual(metadata["segments"][0]["audio_end_ms"], 1800)
 
+    def test_videolingo_voice_timeline_preserves_all_segments_without_trimming(self):
+        """新版配音排程只顺延不裁切，所有字幕行都必须保留"""
+        audio_paths: list[str] = []
+        for index in range(3):
+            audio_path = os.path.join(self.temp_dir, f"seg_{index}.wav")
+            with open(audio_path, "wb") as file:
+                file.write(b"voice")
+            audio_paths.append(audio_path)
+
+        planned = self.voice_engine._plan_videolingo_dubbing_timeline(
+            [
+                {"path": audio_paths[0], "start_ms": 0, "end_ms": 500, "duration_ms": 500, "source_duration_ms": 2200, "text": "第一句"},
+                {"path": audio_paths[1], "start_ms": 600, "end_ms": 1000, "duration_ms": 400, "source_duration_ms": 800, "text": "第二句"},
+                {"path": audio_paths[2], "start_ms": 1100, "end_ms": 1500, "duration_ms": 400, "source_duration_ms": 700, "text": "第三句"},
+            ],
+            {"voice_min_gap_ms": 120, "voice_speed_accept": 1.0, "voice_speed_max": 1.0},
+            self.temp_dir,
+        )
+
+        self.assertEqual([item["text"] for item in planned], ["第一句", "第二句", "第三句"])
+        self.assertEqual([item["start_ms"] for item in planned], [0, 2320, 3240])
+        self.assertEqual([item["audio_end_ms"] for item in planned], [2200, 3120, 3940])
+        self.assertTrue(all(item["path"] in audio_paths for item in planned))
+
     def test_batched_voice_chunks_segments_without_merging_text(self):
         """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
         segments = [
@@ -327,7 +351,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result_path, output_audio)
         self.assertEqual([item["text"] for item in generated], ["第一句", "第二句", "第三句"])
         self.assertEqual([item["voice"] for item in generated], ["alloy", "alloy", "nova"])
-        self.assertTrue(all("秒内自然说完" in item["style"] for item in generated))
+        self.assertTrue(all("参考字幕显示时长" in item["style"] for item in generated))
         self.assertEqual([item["start_ms"] for item in stitched_items], [0, 3000, 6500])
         self.assertEqual([item["duration_ms"] for item in stitched_items], [3000, 3000, 3000])
         legacy_mix.assert_not_called()

@@ -2279,6 +2279,23 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(synced[1]["start"], "00:00:01,200")
         self.assertEqual(synced[1]["end"], "00:00:01,620")
 
+    def test_sync_subtitle_entries_to_voice_timeline_allows_long_delayed_tail(self):
+        """配音明显顺延时，字幕结束时间跟随真实尾音，不再被原字幕窗口硬限制"""
+        entries = [
+            {"index": 1, "start": "00:00:00,000", "end": "00:00:00,500", "text": "第一句"},
+            {"index": 2, "start": "00:00:00,600", "end": "00:00:01,000", "text": "第二句"},
+        ]
+        voice_timeline = [
+            {"start_ms": 0, "original_start_ms": 0, "duration_ms": 500, "source_duration_ms": 2200, "audio_end_ms": 2200},
+            {"start_ms": 2320, "original_start_ms": 600, "duration_ms": 400, "source_duration_ms": 800, "audio_end_ms": 3120},
+        ]
+
+        synced = _sync_subtitle_entries_to_voice_timeline(entries, voice_timeline)
+
+        self.assertEqual(synced[0]["end"], "00:00:02,260")
+        self.assertEqual(synced[1]["start"], "00:00:02,320")
+        self.assertEqual(synced[1]["end"], "00:00:03,240")
+
     def test_combine_original_and_translated_entries_for_double_line_display(self):
         """双行翻译显示用译文加原文，但不改变译文时间轴"""
         original = [
