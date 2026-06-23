@@ -165,8 +165,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         ):
             result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
                 segments=[
-                    {"start_ms": 0, "end_ms": 500, "text": "第一句", "speaker": "旁白"},
-                    {"start_ms": 800, "end_ms": 1300, "text": "第二句", "speaker": "角色A"},
+                    {"start_ms": 0, "end_ms": 3000, "text": "第一句", "speaker": "旁白"},
+                    {"start_ms": 3500, "end_ms": 6000, "text": "第二句", "speaker": "角色A"},
                 ],
                 output_path=output_audio,
                 voice="alloy",
@@ -180,9 +180,9 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
         self.assertTrue(generated[0]["style"].startswith("解说风格"))
         self.assertTrue(generated[1]["style"].startswith("对话风格"))
-        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 800])
-        self.assertEqual([item["original_start_ms"] for item in stitched_items], [0, 800])
-        self.assertEqual([item["duration_ms"] for item in stitched_items], [500, 500])
+        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 3500])
+        self.assertEqual([item["original_start_ms"] for item in stitched_items], [0, 3500])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [3000, 2500])
 
     def test_batched_timed_voice_writes_timeline_metadata(self):
         """批量配音完成后保存真实片段时长，供最终字幕按配音尾音同步"""
@@ -206,7 +206,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
             patch.object(self.voice_engine, "_audio_duration_seconds", return_value=1.42),
         ):
             result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
-                segments=[{"start_ms": 1000, "end_ms": 2200, "text": "测试配音"}],
+                segments=[{"start_ms": 1000, "end_ms": 4200, "text": "测试配音"}],
                 output_path=output_audio,
                 settings={"style_prompt": "自然男声"},
             ))
@@ -217,9 +217,9 @@ class LocalMediaPipelineTest(unittest.TestCase):
             metadata = json.load(file)
 
         self.assertEqual(metadata["segments"][0]["start_ms"], 1000)
-        self.assertEqual(metadata["segments"][0]["duration_ms"], 1200)
+        self.assertEqual(metadata["segments"][0]["duration_ms"], 3200)
         self.assertEqual(metadata["segments"][0]["source_duration_ms"], 1420)
-        self.assertIn("参考时长约 1.2 秒", generated_settings[0]["style_prompt"])
+        self.assertIn("3.2 秒", generated_settings[0]["style_prompt"])
 
     def test_batched_timed_voice_plans_timeline_without_overlap(self):
         """配音真实时长超过原字幕窗时，应顺延后续片段而不是叠加抢话"""
@@ -314,9 +314,9 @@ class LocalMediaPipelineTest(unittest.TestCase):
         ):
             result_path = asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
                 segments=[
-                    {"start_ms": 0, "end_ms": 800, "text": "第一句", "speaker": "旁白"},
-                    {"start_ms": 800, "end_ms": 1600, "text": "第二句", "speaker": "旁白"},
-                    {"start_ms": 2000, "end_ms": 3600, "text": "第三句", "speaker": "角色A"},
+                    {"start_ms": 0, "end_ms": 3000, "text": "第一句", "speaker": "旁白"},
+                    {"start_ms": 3000, "end_ms": 6000, "text": "第二句", "speaker": "旁白"},
+                    {"start_ms": 6500, "end_ms": 9500, "text": "第三句", "speaker": "角色A"},
                 ],
                 output_path=output_audio,
                 voice="alloy",
@@ -327,9 +327,9 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(result_path, output_audio)
         self.assertEqual([item["text"] for item in generated], ["第一句", "第二句", "第三句"])
         self.assertEqual([item["voice"] for item in generated], ["alloy", "alloy", "nova"])
-        self.assertTrue(all("参考时长约" in item["style"] for item in generated))
-        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 800, 2000])
-        self.assertEqual([item["duration_ms"] for item in stitched_items], [800, 800, 1600])
+        self.assertTrue(all("秒内自然说完" in item["style"] for item in generated))
+        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 3000, 6500])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [3000, 3000, 3000])
         legacy_mix.assert_not_called()
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
