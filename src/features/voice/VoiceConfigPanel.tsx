@@ -255,8 +255,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const data = await profileApi.listVoice()
       setProfiles(data)
-      const target = preferredProfileId
-        ? data.find((item) => item.id === preferredProfileId) || null
+      const savedProfileId = loadAutomationPreferences().voice_profile_id
+      const targetProfileId = preferredProfileId || savedProfileId
+      const target = targetProfileId
+        ? data.find((item) => item.id === targetProfileId) || data[0] || null
         : selectedProfileId === null
           ? data[0] || null
           : null

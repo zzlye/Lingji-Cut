@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { profileApi } from '@/lib/api'
-import { saveAutomationPreferences } from '@/lib/automationPreferences'
+import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
 import type { ApiProfile, TextApiSettings, TextModelOption } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { toast } from 'sonner'
@@ -117,8 +117,10 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const data = await profileApi.listText()
       setProfiles(data)
-      const target = preferredProfileId
-        ? data.find((item) => item.id === preferredProfileId) || null
+      const savedProfileId = loadAutomationPreferences().text_profile_id
+      const targetProfileId = preferredProfileId || savedProfileId
+      const target = targetProfileId
+        ? data.find((item) => item.id === targetProfileId) || data[0] || null
         : selectedProfileId === null
           ? data[0] || null
           : null
