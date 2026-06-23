@@ -129,7 +129,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
         with (
             patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch.object(self.voice_engine, "stitch_timed_audio_files", side_effect=fake_mix),
             patch("backend.core.voice_engine.tempfile.mkdtemp", side_effect=fake_mkdtemp),
         ):
             result_path = asyncio.run(self.voice_engine.generate_timed_voice_track(
@@ -145,7 +145,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
         """批量时间轴配音逐条生成音频，最后再按字幕时间混合"""
         output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
         generated: list[dict[str, str]] = []
-        mixed_items: list[dict] = []
+        stitched_items: list[dict] = []
 
         async def fake_generate_voice(text: str, output_path: str, voice: str = "", settings=None, **_kwargs):
             generated.append({"text": text, "voice": voice, "style": str((settings or {}).get("style_prompt") or "")})
@@ -153,15 +153,15 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(b"segment")
             return output_path
 
-        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
-            mixed_items.extend(timed_audio_paths)
+        def fake_stitch(timed_audio_paths, final_output_path: str, **_kwargs):
+            stitched_items.extend(timed_audio_paths)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
             return final_output_path
 
         with (
             patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch.object(self.voice_engine, "stitch_timed_audio_files", side_effect=fake_stitch),
         ):
             result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
                 segments=[
@@ -180,9 +180,9 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
         self.assertTrue(generated[0]["style"].startswith("解说风格"))
         self.assertTrue(generated[1]["style"].startswith("对话风格"))
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 800])
-        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
-        self.assertEqual([item["duration_ms"] for item in mixed_items], [500, 500])
+        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 800])
+        self.assertEqual([item["original_start_ms"] for item in stitched_items], [0, 800])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [500, 500])
 
     def test_batched_timed_voice_writes_timeline_metadata(self):
         """批量配音完成后保存真实片段时长，供最终字幕按配音尾音同步"""
@@ -202,7 +202,7 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
         with (
             patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch.object(self.voice_engine, "stitch_timed_audio_files", side_effect=fake_mix),
             patch.object(self.voice_engine, "_audio_duration_seconds", return_value=1.42),
         ):
             result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
@@ -221,6 +221,50 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(metadata["segments"][0]["source_duration_ms"], 1420)
         self.assertIn("参考时长约 1.2 秒", generated_settings[0]["style_prompt"])
 
+    def test_batched_timed_voice_plans_timeline_without_overlap(self):
+        """配音真实时长超过原字幕窗时，应顺延后续片段而不是叠加抢话"""
+        output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
+        stitched_items: list[dict] = []
+        durations = [1.8, 0.4]
+
+        async def fake_generate_voice(text: str, output_path: str, **_kwargs):
+            with open(output_path, "wb") as file:
+                file.write(f"voice:{text}".encode("utf-8"))
+            return output_path
+
+        def fake_duration(_path: str):
+            return durations.pop(0) if durations else 0.4
+
+        def fake_stitch(timed_audio_paths, final_output_path: str, **_kwargs):
+            stitched_items.extend(timed_audio_paths)
+            with open(final_output_path, "wb") as file:
+                file.write(b"voice")
+            return final_output_path
+
+        with (
+            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
+            patch.object(self.voice_engine, "stitch_timed_audio_files", side_effect=fake_stitch),
+            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
+        ):
+            result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
+                segments=[
+                    {"start_ms": 0, "end_ms": 500, "text": "第一句"},
+                    {"start_ms": 600, "end_ms": 1000, "text": "第二句"},
+                ],
+                output_path=output_audio,
+                settings={"voice_min_gap_ms": 300, "voice_max_speed": 1.0},
+            ))
+
+        self.assertEqual(result_path, output_audio)
+        self.assertEqual(stitched_items[0]["start_ms"], 0)
+        self.assertEqual(stitched_items[0]["source_duration_ms"], 1800)
+        self.assertEqual(stitched_items[1]["start_ms"], 2100)
+        self.assertEqual(stitched_items[1]["original_start_ms"], 600)
+        with open(VoiceEngine.timeline_metadata_path(output_audio), "r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        self.assertEqual([item["start_ms"] for item in metadata["segments"]], [0, 2100])
+        self.assertEqual(metadata["segments"][0]["audio_end_ms"], 1800)
+
     def test_batched_voice_chunks_segments_without_merging_text(self):
         """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
         segments = [
@@ -236,17 +280,16 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
         self.assertEqual([[segment["text"] for segment in chunk] for chunk in chunks], [["第一句", "第二句"], ["第三句", "第四句"], ["第五句"]])
 
-    def test_grouped_timed_voice_merges_safe_adjacent_subtitles(self):
-        """时间轴分组合成会把安全相邻字幕合成一次请求，减少 API 调用次数"""
+    def test_grouped_timed_voice_uses_videolingo_timeline_compatibility(self):
+        """旧分组入口也统一走 VideoLingo 式逐条配音时间轴"""
         output_audio = os.path.join(self.temp_dir, "grouped_voice.wav")
         generated: list[dict[str, str]] = []
-        mixed_items: list[dict] = []
+        stitched_items: list[dict] = []
 
         async def fake_generate_voice(text: str, output_path: str, voice: str = "", settings=None, **_kwargs):
             generated.append({
                 "text": text,
                 "voice": voice,
-                "speed": str((settings or {}).get("speed")),
                 "style": str((settings or {}).get("style_prompt") or ""),
             })
             with open(output_path, "wb") as file:
@@ -255,10 +298,10 @@ class LocalMediaPipelineTest(unittest.TestCase):
 
         def fake_duration(path: str):
             _ = path
-            return 1.4
+            return 0.5
 
-        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
-            mixed_items.extend(timed_audio_paths)
+        def fake_stitch(timed_audio_paths, final_output_path: str, **_kwargs):
+            stitched_items.extend(timed_audio_paths)
             with open(final_output_path, "wb") as file:
                 file.write(b"voice")
             return final_output_path
@@ -266,7 +309,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         with (
             patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
             patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
+            patch.object(self.voice_engine, "stitch_timed_audio_files", side_effect=fake_stitch),
+            patch.object(self.voice_engine, "mix_timed_audio_files") as legacy_mix,
         ):
             result_path = asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
                 segments=[
@@ -281,112 +325,12 @@ class LocalMediaPipelineTest(unittest.TestCase):
             ))
 
         self.assertEqual(result_path, output_audio)
-        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第三句"])
-        self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
-        self.assertIn("不要在每句字幕之间刻意停顿", generated[0]["style"])
-        self.assertIn("整段目标时长约 1.6 秒", generated[0]["style"])
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 2000])
-        self.assertEqual([item["duration_ms"] for item in mixed_items], [1600, 1600])
-
-    def test_grouped_timed_voice_speeds_up_then_splits_when_too_long(self):
-        """分组音频超出窗口时先自动提速，仍超时再拆成更小组"""
-        output_audio = os.path.join(self.temp_dir, "grouped_retry_voice.wav")
-        generated: list[dict[str, str]] = []
-        mixed_items: list[dict] = []
-
-        async def fake_generate_voice(text: str, output_path: str, settings=None, **_kwargs):
-            generated.append({"text": text, "speed": str((settings or {}).get("speed"))})
-            with open(output_path, "wb") as file:
-                file.write(b"group")
-            return output_path
-
-        def fake_duration(path: str):
-            return 5.0 if "_try" in path and "_a_" not in path and "_b_" not in path else 0.7
-
-        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
-            mixed_items.extend(timed_audio_paths)
-            with open(final_output_path, "wb") as file:
-                file.write(b"voice")
-            return final_output_path
-
-        with (
-            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
-            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
-        ):
-            asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
-                segments=[
-                    {"start_ms": 0, "end_ms": 800, "text": "第一句"},
-                    {"start_ms": 800, "end_ms": 1600, "text": "第二句"},
-                ],
-                output_path=output_audio,
-                voice="alloy",
-                settings={
-                    "voice_group_size": 6,
-                    "voice_group_chars": 500,
-                    "voice_group_max_seconds": 12,
-                    "voice_group_gap_ms": 800,
-                    "voice_group_max_speed": 1.25,
-                    "voice_group_duration_margin": 1.05,
-                    "voice_concurrency": 1,
-                },
-            ))
-
-        generated_pairs = [{"text": item["text"], "speed": item["speed"]} for item in generated]
-        self.assertIn({"text": "第一句，第二句", "speed": "1.0"}, generated_pairs)
-        self.assertIn({"text": "第一句，第二句", "speed": "1.25"}, generated_pairs)
-        self.assertIn({"text": "第一句", "speed": "1.0"}, generated_pairs)
-        self.assertIn({"text": "第二句", "speed": "1.0"}, generated_pairs)
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 1000])
-        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
-
-    def test_grouped_timed_voice_splits_slightly_overlong_group(self):
-        """多句分组只要超过时间窗也要拆分，避免组尾压住下一组"""
-        output_audio = os.path.join(self.temp_dir, "grouped_strict_voice.wav")
-        generated: list[dict[str, str]] = []
-        mixed_items: list[dict] = []
-
-        async def fake_generate_voice(text: str, output_path: str, settings=None, **_kwargs):
-            generated.append({"text": text, "speed": str((settings or {}).get("speed"))})
-            with open(output_path, "wb") as file:
-                file.write(b"group")
-            return output_path
-
-        def fake_duration(path: str):
-            return 1.7 if "_try" in path and "_a_" not in path and "_b_" not in path else 0.7
-
-        def fake_mix(timed_audio_paths, final_output_path: str, **_kwargs):
-            mixed_items.extend(timed_audio_paths)
-            with open(final_output_path, "wb") as file:
-                file.write(b"voice")
-            return final_output_path
-
-        with (
-            patch.object(self.voice_engine, "generate_voice", side_effect=fake_generate_voice),
-            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=fake_duration),
-            patch.object(self.voice_engine, "mix_timed_audio_files", side_effect=fake_mix),
-        ):
-            asyncio.run(self.voice_engine.generate_grouped_timed_voice_track(
-                segments=[
-                    {"start_ms": 0, "end_ms": 800, "text": "第一句"},
-                    {"start_ms": 800, "end_ms": 1600, "text": "第二句"},
-                ],
-                output_path=output_audio,
-                voice="alloy",
-                settings={
-                    "voice_group_size": 6,
-                    "voice_group_chars": 500,
-                    "voice_group_max_seconds": 12,
-                    "voice_group_gap_ms": 800,
-                    "voice_group_max_speed": 1.0,
-                    "voice_group_duration_margin": 1.12,
-                    "voice_concurrency": 1,
-                },
-            ))
-
-        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第一句", "第二句"])
-        self.assertEqual([item["start_ms"] for item in mixed_items], [0, 1000])
-        self.assertEqual([item["original_start_ms"] for item in mixed_items], [0, 800])
+        self.assertEqual([item["text"] for item in generated], ["第一句", "第二句", "第三句"])
+        self.assertEqual([item["voice"] for item in generated], ["alloy", "alloy", "nova"])
+        self.assertTrue(all("参考时长约" in item["style"] for item in generated))
+        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 800, 2000])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [800, 800, 1600])
+        legacy_mix.assert_not_called()
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
         """默认只按字幕开始时间放置配音，不再强制变速或裁剪尾音"""
@@ -463,6 +407,35 @@ class LocalMediaPipelineTest(unittest.TestCase):
         filter_arg = calls[0][calls[0].index("-filter_complex") + 1]
         self.assertIn("adelay=0:all=1", filter_arg)
         self.assertIn("adelay=900:all=1", filter_arg)
+
+    def test_timed_voice_stitch_uses_concat_instead_of_amix(self):
+        """智能配音最终轨按静音和音频串接，不再把多句配音混叠到一起"""
+        first_audio = os.path.join(self.temp_dir, "first.wav")
+        second_audio = os.path.join(self.temp_dir, "second.wav")
+        output_audio = os.path.join(self.temp_dir, "stitched_voice.wav")
+        self._create_test_audio(first_audio, 440)
+        self._create_test_audio(second_audio, 880)
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **_kwargs):
+            calls.append(cmd)
+            with open(output_audio, "wb") as file:
+                file.write(b"voice")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("backend.core.voice_engine.subprocess.run", side_effect=fake_run):
+            result_path = self.voice_engine.stitch_timed_audio_files([
+                {"path": first_audio, "start_ms": 0, "duration_ms": 500, "source_duration_ms": 900},
+                {"path": second_audio, "start_ms": 1200, "duration_ms": 500, "source_duration_ms": 300},
+            ], output_audio)
+
+        self.assertEqual(result_path, output_audio)
+        joined_calls = " ".join(" ".join(cmd) for cmd in calls)
+        final_cmd = calls[-1]
+        self.assertIn("-f", final_cmd)
+        self.assertIn("concat", final_cmd)
+        self.assertNotIn("amix=", joined_calls)
+        self.assertNotIn("adelay=", joined_calls)
 
     def test_grouped_voice_timeline_metadata_expands_nested_segments(self):
         """分组配音元数据按组内字幕展开，避免第一条字幕吃掉整组配音时长"""

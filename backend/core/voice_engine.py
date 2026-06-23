@@ -181,7 +181,95 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """并发生成逐条字幕配音，再按字幕时间轴混合成完整音轨"""
+        """兼容旧参数名；真实流程统一走 VideoLingo 式任务表时间轴"""
+        return await self.generate_videolingo_timed_voice_track(
+            segments=segments,
+            output_path=output_path,
+            provider_type=provider_type,
+            voice=voice,
+            voice_selector=voice_selector,
+            style_selector=style_selector,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+            progress_callback=progress_callback,
+        )
+
+    async def generate_grouped_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """兼容旧分组入口；一键配音不再使用分组混音逻辑"""
+        return await self.generate_videolingo_timed_voice_track(
+            segments=segments,
+            output_path=output_path,
+            provider_type=provider_type,
+            voice=voice,
+            voice_selector=voice_selector,
+            style_selector=style_selector,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+            progress_callback=progress_callback,
+        )
+
+    async def generate_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        # 多人对话配音时按字幕分段的说话人挑选音色；为 None 时所有分段使用默认音色。
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """兼容旧串行入口；真实流程统一走 VideoLingo 式任务表时间轴"""
+        return await self.generate_videolingo_timed_voice_track(
+            segments=segments,
+            output_path=output_path,
+            provider_type=provider_type,
+            voice=voice,
+            voice_selector=voice_selector,
+            style_selector=style_selector,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=settings,
+            progress_callback=progress_callback,
+        )
+
+    async def generate_videolingo_timed_voice_track(
+        self,
+        segments: list[dict[str, Any]],
+        output_path: str,
+        provider_type: str = "openai_tts",
+        voice: str = "alloy",
+        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
+        api_key: str = "",
+        base_url: str = "",
+        model: str = "",
+        settings: Optional[dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> str:
+        """VideoLingo 式配音：生成真实音频、按块规划新时间轴、再顺序拼接整轨"""
         normalized_segments = self._normalize_timed_segments(segments)
         if not normalized_segments:
             raise ValueError("没有可生成配音的字幕分段")
@@ -189,18 +277,17 @@ class VoiceEngine:
         options = settings or {}
         audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
         batch_size = max(1, min(80, self._int(options.get("voice_batch_size"), 16)))
         max_chars = max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
-        min_gap_ms = self._voice_min_gap_ms(options)
         semaphore = asyncio.Semaphore(concurrency)
-        temp_dir = tempfile.mkdtemp(prefix="voice_batches_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
-        completed = 0
+
+        # 临时目录跟最终输出放在同一工作区，便于用户排查并避免跨盘移动。
+        temp_dir = tempfile.mkdtemp(prefix="voice_videolingo_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         timed_audio_paths: list[dict[str, Any]] = []
 
         async def generate_segment(index: int, segment: dict[str, Any]) -> dict[str, Any]:
-            """生成单条字幕音频，保留字幕原始起止时间"""
+            """按单条字幕生成音频，任务表只记录真实时长，不在这里混音"""
             async with semaphore:
                 segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
                 segment_voice = voice_selector(segment) if voice_selector else voice
@@ -219,14 +306,20 @@ class VoiceEngine:
                 source_duration_seconds = self._audio_duration_seconds(segment_path)
                 return {
                     "path": segment_path,
+                    "index": index,
                     "start_ms": int(segment["start_ms"]),
+                    "end_ms": int(segment["end_ms"]),
                     "duration_ms": segment_duration_ms,
                     "source_duration_ms": int((source_duration_seconds or 0) * 1000),
                     "text": str(segment.get("text") or ""),
                     "speaker": str(segment.get("speaker") or ""),
+                    "voice": str(segment_voice or voice),
+                    "style_prompt": str(segment_style or ""),
                 }
 
         try:
+            total = len(normalized_segments)
+            completed = 0
             index_offset = 0
             for chunk in self._chunk_timed_segments(normalized_segments, batch_size, max_chars):
                 tasks = [
@@ -237,162 +330,13 @@ class VoiceEngine:
                     timed_audio_paths.append(await task)
                     completed += 1
                     if progress_callback:
-                        progress_callback(10 + completed / max(len(normalized_segments), 1) * 75)
+                        progress_callback(10 + completed / max(total, 1) * 70)
                 index_offset += len(chunk)
 
-            timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
-            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=-1)
-            self._write_timeline_metadata(output_path, timed_audio_paths)
+            timed_audio_paths = self._plan_videolingo_dubbing_timeline(timed_audio_paths, options, temp_dir)
             if progress_callback:
-                progress_callback(95)
-            return result
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    async def generate_grouped_timed_voice_track(
-        self,
-        segments: list[dict[str, Any]],
-        output_path: str,
-        provider_type: str = "openai_tts",
-        voice: str = "alloy",
-        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
-        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
-        api_key: str = "",
-        base_url: str = "",
-        model: str = "",
-        settings: Optional[dict[str, Any]] = None,
-        progress_callback: Optional[Callable[[float], None]] = None,
-    ) -> str:
-        """按短时间轴分组合成配音，自动提速或拆分超长分组"""
-        normalized_segments = self._normalize_timed_segments(segments)
-        if not normalized_segments:
-            raise ValueError("没有可生成配音的字幕分段")
-
-        options = settings or {}
-        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        group_size = max(1, min(12, self._int(options.get("voice_group_size"), 6)))
-        group_chars = max(80, min(2000, self._int(options.get("voice_group_chars"), 500)))
-        group_window_ms = max(1000, min(30000, int(self._float(options.get("voice_group_max_seconds"), 12.0) * 1000)))
-        group_gap_ms = max(0, min(5000, self._int(options.get("voice_group_gap_ms"), 800)))
-        concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
-        min_gap_ms = self._voice_min_gap_ms(options)
-        semaphore = asyncio.Semaphore(concurrency)
-        groups = self._group_timed_segments(
-            normalized_segments,
-            group_size=group_size,
-            max_chars=group_chars,
-            max_window_ms=group_window_ms,
-            max_gap_ms=group_gap_ms,
-            voice_selector=voice_selector,
-            style_selector=style_selector,
-            default_voice=voice,
-        )
-        if not groups:
-            raise ValueError("没有可生成配音的字幕分组")
-
-        temp_dir = tempfile.mkdtemp(prefix="voice_groups_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
-        completed = 0
-        timed_audio_paths: list[dict[str, Any]] = []
-
-        async def generate_group(index: int, group: dict[str, Any]) -> list[dict[str, Any]]:
-            """生成单个分组，必要时在组内自动拆分"""
-            async with semaphore:
-                return await self._generate_grouped_voice_items(
-                    group=group,
-                    temp_dir=temp_dir,
-                    file_stem=f"group_{index:04d}",
-                    audio_format=audio_format,
-                    provider_type=provider_type,
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    settings=options,
-                )
-
-        try:
-            tasks = [asyncio.create_task(generate_group(index, group)) for index, group in enumerate(groups, 1)]
-            for task in asyncio.as_completed(tasks):
-                timed_audio_paths.extend(await task)
-                completed += 1
-                if progress_callback:
-                    progress_callback(10 + completed / max(len(groups), 1) * 75)
-
-            timed_audio_paths.sort(key=lambda item: int(item["start_ms"]))
-            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=-1)
-            self._write_timeline_metadata(output_path, timed_audio_paths)
-            if progress_callback:
-                progress_callback(95)
-            return result
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    async def generate_timed_voice_track(
-        self,
-        segments: list[dict[str, Any]],
-        output_path: str,
-        provider_type: str = "openai_tts",
-        voice: str = "alloy",
-        # 多人对话配音时按字幕分段的说话人挑选音色；为 None 时所有分段使用默认音色。
-        voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
-        style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
-        api_key: str = "",
-        base_url: str = "",
-        model: str = "",
-        settings: Optional[dict[str, Any]] = None,
-        progress_callback: Optional[Callable[[float], None]] = None,
-    ) -> str:
-        """
-        按字幕时间轴生成分段配音，并混合成一个对齐后的完整音轨。
-        segments: [{start_ms, end_ms, text}, ...]
-        """
-        normalized_segments = self._normalize_timed_segments(segments)
-        if not normalized_segments:
-            raise ValueError("没有可生成配音的字幕分段")
-
-        options = settings or {}
-        audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        min_gap_ms = self._voice_min_gap_ms(options)
-
-        # 分段音频临时目录跟最终输出放在同一视频目录，避免又落回全局 output 里。
-        temp_dir = tempfile.mkdtemp(prefix="voice_segments_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
-        timed_audio_paths: list[dict[str, Any]] = []
-        try:
-            total = len(normalized_segments)
-            for index, segment in enumerate(normalized_segments, 1):
-                segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
-                # 多人对话时按字幕分段里的说话人选择音色；未匹配则使用默认音色。
-                segment_voice = voice_selector(segment) if voice_selector else voice
-                segment_style = style_selector(segment) if style_selector else ""
-                segment_duration_ms = max(1, int(segment["end_ms"]) - int(segment["start_ms"]))
-                await self.generate_voice(
-                    text=str(segment["text"]),
-                    output_path=segment_path,
-                    provider_type=provider_type,
-                    voice=segment_voice or voice,
-                    api_key=api_key,
-                    base_url=base_url,
-                    model=model,
-                    settings=self._settings_with_timing_prompt(options, segment_style, segment_duration_ms),
-                )
-                source_duration_seconds = self._audio_duration_seconds(segment_path)
-                timed_audio_paths.append({
-                    "path": segment_path,
-                    "start_ms": int(segment["start_ms"]),
-                    "duration_ms": segment_duration_ms,
-                    "source_duration_ms": int((source_duration_seconds or 0) * 1000),
-                    "text": str(segment.get("text") or ""),
-                    "speaker": str(segment.get("speaker") or ""),
-                })
-                if progress_callback:
-                    progress_callback(10 + index / max(total, 1) * 75)
-
-            timed_audio_paths = self._apply_timed_audio_spacing(timed_audio_paths, min_gap_ms)
-            result = self.mix_timed_audio_files(timed_audio_paths, output_path, min_gap_ms=-1)
+                progress_callback(88)
+            result = self.stitch_timed_audio_files(timed_audio_paths, output_path)
             self._write_timeline_metadata(output_path, timed_audio_paths)
             if progress_callback:
                 progress_callback(95)
@@ -492,6 +436,75 @@ class VoiceEngine:
 
         logger.info(f"分段配音混合完成: {output_path}")
         return output_path
+
+    def stitch_timed_audio_files(
+        self,
+        timed_audio_paths: list[dict[str, Any]],
+        output_path: str,
+    ) -> str:
+        """按规划后的时间轴顺序拼接音频，避免多段配音被混音叠在一起"""
+        items = sorted(
+            self._normalize_timed_audio_paths(timed_audio_paths),
+            key=lambda value: self._int(value.get("start_ms"), 0),
+        )
+        if not items:
+            raise ValueError("没有音频文件可拼接")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        stitch_dir = tempfile.mkdtemp(prefix="voice_stitch_", dir=os.path.dirname(output_path))
+        concat_paths: list[str] = []
+        list_file = os.path.join(stitch_dir, "concat.txt")
+        cursor_ms = 0
+
+        try:
+            for index, item in enumerate(items):
+                start_ms = max(cursor_ms, self._int(item.get("start_ms"), 0))
+                silence_ms = max(0, start_ms - cursor_ms)
+                if silence_ms > 0:
+                    silence_path = os.path.join(stitch_dir, f"silence_{index:04d}.wav")
+                    self._create_concat_silence(silence_path, silence_ms)
+                    concat_paths.append(silence_path)
+                    cursor_ms += silence_ms
+
+                normalized_path = os.path.join(stitch_dir, f"audio_{index:04d}.wav")
+                self._normalize_concat_audio(str(item["path"]), normalized_path)
+                concat_paths.append(normalized_path)
+
+                source_duration_ms = max(0, self._int(item.get("source_duration_ms"), 0))
+                duration_ms = max(0, self._int(item.get("duration_ms"), 0))
+                cursor_ms = start_ms + max(1, source_duration_ms or duration_ms)
+
+            with open(list_file, "w", encoding="utf-8") as file:
+                for path in concat_paths:
+                    file.write(f"file '{self._concat_file_path(path)}'\n")
+
+            cmd = [
+                self._ffmpeg_cmd(),
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", list_file,
+                "-ac", "2",
+                "-ar", "44100",
+            ]
+            cmd.extend(self._audio_encoder_args(output_path))
+            cmd.append(output_path)
+
+            logger.info(f"顺序拼接时间轴配音: {len(items)} 段 -> {output_path}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=900,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"时间轴配音拼接失败: {result.stderr or result.stdout}")
+            logger.info(f"时间轴配音拼接完成: {output_path}")
+            return output_path
+        finally:
+            shutil.rmtree(stitch_dir, ignore_errors=True)
 
     async def _generate_openai_tts(
         self,
@@ -1228,13 +1241,34 @@ class VoiceEngine:
             if source_duration <= 0:
                 duration_seconds = self._audio_duration_seconds(path)
                 source_duration = duration_seconds * 1000 if duration_seconds else 0
-            items.append({
+            normalized_item = {
                 "path": path,
                 "start_ms": max(0, self._int(item.get("start_ms"), 0)),
                 "original_start_ms": max(0, self._int(item.get("original_start_ms"), item.get("start_ms", 0))),
                 "duration_ms": max(0, self._int(item.get("duration_ms"), 0)),
                 "source_duration_ms": max(0, int(source_duration)),
-            })
+            }
+            preserved_keys = (
+                "index",
+                "end_ms",
+                "text",
+                "speaker",
+                "voice",
+                "style_prompt",
+                "segments",
+                "audio_end_ms",
+                "real_duration_ms",
+                "gap_ms",
+                "tolerance_ms",
+                "tol_dur_ms",
+                "chunk_index",
+                "keep_gaps",
+                "speed_factor",
+            )
+            for key in preserved_keys:
+                if key in item:
+                    normalized_item[key] = item[key]
+            items.append(normalized_item)
         return items
 
     def _voice_min_gap_ms(self, settings: dict[str, Any]) -> int:
@@ -1276,6 +1310,275 @@ class VoiceEngine:
             previous_audio_end_ms = adjusted_start_ms + max(1, effective_duration_ms)
             spaced.append(next_item)
         return spaced
+
+    def _plan_dubbing_timeline(
+        self,
+        timed_audio_paths: list[dict[str, Any]],
+        settings: dict[str, Any],
+        temp_dir: str,
+    ) -> list[dict[str, Any]]:
+        """旧函数名兼容：统一走 VideoLingo 式配音时间轴"""
+        return self._plan_videolingo_dubbing_timeline(timed_audio_paths, settings, temp_dir)
+
+    def _plan_videolingo_dubbing_timeline(
+        self,
+        timed_audio_paths: list[dict[str, Any]],
+        settings: dict[str, Any],
+        temp_dir: str,
+    ) -> list[dict[str, Any]]:
+        """按 VideoLingo 的任务表思路重排配音时间轴，不裁掉还没说完的语音"""
+        items = sorted(
+            self._normalize_timed_audio_paths(timed_audio_paths),
+            key=lambda value: self._int(value.get("start_ms"), 0),
+        )
+        if not items:
+            return []
+
+        min_gap_ms = self._voice_min_gap_ms(settings)
+        tolerance_ms = max(0, min(5000, self._int(settings.get("voice_tolerance_ms"), 1500)))
+        accept = max(1.0, min(1.8, self._float(settings.get("voice_speed_accept", settings.get("voice_max_speed")), 1.2)))
+        max_speed = max(accept, min(2.0, self._float(settings.get("voice_speed_max", settings.get("voice_max_speed")), max(accept, 1.4))))
+        min_speed = max(0.7, min(1.2, self._float(settings.get("voice_speed_min"), 1.0)))
+        max_merge_count = max(1, min(8, self._int(settings.get("voice_chunk_max_lines"), 5)))
+
+        prepared = self._prepare_videolingo_items(items, tolerance_ms)
+        chunks = self._build_videolingo_chunks(prepared, accept, tolerance_ms, max_merge_count)
+        planned: list[dict[str, Any]] = []
+        previous_audio_end_ms: Optional[int] = None
+
+        for chunk_index, chunk in enumerate(chunks):
+            speed_factor, keep_gaps = self._videolingo_chunk_speed(chunk, accept, min_speed)
+            speed_factor = max(min_speed, min(max_speed, speed_factor))
+            chunk_start_ms = self._int(chunk[0].get("original_start_ms"), chunk[0].get("start_ms", 0))
+            if previous_audio_end_ms is not None:
+                chunk_start_ms = max(chunk_start_ms, previous_audio_end_ms + min_gap_ms)
+            cursor_ms = chunk_start_ms
+
+            for item_index, item in enumerate(chunk):
+                if item_index > 0 and keep_gaps:
+                    previous_gap_ms = max(0, self._int(chunk[item_index - 1].get("gap_ms"), 0))
+                    cursor_ms += int(previous_gap_ms / max(speed_factor, 0.1))
+
+                planned_item = dict(item)
+                source_duration_ms = max(1, self._int(planned_item.get("source_duration_ms"), planned_item.get("duration_ms", 0)))
+                if abs(speed_factor - 1.0) > 0.01:
+                    speed_path = self._speed_adjust_audio(
+                        str(planned_item["path"]),
+                        temp_dir,
+                        suffix=f"chunk_{chunk_index:04d}_{item_index:04d}",
+                        speed_factor=speed_factor,
+                    )
+                    planned_item["path"] = speed_path
+                    adjusted_duration = self._audio_duration_seconds(speed_path)
+                    source_duration_ms = max(1, int((adjusted_duration or (source_duration_ms / speed_factor / 1000)) * 1000))
+
+                if previous_audio_end_ms is not None:
+                    cursor_ms = max(cursor_ms, previous_audio_end_ms + min_gap_ms)
+
+                original_start_ms = max(0, self._int(planned_item.get("original_start_ms"), planned_item.get("start_ms", 0)))
+                planned_item["original_start_ms"] = original_start_ms
+                planned_item["start_ms"] = cursor_ms
+                planned_item["source_duration_ms"] = source_duration_ms
+                planned_item["real_duration_ms"] = source_duration_ms
+                planned_item["audio_end_ms"] = cursor_ms + source_duration_ms
+                planned_item["speed_factor"] = round(speed_factor, 3)
+                planned_item["keep_gaps"] = keep_gaps
+                planned_item["chunk_index"] = chunk_index
+
+                shift_ms = cursor_ms - original_start_ms
+                if shift_ms > 500:
+                    logger.warning(f"配音片段按真实时长顺延 {shift_ms}ms（原 {original_start_ms}ms → {cursor_ms}ms）")
+
+                planned.append(planned_item)
+                previous_audio_end_ms = planned_item["audio_end_ms"]
+                cursor_ms = previous_audio_end_ms
+
+        return planned
+
+    def _prepare_videolingo_items(self, items: list[dict[str, Any]], tolerance_ms: int) -> list[dict[str, Any]]:
+        """补齐 VideoLingo 任务表需要的时长、间隔和容忍窗口"""
+        prepared: list[dict[str, Any]] = []
+        total = len(items)
+        for index, item in enumerate(items):
+            next_item = items[index + 1] if index + 1 < total else None
+            next_start_ms = self._int(next_item.get("start_ms"), 0) if next_item else None
+            start_ms = max(0, self._int(item.get("start_ms"), 0))
+            duration_ms = max(1, self._int(item.get("duration_ms"), 0))
+            end_ms = max(start_ms + duration_ms, self._int(item.get("end_ms"), start_ms + duration_ms))
+            source_duration_ms = max(1, self._int(item.get("source_duration_ms"), duration_ms))
+            gap_ms = max(0, int(next_start_ms) - end_ms) if next_start_ms is not None else 0
+            row_tolerance_ms = min(max(0, tolerance_ms), gap_ms) if next_item else max(0, tolerance_ms)
+
+            prepared_item = dict(item)
+            prepared_item["start_ms"] = start_ms
+            prepared_item["original_start_ms"] = max(0, self._int(item.get("original_start_ms"), start_ms))
+            prepared_item["end_ms"] = end_ms
+            prepared_item["duration_ms"] = duration_ms
+            prepared_item["source_duration_ms"] = source_duration_ms
+            prepared_item["real_duration_ms"] = source_duration_ms
+            prepared_item["gap_ms"] = gap_ms
+            prepared_item["tolerance_ms"] = row_tolerance_ms
+            prepared_item["tol_dur_ms"] = duration_ms + row_tolerance_ms
+            prepared.append(prepared_item)
+        return prepared
+
+    def _build_videolingo_chunks(
+        self,
+        items: list[dict[str, Any]],
+        accept: float,
+        tolerance_ms: int,
+        max_merge_count: int,
+    ) -> list[list[dict[str, Any]]]:
+        """按 VideoLingo 的 cut_off 思路切块，过快的句子会尝试和后句同块调速"""
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        total = len(items)
+
+        for index, item in enumerate(items):
+            current.append(item)
+            next_item = items[index + 1] if index + 1 < total else None
+            if next_item is None:
+                chunks.append(current)
+                break
+
+            current_key = self._videolingo_voice_key(item)
+            next_key = self._videolingo_voice_key(next_item)
+            should_cut = (
+                len(current) >= max_merge_count
+                or current_key != next_key
+                or self._int(item.get("gap_ms"), 0) >= tolerance_ms > 0
+            )
+            if not should_cut:
+                speed_factor, _keep_gaps = self._videolingo_chunk_speed(current, accept, 1.0)
+                if len(current) == 1:
+                    should_cut = not self._videolingo_row_too_fast(item, accept)
+                else:
+                    should_cut = speed_factor <= accept
+
+            if should_cut:
+                chunks.append(current)
+                current = []
+
+        return chunks
+
+    def _videolingo_voice_key(self, item: dict[str, Any]) -> tuple[str, str]:
+        """不同音色或风格不放进同一个速度规划块，避免多人声音被统一拉扯太多"""
+        return (str(item.get("voice") or ""), str(item.get("style_prompt") or ""))
+
+    def _videolingo_row_too_fast(self, item: dict[str, Any], accept: float) -> bool:
+        """判断单行真实配音是否超过字幕窗口和容忍时间"""
+        real_ms = max(1, self._int(item.get("source_duration_ms"), item.get("duration_ms", 0)))
+        tol_ms = max(1, self._int(item.get("duration_ms"), 0) + self._int(item.get("tolerance_ms"), 0))
+        return real_ms / max(accept, 0.1) > tol_ms
+
+    def _videolingo_chunk_speed(self, chunk: list[dict[str, Any]], accept: float, min_speed: float) -> tuple[float, bool]:
+        """复刻 VideoLingo 的块级语速计算，返回变速倍率和是否保留原字幕间隔"""
+        chunk_real_ms = sum(max(1, self._int(item.get("source_duration_ms"), item.get("duration_ms", 0))) for item in chunk)
+        chunk_gap_ms = sum(max(0, self._int(item.get("gap_ms"), 0)) for item in chunk[:-1])
+        duration_window_ms = sum(max(1, self._int(item.get("duration_ms"), 0)) for item in chunk) + chunk_gap_ms
+        tol_window_ms = duration_window_ms + max(0, self._int(chunk[-1].get("tolerance_ms"), 0))
+        keep_gaps = True
+        var_error_ms = 100
+
+        # 能自然放进原字幕窗口或相邻空档时，不为“卡点”强行变速。
+        if chunk_real_ms + chunk_gap_ms <= duration_window_ms:
+            return 1.0, True
+        if chunk_real_ms <= duration_window_ms:
+            return 1.0, False
+        if chunk_real_ms + chunk_gap_ms <= tol_window_ms:
+            return 1.0, True
+        if chunk_real_ms <= tol_window_ms:
+            return 1.0, False
+
+        duration_denominator = max(1, duration_window_ms - var_error_ms)
+        tolerance_denominator = max(1, tol_window_ms - var_error_ms)
+        if (chunk_real_ms + chunk_gap_ms) / accept < duration_window_ms:
+            speed_factor = max(min_speed, (chunk_real_ms + chunk_gap_ms) / duration_denominator)
+        elif chunk_real_ms / accept < duration_window_ms:
+            speed_factor = max(min_speed, chunk_real_ms / duration_denominator)
+            keep_gaps = False
+        elif (chunk_real_ms + chunk_gap_ms) / accept < tol_window_ms:
+            speed_factor = max(min_speed, (chunk_real_ms + chunk_gap_ms) / tolerance_denominator)
+        else:
+            speed_factor = max(min_speed, chunk_real_ms / tolerance_denominator)
+            keep_gaps = False
+
+        return round(max(0.1, speed_factor), 3), keep_gaps
+
+    def _create_concat_silence(self, output_path: str, duration_ms: int) -> None:
+        """生成用于顺序拼接的静音片段"""
+        duration_seconds = max(0.001, duration_ms / 1000)
+        cmd = [
+            self._ffmpeg_cmd(),
+            "-y",
+            "-f", "lavfi",
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", f"{duration_seconds:.3f}",
+            "-c:a", "pcm_s16le",
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"生成配音静音片段失败: {result.stderr or result.stdout}")
+
+    def _normalize_concat_audio(self, input_path: str, output_path: str) -> None:
+        """把不同接口返回的音频统一转成 concat 友好的 WAV"""
+        cmd = [
+            self._ffmpeg_cmd(),
+            "-y",
+            "-i", input_path,
+            "-ac", "2",
+            "-ar", "44100",
+            "-c:a", "pcm_s16le",
+            output_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"标准化配音片段失败: {result.stderr or result.stdout}")
+
+    def _concat_file_path(self, path: str) -> str:
+        """转义 ffmpeg concat 文件列表里的 Windows 路径"""
+        return os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
+
+    def _speed_adjust_audio(self, input_path: str, temp_dir: str, suffix: str, speed_factor: float) -> str:
+        """用 ffmpeg atempo 温和加速配音片段，避免大幅压缩导致声音不自然"""
+        ext = os.path.splitext(input_path)[1].lower().lstrip(".") or "wav"
+        output_path = os.path.join(temp_dir, f"{suffix}_speed.{ext}")
+        if abs(speed_factor - 1.0) < 0.01:
+            shutil.copyfile(input_path, output_path)
+            return output_path
+        cmd = [
+            self._ffmpeg_cmd(),
+            "-i", input_path,
+            "-filter:a", self._atempo_chain(speed_factor),
+        ]
+        cmd.extend(self._audio_encoder_args(output_path))
+        cmd.extend(["-y", output_path])
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"配音片段变速失败: {result.stderr or result.stdout}")
+        return output_path
 
     def _write_timeline_metadata(self, output_path: str, timed_audio_paths: list[dict[str, Any]]) -> None:
         """保存每段配音真实时长，供最终字幕烧录按配音尾音校准"""
