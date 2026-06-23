@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { cn } from '@/lib/utils'
 import { automationApi } from '@/lib/api'
+import { buildAutomationRerunOverrides } from '@/lib/automationPayload'
 import { useAutomationStore } from '@/stores/automationStore'
 import { useLogStore } from '@/stores/logStore'
 import type { AutomationJob } from '@/types'
@@ -104,8 +105,8 @@ export function QueueWorkspace() {
               busyId={busyId}
               onPause={() => runJobAction(`pause:${job.id}`, '暂停', () => automationApi.pause(job.id))}
               onCancel={() => setConfirm({ title: '取消该任务？', description: `「${job.title}」正在运行的下载或处理进程会被停止。`, action: () => runJobAction(`cancel:${job.id}`, '取消', () => automationApi.cancel(job.id)) })}
-              onRetry={() => runJobAction(`retry:${job.id}`, '重新开始', () => automationApi.retry(job.id))}
-              onResume={() => runJobAction(`resume:${job.id}`, '继续完成', () => automationApi.resume(job.id))}
+              onRetry={() => runJobAction(`retry:${job.id}`, '重新开始', () => automationApi.retry(job.id, buildAutomationRerunOverrides()))}
+              onResume={() => runJobAction(`resume:${job.id}`, '继续完成', () => automationApi.resume(job.id, buildAutomationRerunOverrides()))}
               onSkip={() => setConfirm({ title: '跳过当前画面处理？', description: `「${job.title}」正在运行的 ffmpeg 会被停止，后续直接使用下载的原视频。`, action: () => runJobAction(`skip:${job.id}`, '跳过当前阶段', () => automationApi.skipCurrentStage(job.id)) })}
               onDelete={() => setConfirm({ title: '删除该任务记录？', description: `只删除「${job.title}」的队列记录，不删除硬盘上的视频文件。`, action: () => runJobAction(`delete:${job.id}`, '删除任务', () => automationApi.deleteJob(job.id), () => removeJob(job.id)) })}
             />

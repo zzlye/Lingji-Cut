@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { automationApi } from '@/lib/api'
+import { buildAutomationRerunOverrides } from '@/lib/automationPayload'
 import { useAutomationStore, selectActiveJobIds } from '@/stores/automationStore'
 import { useLogStore } from '@/stores/logStore'
 import type { AutomationJob, AutomationStep, BackendAutomationJob } from '@/types'
@@ -213,7 +214,7 @@ function queueResumeFailedStagePrompt(
 
 function resumeFailedStage(jobId: string) {
   const addLog = useLogStore.getState().addLog
-  automationApi.resume(jobId)
+  automationApi.resume(jobId, buildAutomationRerunOverrides())
     .then((result) => {
       addLog('info', result.message || '自动化任务已从断点继续')
       toast.success('已从断点继续处理')

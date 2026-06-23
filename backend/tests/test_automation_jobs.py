@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from backend.api.automation import _apply_glossary_terms, _audio_merge_volume, _build_auto_style_selector, _build_auto_voice_selector, _build_gemini_transcriber, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _sync_subtitle_entries_to_voice_timeline, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
+from backend.api.automation import _apply_glossary_terms, _audio_merge_volume, _build_auto_style_selector, _build_auto_voice_selector, _build_gemini_transcriber, _build_subtitle_download_candidates, _cancel_job, _create_automation_job, _default_stages, _delete_job_record, _download_subtitle_with_fallback, _find_banned_words, _gemini_align_timeline_profile, _get_batch_concurrency_from_job, _is_batch_paused, _job_folder_for_open, _job_to_response, _load_gemini_align_timeline_cache, _merge_rerun_overrides, _normalize_batch_urls, _pause_running_job, _pick_text_profile, _prepare_interrupted_job_for_startup, _prepare_job_export_stage_for_rerun, _recognize_subtitle_entries, _restore_batch_runtime_state, _pause_batch_jobs, _prepare_job_for_resume, _register_batch_pause, _resume_batch_jobs, _reset_job_for_retry, _skip_current_effects_stage, _stage_output_if_reusable, _subtitle_recognition_stage_progress, _subtitle_text_stage_progress, _sync_subtitle_entries_to_voice_timeline, _voice_for_segment, build_final_export_preset, combine_original_and_translated_entries, merge_subtitle_burn_preset, should_apply_final_export_settings, validate_automation_request_profiles, AutomationReExportRequest, AutomationRunRequest, AutomationRerunOverrideRequest, BACKEND_RESTART_INTERRUPTED_MESSAGE, BATCH_PAUSED, BATCH_SEMAPHORES, delete_automation_job_folder, recover_automation_jobs_on_startup, reexport_automation_job, subtitle_entries_to_voice_segments  # noqa: E402
 from backend.api.automation import _download_cover_asset, _job_workspace_paths, _run_automation_sync, list_automation_jobs, LocalVideoPreviewRequest, preview_local_video  # noqa: E402
 from backend.models import AutomationJobRecord, DownloadTask, TextProviderProfile, VideoSource, VoiceProviderProfile  # noqa: E402
 from backend.models.database import Base  # noqa: E402
@@ -2153,6 +2153,52 @@ class AutomationJobTests(unittest.TestCase):
                 FakeDb([profile]),
                 AutomationRunRequest(url="https://youtube.com/watch?v=test", subtitle_operation="none", enable_voice=True),
             )
+
+    def test_rerun_overrides_refresh_current_api_profiles(self):
+        """继续或重试旧任务时应使用当前选择的文本和配音配置"""
+        job = AutomationJobRecord(
+            id="auto-old-api-config",
+            source_url="https://youtube.com/watch?v=test",
+            status="failed",
+            params=json.dumps({
+                "url": "https://youtube.com/watch?v=test",
+                "enable_effects": False,
+                "subtitle_operation": "translate",
+                "text_profile_id": 11,
+                "text_system_prompt": "旧提示词",
+                "enable_voice": True,
+                "voice_profile_id": 22,
+                "audio_mode": "mix",
+                "original_volume": 0.25,
+                "workspace_dir": "D:/video/workspace",
+                "source_video_path": "D:/video/workspace/downloaded.mp4",
+            }, ensure_ascii=False),
+        )
+
+        params = _merge_rerun_overrides(
+            job,
+            AutomationRerunOverrideRequest(
+                text_profile_id=31,
+                text_system_prompt="新提示词",
+                voice_profile_id=42,
+                audio_mode="background",
+                original_volume=0.8,
+                voice_min_gap_ms=450,
+                multi_speaker_enabled=True,
+                speaker_voice_map={"旁白": "mimo_default"},
+            ),
+        )
+        saved = json.loads(job.params)
+
+        self.assertEqual(params["text_profile_id"], 31)
+        self.assertEqual(params["voice_profile_id"], 42)
+        self.assertEqual(saved["text_system_prompt"], "新提示词")
+        self.assertEqual(saved["audio_mode"], "background")
+        self.assertEqual(saved["original_volume"], 0.8)
+        self.assertEqual(saved["voice_min_gap_ms"], 450)
+        self.assertEqual(saved["speaker_voice_map"], {"旁白": "mimo_default"})
+        self.assertEqual(saved["workspace_dir"], "D:/video/workspace")
+        self.assertEqual(saved["source_video_path"], "D:/video/workspace/downloaded.mp4")
 
     def test_subtitle_download_candidates_are_deduplicated_by_language_and_type(self):
         """字幕候选会去重同语言多格式轨道，并保留首选语言优先级"""

@@ -506,6 +506,31 @@ export type AutomationStartParams = {
   banned_word_action?: 'warn' | 'block'
 }
 
+export type AutomationRerunOverrides = Partial<Pick<AutomationStartParams,
+  | 'text_profile_id'
+  | 'text_system_prompt'
+  | 'voice_profile_id'
+  | 'audio_mode'
+  | 'original_volume'
+  | 'voice_concurrency'
+  | 'voice_min_gap_ms'
+  | 'multi_speaker_enabled'
+  | 'speaker_voice_map'
+  | 'speaker_voice_styles'
+  | 'glossary_terms'
+  | 'banned_words'
+  | 'banned_word_action'
+>>
+
+/** 构造继续/重试请求，避免没有覆盖参数时发送空 body 影响旧调用 */
+function automationRerunOptions(overrides?: AutomationRerunOverrides): RequestInit {
+  const hasOverrides = overrides && Object.keys(overrides).length > 0
+  return {
+    method: 'POST',
+    ...(hasOverrides ? { body: JSON.stringify(overrides) } : {}),
+  }
+}
+
 export const automationApi = {
   /** 后端完整执行一键流程 */
   run: (params: AutomationStartParams) =>
@@ -568,12 +593,12 @@ export const automationApi = {
     `${BASE_URL}/automation/media?path=${encodeURIComponent(path)}`,
 
   /** 重试后台一键流程 */
-  retry: (id: string) =>
-    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/retry`, { method: 'POST' }),
+  retry: (id: string, overrides?: AutomationRerunOverrides) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/retry`, automationRerunOptions(overrides)),
 
   /** 从已有阶段继续后台一键流程 */
-  resume: (id: string) =>
-    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/resume`, { method: 'POST' }),
+  resume: (id: string, overrides?: AutomationRerunOverrides) =>
+    request<import('@/types').AutomationStartResponse>(`/automation/jobs/${id}/resume`, automationRerunOptions(overrides)),
 
   /** 基于已有任务产物重新合成导出，供字幕调整页复用 */
   reExport: (id: string, params: {

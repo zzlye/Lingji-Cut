@@ -4,7 +4,7 @@
 import { loadAutomationPreferences } from '@/lib/automationPreferences'
 import { getActiveTextSystemPrompt } from '@/lib/textPromptPresets'
 import { loadAutomationConfig } from '@/features/effects/EffectsPanel'
-import type { AutomationStartParams } from '@/lib/api'
+import type { AutomationRerunOverrides, AutomationStartParams } from '@/lib/api'
 
 const LOCAL_VIDEO_PREFIX = 'local:'
 
@@ -70,6 +70,41 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
     voice_concurrency: preferences.enable_voice ? preferences.voice_concurrency : undefined,
     voice_min_gap_ms: preferences.enable_voice ? preferences.voice_min_gap_ms : undefined,
     multi_speaker_enabled: preferences.enable_voice ? preferences.multi_speaker_enabled : undefined,
+    speaker_voice_map: speakerVoiceMap,
+    speaker_voice_styles: speakerVoiceStyles,
+    glossary_terms: preferences.glossary_terms,
+    banned_words: preferences.banned_words,
+    banned_word_action: preferences.banned_word_action,
+  }
+}
+
+/** 继续/重试旧任务时，只刷新容易过期或用户刚调整过的 API 配置 */
+export function buildAutomationRerunOverrides(): AutomationRerunOverrides {
+  const preferences = loadAutomationPreferences()
+  const speakerVoiceMap = preferences.enable_voice && preferences.multi_speaker_enabled
+    ? Object.fromEntries(
+      preferences.voice_speakers
+        .filter((speaker) => speaker.label.trim() && speaker.voice.trim())
+        .map((speaker) => [speaker.label.trim(), speaker.voice.trim()]),
+    )
+    : undefined
+  const speakerVoiceStyles = preferences.enable_voice && preferences.multi_speaker_enabled
+    ? Object.fromEntries(
+      preferences.voice_speakers
+        .filter((speaker) => speaker.label.trim() && (speaker.style_prompt || '').trim())
+        .map((speaker) => [speaker.label.trim(), (speaker.style_prompt || '').trim()]),
+    )
+    : undefined
+
+  return {
+    text_profile_id: preferences.text_profile_id || undefined,
+    text_system_prompt: getActiveTextSystemPrompt(),
+    voice_profile_id: preferences.voice_profile_id || undefined,
+    audio_mode: preferences.audio_mode,
+    original_volume: preferences.original_volume,
+    voice_concurrency: preferences.voice_concurrency,
+    voice_min_gap_ms: preferences.voice_min_gap_ms,
+    multi_speaker_enabled: preferences.multi_speaker_enabled,
     speaker_voice_map: speakerVoiceMap,
     speaker_voice_styles: speakerVoiceStyles,
     glossary_terms: preferences.glossary_terms,

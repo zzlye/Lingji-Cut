@@ -191,6 +191,23 @@ class AutomationRunRequest(BaseModel):
     cover_output_dir: Optional[str] = None
 
 
+class AutomationRerunOverrideRequest(BaseModel):
+    """继续或重试旧任务时允许从当前设置刷新的参数"""
+    text_profile_id: Optional[int] = None
+    text_system_prompt: Optional[str] = None
+    voice_profile_id: Optional[int] = None
+    audio_mode: Optional[str] = None
+    original_volume: Optional[float] = None
+    voice_concurrency: Optional[int] = Field(default=None, ge=1, le=8)
+    voice_min_gap_ms: Optional[int] = Field(default=None, ge=0, le=2000)
+    multi_speaker_enabled: Optional[bool] = None
+    speaker_voice_map: Optional[dict[str, str]] = None
+    speaker_voice_styles: Optional[dict[str, str]] = None
+    glossary_terms: Optional[list[dict[str, Any]]] = None
+    banned_words: Optional[list[str]] = None
+    banned_word_action: Optional[str] = None
+
+
 class AutomationStageResult(BaseModel):
     """自动流程阶段结果"""
     key: str
@@ -3485,6 +3502,24 @@ def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
     job.params = json.dumps(params, ensure_ascii=False)
 
 
+def _merge_rerun_overrides(job: AutomationJobRecord, overrides: Optional[AutomationRerunOverrideRequest]) -> dict[str, Any]:
+    """把当前设置里的 API 配置合并进旧任务，避免继续/重试还使用失效配置"""
+    params = _get_job_params(job)
+    if not overrides:
+        return params
+    data = overrides.model_dump(exclude_unset=True)
+    for key, value in data.items():
+        if value is None:
+            continue
+        params[key] = value
+    if "audio_mode" in params:
+        params["audio_mode"] = _normalize_audio_mode(params.get("audio_mode"))
+    if "original_volume" in params:
+        params["original_volume"] = _normalize_original_volume(params.get("original_volume"))
+    _set_job_params(job, params)
+    return params
+
+
 def _safe_media_file_path(path: str) -> str:
     """校验素材库播放器或缩略图要读取的本地文件路径"""
     media_path = os.path.abspath(os.path.expanduser(path.strip()))
@@ -4233,7 +4268,7 @@ def delete_automation_job_folder(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/retry", response_model=AutomationStartResponse)
-def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
+def retry_automation_job(job_id: str, overrides: Optional[AutomationRerunOverrideRequest] = None, db: Session = Depends(get_db)):
     """重试失败的一键自动化任务"""
     job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
     if not job:
@@ -4242,7 +4277,8 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="只有失败、已取消或已完成的自动化任务可以重试")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法重试")
-    validate_automation_request_profiles(db, AutomationRunRequest(**_get_job_params(job)))
+    params = _merge_rerun_overrides(job, overrides)
+    validate_automation_request_profiles(db, AutomationRunRequest(**params))
 
     try:
         assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
@@ -4257,7 +4293,7 @@ def retry_automation_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/resume", response_model=AutomationStartResponse)
-def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
+def resume_automation_job(job_id: str, overrides: Optional[AutomationRerunOverrideRequest] = None, db: Session = Depends(get_db)):
     """从已完成阶段后继续执行一键自动化任务"""
     job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
     if not job:
@@ -4266,7 +4302,8 @@ def resume_automation_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="只有暂停、失败、已取消或已完成的自动化任务可以继续处理")
     if not job.params:
         raise HTTPException(status_code=400, detail="任务缺少原始参数，无法继续处理")
-    validate_automation_request_profiles(db, AutomationRunRequest(**_get_job_params(job)))
+    params = _merge_rerun_overrides(job, overrides)
+    validate_automation_request_profiles(db, AutomationRunRequest(**params))
 
     try:
         assert_required_tools_available(require_yt_dlp=_job_requires_yt_dlp(job))
