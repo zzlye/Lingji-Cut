@@ -50,6 +50,11 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_language: 'auto',
   text_profile_id: null,
   subtitle_recognition_mode: 'local',
+  gemini_audio_segment_seconds: 90,
+  gemini_audio_overlap_seconds: 0.3,
+  gemini_audio_full_coverage: true,
+  gemini_audio_concurrency: 2,
+  gemini_audio_timeout_seconds: 300,
   subtitle_operation: 'polish',
   subtitle_target_language: 'zh-CN',
   burn_subtitles: true,
@@ -190,6 +195,14 @@ function normalizeVoiceNumber(value: unknown, defaultValue: number, min: number,
   return Math.min(max, Math.max(min, Number.isFinite(numberValue) ? numberValue : defaultValue))
 }
 
+/** 规范 Gemini 音频分段数值，避免前端缓存异常值导致接口超时或切得过碎 */
+function normalizeGeminiNumber(value: unknown, defaultValue: number, min: number, max: number, decimals = 0): number {
+  const raw = Number(value ?? defaultValue)
+  const safeValue = Number.isFinite(raw) ? raw : defaultValue
+  const factor = 10 ** Math.max(0, decimals)
+  return Math.min(max, Math.max(min, Math.round(safeValue * factor) / factor))
+}
+
 /** 规范尾音避让；旧版默认 160ms 会自动迁移到 300ms，用户设置的其它数值保留 */
 function normalizeVoiceMinGapMs(value: unknown, migrated: boolean): number {
   const hasValue = value !== undefined && value !== null && String(value).trim() !== ''
@@ -257,6 +270,11 @@ export function loadAutomationPreferences(): AutomationPreferences {
       subtitle_recognition_mode: ['local', 'gemini_full', 'gemini_align'].includes(parsed.subtitle_recognition_mode)
         ? parsed.subtitle_recognition_mode
         : 'local',
+      gemini_audio_segment_seconds: normalizeGeminiNumber(parsed.gemini_audio_segment_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_segment_seconds, 20, 300),
+      gemini_audio_overlap_seconds: normalizeGeminiNumber(parsed.gemini_audio_overlap_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_overlap_seconds, 0, 3, 1),
+      gemini_audio_full_coverage: parsed.gemini_audio_full_coverage !== false,
+      gemini_audio_concurrency: normalizeGeminiNumber(parsed.gemini_audio_concurrency, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_concurrency, 1, 8),
+      gemini_audio_timeout_seconds: normalizeGeminiNumber(parsed.gemini_audio_timeout_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_timeout_seconds, 60, 900),
       subtitle_operation: normalizeSubtitleOperation(parsed.subtitle_operation),
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),

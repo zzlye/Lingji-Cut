@@ -349,6 +349,11 @@ export interface AutomationPreferences {
   subtitle_language: string
   text_profile_id: number | null
   subtitle_recognition_mode: SubtitleRecognitionMode
+  gemini_audio_segment_seconds: number
+  gemini_audio_overlap_seconds: number
+  gemini_audio_full_coverage: boolean
+  gemini_audio_concurrency: number
+  gemini_audio_timeout_seconds: number
   subtitle_operation: SubtitleTextOperation
   subtitle_target_language: string
   burn_subtitles: boolean

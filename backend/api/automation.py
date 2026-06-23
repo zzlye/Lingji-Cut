@@ -158,6 +158,11 @@ class AutomationRunRequest(BaseModel):
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
     subtitle_recognition_mode: str = "local"
+    gemini_audio_segment_seconds: float = Field(default=90.0, ge=20.0, le=300.0)
+    gemini_audio_overlap_seconds: float = Field(default=0.3, ge=0.0, le=3.0)
+    gemini_audio_full_coverage: bool = True
+    gemini_audio_concurrency: int = Field(default=2, ge=1, le=8)
+    gemini_audio_timeout_seconds: float = Field(default=300.0, ge=60.0, le=900.0)
     subtitle_operation: str = "none"
     subtitle_target_language: Optional[str] = None
     text_system_prompt: Optional[str] = None
@@ -1432,6 +1437,14 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
         raise RuntimeError("Gemini 识别需要先在「文本 API」里配置 Gemini 渠道")
     api_key = decrypt_api_key(profile.api_key_encrypted)
     settings = _load_profile_settings(profile)
+    # 前端一键策略里的 Gemini 音频参数优先，避免隐藏环境变量和文本通用参数影响实际切片。
+    settings.update({
+        "segment_seconds": max(20.0, min(300.0, float(request.gemini_audio_segment_seconds or 90.0))),
+        "segment_overlap_seconds": max(0.0, min(3.0, float(request.gemini_audio_overlap_seconds or 0.0))),
+        "full_coverage": bool(request.gemini_audio_full_coverage),
+        "audio_concurrency": max(1, min(8, int(request.gemini_audio_concurrency or 2))),
+        "audio_timeout_seconds": max(60.0, min(900.0, float(request.gemini_audio_timeout_seconds or 300.0))),
+    })
     # 识别模型独立于翻译模型：flash 类模型转写音频会编造内容，默认用已验证可靠的 gemini-2.5-pro
     asr_model = os.environ.get("YTV_GEMINI_ASR_MODEL") or (profile.model or "gemini-2.5-pro")
     return GeminiAudioTranscriber(

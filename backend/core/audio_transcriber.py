@@ -150,7 +150,7 @@ class GeminiAudioTranscriber:
         safe_max_len = max(20.0, float(max_len))
         if safe_end - safe_start <= safe_max_len:
             return [(safe_start, safe_end)] if safe_end - safe_start >= 0.2 else []
-        overlap = min(1.0, max(0.0, self._env_float("YTV_GEMINI_ASR_SEGMENT_OVERLAP_S", 0.3, 0.0, 3.0)))
+        overlap = self._segment_overlap_seconds()
         chunks: list[tuple[float, float]] = []
         cursor = safe_start
         while cursor < safe_end - 0.05:
@@ -181,7 +181,7 @@ class GeminiAudioTranscriber:
 
         segments: list[tuple[float, float]] = []
         start = 0.0
-        overlap = min(1.0, max(0.0, self._env_float("YTV_GEMINI_ASR_SEGMENT_OVERLAP_S", 0.3, 0.0, 3.0)))
+        overlap = self._segment_overlap_seconds()
         min_piece = min(20.0, safe_max_len * 0.4)
         while start < safe_duration - 0.05:
             max_end = min(safe_duration, start + safe_max_len)
@@ -596,29 +596,42 @@ class GeminiAudioTranscriber:
 
     def _segment_seconds(self) -> float:
         """单段目标时长，太长大模型时间戳易漂移，太短拖慢且丢上下文"""
-        return self._asr._env_float("YTV_GEMINI_ASR_SEGMENT_S", 90.0, 20.0, 300.0)
+        return self._setting_float("segment_seconds", "YTV_GEMINI_ASR_SEGMENT_S", 90.0, 20.0, 300.0)
+
+    def _segment_overlap_seconds(self) -> float:
+        """相邻音频分段重叠时长，减少边界断句"""
+        return self._setting_float("segment_overlap_seconds", "YTV_GEMINI_ASR_SEGMENT_OVERLAP_S", 0.3, 0.0, 3.0)
 
     def _full_coverage_segments_enabled(self) -> bool:
         """Gemini 内容识别默认覆盖整段音频，避免低音量人声被 VAD 过滤掉"""
-        configured = str(os.environ.get("YTV_GEMINI_ASR_FULL_COVERAGE") or "true").strip().lower()
+        configured = self.settings.get("full_coverage")
+        if configured is None:
+            configured = os.environ.get("YTV_GEMINI_ASR_FULL_COVERAGE", "true")
+        configured = str(configured).strip().lower()
         return configured not in {"0", "false", "off", "no"}
 
-    def _env_float(self, key: str, default: float, minimum: float, maximum: float) -> float:
-        """读取浮点环境变量并限制范围"""
+    def _setting_float(self, setting_key: str, env_key: str, default: float, minimum: float, maximum: float) -> float:
+        """优先读取前端设置，再回退环境变量，并限制数值范围"""
+        raw = self.settings.get(setting_key)
+        if raw is None or str(raw).strip() == "":
+            raw = os.environ.get(env_key, default)
         try:
-            value = float(os.environ.get(key, default))
+            value = float(raw)
         except (TypeError, ValueError):
             value = default
         return max(minimum, min(maximum, value))
 
     def _concurrency(self) -> int:
         """并发分段数，中转转发音频较慢且并发大易超时，默认保守"""
-        configured = self._int(os.environ.get("YTV_GEMINI_ASR_CONCURRENCY"), self._int(self.settings.get("concurrency"), 2))
+        configured = self._int(
+            self.settings.get("audio_concurrency"),
+            self._int(self.settings.get("concurrency"), self._int(os.environ.get("YTV_GEMINI_ASR_CONCURRENCY"), 2)),
+        )
         return max(1, min(8, configured))
 
     def _timeout(self) -> float:
         """单段请求超时；中转转发 Gemini 音频实测约 1.5 倍实时，给足余量"""
-        return float(os.environ.get("YTV_GEMINI_ASR_TIMEOUT") or self.settings.get("audio_timeout_seconds") or 300)
+        return self._setting_float("audio_timeout_seconds", "YTV_GEMINI_ASR_TIMEOUT", 300.0, 60.0, 900.0)
 
     def _safe_remove(self, path: Optional[str]) -> None:
         """静默删除临时文件"""

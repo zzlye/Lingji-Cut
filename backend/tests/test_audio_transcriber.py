@@ -69,6 +69,34 @@ class PlanSegmentsTest(unittest.TestCase):
         self.assertAlmostEqual(segments[-1][1], 421.3, places=1)
         self.assertTrue(all(end - start <= 91.0 for start, end in segments))
 
+    def test_frontend_settings_override_hidden_environment_defaults(self):
+        """界面传入的 Gemini 切片参数优先，隐藏环境变量只作为兜底"""
+        transcriber = GeminiAudioTranscriber(
+            provider_type="openai_compatible",
+            api_key="sk-test",
+            base_url="https://example.com/v1",
+            model="gemini-2.5-pro",
+            settings={
+                "segment_seconds": 45,
+                "segment_overlap_seconds": 0.7,
+                "full_coverage": False,
+                "audio_concurrency": 4,
+                "audio_timeout_seconds": 180,
+            },
+        )
+        with patch.dict(os.environ, {
+            "YTV_GEMINI_ASR_SEGMENT_S": "180",
+            "YTV_GEMINI_ASR_SEGMENT_OVERLAP_S": "0.1",
+            "YTV_GEMINI_ASR_FULL_COVERAGE": "1",
+            "YTV_GEMINI_ASR_CONCURRENCY": "1",
+            "YTV_GEMINI_ASR_TIMEOUT": "600",
+        }):
+            self.assertEqual(transcriber._segment_seconds(), 45)
+            self.assertEqual(transcriber._segment_overlap_seconds(), 0.7)
+            self.assertFalse(transcriber._full_coverage_segments_enabled())
+            self.assertEqual(transcriber._concurrency(), 4)
+            self.assertEqual(transcriber._timeout(), 180)
+
     def test_splits_when_exceeding_max_len(self):
         """累计跨度超过上限时在静音处断成多段"""
         transcriber = _make_transcriber()

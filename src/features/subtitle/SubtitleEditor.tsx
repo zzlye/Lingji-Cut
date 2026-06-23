@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronDown, Download, Loader2, Pencil, Plus, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import type { SubtitlePreset } from '@/types'
+import type { AutomationPreferences, SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -270,6 +270,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const fontAvailability = useFontAvailability(fontFamiliesToCheck, fontAvailabilityRefreshKey)
   const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
   const shouldSkipSubtitle = automationOptions.subtitle_operation === 'skip'
+  const usesGeminiRecognition = automationOptions.subtitle_recognition_mode !== 'local'
 
   const loadPresets = async () => {
     try {
@@ -305,6 +306,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   }
 
   const updateForm = <K extends keyof SubtitlePresetForm>(key: K, value: SubtitlePresetForm[K]) => setForm((current) => ({ ...current, [key]: value }))
+  const updateAutomationOptions = (updates: Partial<AutomationPreferences>) => setAutomationOptions(saveAutomationPreferences(updates))
 
   const handleSave = async () => {
     const name = form.name.trim()
@@ -525,10 +527,66 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="auto" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">一键完成字幕策略</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
-                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode }))} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
-                <SelectField label="文本 API 处理" value={automationOptions.subtitle_operation} options={SUBTITLE_OP_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences(v === 'skip' ? { subtitle_operation: v as typeof automationOptions.subtitle_operation, burn_subtitles: false } : { subtitle_operation: v as typeof automationOptions.subtitle_operation }))} description="需先在「文本 API」配置渠道" />
-                <SelectField label="输出语言" value={automationOptions.subtitle_target_language || ''} options={TARGET_LANG_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ subtitle_target_language: v }))} />
-                <SwitchField label="默认烧录硬字幕" description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : '导出时把字幕烧进画面'} checked={!shouldSkipSubtitle && automationOptions.burn_subtitles} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ burn_subtitles: shouldSkipSubtitle ? false : v }))} />
+                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => updateAutomationOptions({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode })} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
+                {usesGeminiRecognition && (
+                  <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+                    <div>
+                      <p className="text-sm font-medium">Gemini 音频切片</p>
+                      <p className="text-xs leading-5 text-muted-foreground">切得短更稳、请求更多；切得长上下文更多，但更容易超时。低声细语多的视频建议开启完整覆盖。</p>
+                    </div>
+                    <SwitchField
+                      label="完整覆盖音频"
+                      description="开启后按时间切完整音频；关闭后只发送 VAD 判定的人声区间，省接口但更容易漏轻声。"
+                      checked={automationOptions.gemini_audio_full_coverage}
+                      onChange={(v) => updateAutomationOptions({ gemini_audio_full_coverage: v })}
+                    />
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <SliderField
+                        label="单段最长"
+                        value={automationOptions.gemini_audio_segment_seconds}
+                        min={20}
+                        max={180}
+                        step={5}
+                        suffix=" 秒"
+                        description="推荐 60-90 秒；接口不稳或 524 超时时调小。"
+                        onChange={(v) => updateAutomationOptions({ gemini_audio_segment_seconds: v })}
+                      />
+                      <SliderField
+                        label="边界重叠"
+                        value={automationOptions.gemini_audio_overlap_seconds}
+                        min={0}
+                        max={1.5}
+                        step={0.1}
+                        suffix=" 秒"
+                        description="重叠可减少切断句子，过大可能重复。"
+                        format={(v) => v.toFixed(1)}
+                        onChange={(v) => updateAutomationOptions({ gemini_audio_overlap_seconds: v })}
+                      />
+                      <SliderField
+                        label="识别并发"
+                        value={automationOptions.gemini_audio_concurrency}
+                        min={1}
+                        max={6}
+                        step={1}
+                        description="接口不稳定时用 1-2；稳定渠道可适当提高。"
+                        onChange={(v) => updateAutomationOptions({ gemini_audio_concurrency: v })}
+                      />
+                      <SliderField
+                        label="单段超时"
+                        value={automationOptions.gemini_audio_timeout_seconds}
+                        min={60}
+                        max={600}
+                        step={30}
+                        suffix=" 秒"
+                        description="慢接口可调大；超长卡住时优先调小单段最长。"
+                        onChange={(v) => updateAutomationOptions({ gemini_audio_timeout_seconds: v })}
+                      />
+                    </div>
+                  </div>
+                )}
+                <SelectField label="文本 API 处理" value={automationOptions.subtitle_operation} options={SUBTITLE_OP_OPTIONS} onChange={(v) => updateAutomationOptions(v === 'skip' ? { subtitle_operation: v as typeof automationOptions.subtitle_operation, burn_subtitles: false } : { subtitle_operation: v as typeof automationOptions.subtitle_operation })} description="需先在「文本 API」配置渠道" />
+                <SelectField label="输出语言" value={automationOptions.subtitle_target_language || ''} options={TARGET_LANG_OPTIONS} onChange={(v) => updateAutomationOptions({ subtitle_target_language: v })} />
+                <SwitchField label="默认烧录硬字幕" description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : '导出时把字幕烧进画面'} checked={!shouldSkipSubtitle && automationOptions.burn_subtitles} onChange={(v) => updateAutomationOptions({ burn_subtitles: shouldSkipSubtitle ? false : v })} />
               </AccordionContent>
             </AccordionItem>
           </Accordion>
