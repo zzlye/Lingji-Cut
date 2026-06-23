@@ -1402,9 +1402,7 @@ def _uses_original_subtitles_without_burn(request: "AutomationRunRequest") -> bo
 
 def _voice_needs_original_subtitles(request: "AutomationRunRequest") -> bool:
     """配音需要字幕时间轴或没有手写文案时，才读取原字幕"""
-    voice_mode = str(request.voice_mode or "batched").strip().lower()
-    uses_timeline = voice_mode in {"segmented", "batched", "grouped"}
-    return bool(request.enable_voice and (uses_timeline or not str(request.voice_text or "").strip()))
+    return bool(request.enable_voice)
 
 
 def _load_original_subtitle_timeline(
@@ -2937,9 +2935,14 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 _update_job_stage(db, job, "subtitle", "failed", task_id=subtitle_task.id, error_message=str(resumable_error))
             raise resumable_error from exc
 
-    voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice else None
+    voice_profile = _pick_voice_profile(db, request.voice_profile_id) if request.enable_voice and not skip_subtitle_stage else None
     reusable_audio_path = _stage_audio_output_if_reusable(job, "voice", "断点续跑") if resume_from_checkpoint else None
-    if reusable_audio_path:
+    if skip_subtitle_stage and request.enable_voice:
+        voice_skip_message = "已选择不处理字幕，无法按中文字幕时间轴配音，已跳过配音"
+        stages.append(AutomationStageResult(key="voice", status="skipped", progress=100, error_message=voice_skip_message))
+        if job:
+            _update_job_stage(db, job, "voice", "skipped", progress=100, error_message=voice_skip_message)
+    elif reusable_audio_path:
         audio_path = reusable_audio_path
         _mark_stage_reused(db, job, "voice", audio_path)
         stages.append(AutomationStageResult(key="voice", status="completed", progress=100, output_path=audio_path))
@@ -2950,21 +2953,16 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, voice_task)
             settings = _load_profile_settings(voice_profile)
-            # 手动语速已从界面移除；一键流程统一使用自然语速，分组模式内部会按时间窗临时自适应。
+            # 手动语速已从界面移除；一键流程统一使用自然语速，由模型根据字幕时长自行贴近。
             settings["speed"] = 1.0
-            settings["voice_batch_size"] = max(1, min(80, int(request.voice_batch_size or settings.get("voice_batch_size") or 16)))
-            settings["voice_batch_chars"] = max(100, min(12000, int(request.voice_batch_chars or settings.get("voice_batch_chars") or 1800)))
+            # 一键流程不再暴露配音模式和批次大小，固定使用一套稳定的时间轴调度参数。
+            settings["voice_batch_size"] = 16
+            settings["voice_batch_chars"] = 1800
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
             settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 300)))
-            settings["voice_group_size"] = max(1, min(12, int(request.voice_group_size or settings.get("voice_group_size") or 6)))
-            settings["voice_group_chars"] = max(80, min(2000, int(request.voice_group_chars or settings.get("voice_group_chars") or 500)))
-            settings["voice_group_max_seconds"] = max(1.0, min(30.0, float(request.voice_group_max_seconds or settings.get("voice_group_max_seconds") or 12.0)))
-            settings["voice_group_gap_ms"] = max(0, min(5000, int(request.voice_group_gap_ms or settings.get("voice_group_gap_ms") or 800)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
-            voice_mode = str(request.voice_mode or "batched").strip().lower()
-            if voice_mode not in {"full", "segmented", "batched", "grouped"}:
-                voice_mode = "batched"
-            voice_text_source = request.voice_text if voice_mode == "full" and str(request.voice_text or "").strip() else subtitle_text
+            # 一键流程只保留一种智能时间轴配音：逐条按最终字幕生成并按真实音频时长避让。
+            voice_text_source = subtitle_text
             voice_text = (voice_text_source or _fallback_voice_text(video)).strip()
             voice_text = entries_to_plain_text(_apply_glossary_terms(_plain_text_to_entries(voice_text), request.glossary_terms)) if voice_text else voice_text
             banned_hits = _find_banned_words(voice_text, request.banned_words)
@@ -2981,11 +2979,11 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             should_use_speaker_map = bool(request.multi_speaker_enabled and has_speakers)
             voice_selector = _build_auto_voice_selector(voice, request.speaker_voice_map) if should_use_speaker_map else None
             style_selector = _build_auto_style_selector(request.speaker_voice_styles, request.speaker_voice_map, voice) if should_use_speaker_map and request.speaker_voice_styles else None
-            if voice_mode in {"segmented", "batched", "grouped"} and has_voice_timeline:
+            if has_voice_timeline:
                 if not segments:
                     raise RuntimeError("没有可用于配音的中文字幕时间轴，已停止生成，避免整段配音和字幕错位")
                 try:
-                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_{voice_mode}.{output_ext}")
+                    audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_smart.{output_ext}")
 
                     def on_voice_progress(progress: float) -> None:
                         """同步分段或批量配音进度到后台任务"""
@@ -2995,65 +2993,26 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                         if job:
                             _update_job_stage(db, job, "voice", "running", progress=progress, task_id=voice_task.id)
 
-                    if voice_mode == "grouped":
-                        audio_path = asyncio.run(voice_engine.generate_grouped_timed_voice_track(
-                            segments=segments,
-                            output_path=audio_path,
-                            provider_type=voice_profile.provider_type,
-                            voice=voice,
-                            voice_selector=voice_selector,
-                            style_selector=style_selector,
-                            api_key=api_key,
-                            base_url=voice_profile.base_url,
-                            model=model,
-                            settings=settings,
-                            progress_callback=on_voice_progress,
-                        ))
-                    elif voice_mode == "batched":
-                        audio_path = asyncio.run(voice_engine.generate_batched_timed_voice_track(
-                            segments=segments,
-                            output_path=audio_path,
-                            provider_type=voice_profile.provider_type,
-                            voice=voice,
-                            voice_selector=voice_selector,
-                            style_selector=style_selector,
-                            api_key=api_key,
-                            base_url=voice_profile.base_url,
-                            model=model,
-                            settings=settings,
-                            progress_callback=on_voice_progress,
-                        ))
-                    else:
-                        audio_path = asyncio.run(voice_engine.generate_timed_voice_track(
-                            segments=segments,
-                            output_path=audio_path,
-                            provider_type=voice_profile.provider_type,
-                            voice=voice,
-                            voice_selector=voice_selector,
-                            style_selector=style_selector,
-                            api_key=api_key,
-                            base_url=voice_profile.base_url,
-                            model=model,
-                            settings=settings,
-                            progress_callback=on_voice_progress,
-                        ))
+                    audio_path = asyncio.run(voice_engine.generate_batched_timed_voice_track(
+                        segments=segments,
+                        output_path=audio_path,
+                        provider_type=voice_profile.provider_type,
+                        voice=voice,
+                        voice_selector=voice_selector,
+                        style_selector=style_selector,
+                        api_key=api_key,
+                        base_url=voice_profile.base_url,
+                        model=model,
+                        settings=settings,
+                        progress_callback=on_voice_progress,
+                    ))
                     _check_control(db, job, voice_task)
                 except TaskControlRequested:
                     raise
-                except Exception as segmented_exc:
-                    raise RuntimeError(f"按中文字幕时间轴配音失败，已停止生成，避免回退整段配音导致音画错位: {segmented_exc}") from segmented_exc
+                except Exception as voice_exc:
+                    raise RuntimeError(f"按中文字幕时间轴配音失败，已停止生成，避免回退整段配音导致音画错位: {voice_exc}") from voice_exc
             else:
-                audio_path = asyncio.run(voice_engine.generate_voice(
-                    text=voice_text,
-                    output_path=audio_path,
-                    provider_type=voice_profile.provider_type,
-                    voice=voice,
-                    api_key=api_key,
-                    base_url=voice_profile.base_url,
-                    model=model,
-                    settings=settings,
-                ))
-                _check_control(db, job, voice_task)
+                raise RuntimeError("没有可用于配音的字幕时间轴，已停止生成，避免整段配音和字幕错位")
             _complete_task(db, voice_task, audio_path)
             stages.append(AutomationStageResult(key="voice", status="completed", task_id=voice_task.id, output_path=audio_path))
             if job:

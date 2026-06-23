@@ -2489,22 +2489,26 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.burn_calls, [])
         self.assertEqual(fake_processor.merge_calls, [])
 
-    def test_original_subtitle_without_burn_uses_timeline_only_for_segmented_voice(self):
-        """使用原字幕且不烧录、开启分段配音时，只读取原字幕时间轴给配音使用"""
+    def test_original_subtitle_without_burn_uses_timeline_only_for_smart_voice(self):
+        """使用原字幕且不烧录、开启配音时，只读取原字幕时间轴给智能配音使用"""
         class CapturingVoiceEngine:
             """记录分段配音输入，避免真实调用配音接口"""
 
             def __init__(self):
                 self.segments: list[dict] = []
 
-            async def generate_timed_voice_track(self, segments, output_path, progress_callback=None, **_kwargs):
-                """模拟按原字幕时间轴生成配音"""
+            async def generate_batched_timed_voice_track(self, segments, output_path, progress_callback=None, **_kwargs):
+                """模拟按原字幕时间轴生成智能配音"""
                 self.segments = segments
                 if progress_callback:
                     progress_callback(100)
                 with open(output_path, "wb") as file:
                     file.write(b"voice")
                 return output_path
+
+            async def generate_timed_voice_track(self, *_args, **_kwargs):
+                """旧逐句模式不应再被一键流程调用"""
+                raise AssertionError("一键配音应统一走智能时间轴")
 
             async def generate_voice(self, *_args, **_kwargs):
                 """原字幕时间轴可用时不应回退整段配音"""
@@ -2584,24 +2588,28 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(voice_engine.segments[0]["text"], "原字幕第一句")
         self.assertIn("原字幕第一句", response.subtitle_text)
 
-    def test_skip_subtitle_stage_ignores_burn_and_voice_timeline(self):
-        """不处理字幕时，即使开启烧录和配音，也不应识别、读取或烧录字幕"""
+    def test_skip_subtitle_stage_ignores_burn_and_skips_voice(self):
+        """不处理字幕时，即使开启烧录和配音，也不应识别、读取、烧录字幕或生成配音"""
         class CapturingVoiceEngine:
-            """记录整段配音输入，确认没有走字幕分段时间轴"""
+            """确认完全跳过字幕时不会生成配音"""
 
             def __init__(self):
-                self.text = ""
+                self.called = False
+
+            async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
+                """不处理字幕时不应进入智能时间轴配音"""
+                self.called = True
+                raise AssertionError("不处理字幕时不应使用字幕时间轴配音")
 
             async def generate_timed_voice_track(self, *_args, **_kwargs):
                 """不处理字幕时不应进入分段配音"""
+                self.called = True
                 raise AssertionError("不处理字幕时不应使用字幕时间轴分段配音")
 
             async def generate_voice(self, text, output_path, **_kwargs):
                 """模拟整段配音并记录文案"""
-                self.text = text
-                with open(output_path, "wb") as file:
-                    file.write(b"voice")
-                return output_path
+                self.called = True
+                raise AssertionError("不处理字幕时不应整段配音")
 
         with tempfile.TemporaryDirectory(prefix="automation_skip_subtitle_") as temp_dir:
             downloaded_path = os.path.join(temp_dir, "downloaded.mp4")
@@ -2651,7 +2659,7 @@ class AutomationJobTests(unittest.TestCase):
                 patch("backend.api.automation._create_task", side_effect=fake_create_task),
                 patch("backend.api.automation._pick_subtitle_preset", side_effect=AssertionError("不处理字幕时不应读取字幕预设")),
                 patch("backend.api.automation._pick_text_profile", side_effect=AssertionError("不处理字幕时不应调用文本 API")),
-                patch("backend.api.automation._pick_voice_profile", return_value=voice_profile),
+                patch("backend.api.automation._pick_voice_profile", side_effect=AssertionError("不处理字幕时不应读取配音配置")),
                 patch("backend.api.automation.ensure_video_workspace", return_value=workspace_paths),
             ):
                 response = _run_automation_sync(
@@ -2671,10 +2679,12 @@ class AutomationJobTests(unittest.TestCase):
         stage_by_key = {stage.key: stage for stage in response.stages}
         self.assertEqual(stage_by_key["subtitle"].status, "skipped")
         self.assertIn("不处理字幕", stage_by_key["subtitle"].error_message)
+        self.assertEqual(stage_by_key["voice"].status, "skipped")
+        self.assertIn("无法按中文字幕时间轴配音", stage_by_key["voice"].error_message)
         self.assertEqual(fake_downloader.subtitle_download_calls, 0)
         self.assertEqual(fake_processor.burn_calls, [])
-        self.assertEqual(fake_processor.merge_calls[0]["video_path"], downloaded_path)
-        self.assertIn("跳过字幕测试", voice_engine.text)
+        self.assertEqual(fake_processor.merge_calls, [])
+        self.assertFalse(voice_engine.called)
         self.assertEqual(response.subtitle_text, "")
 
     def test_automation_voice_can_export_subtitle_only_copy(self):
@@ -2864,15 +2874,15 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["第一句", "第二句"])
         self.assertEqual(voice_engine.voices, ["alloy", "nova"])
         self.assertEqual(voice_engine.styles, ["解说风格", "对话风格"])
-        self.assertEqual(voice_engine.settings["voice_batch_size"], 5)
-        self.assertEqual(voice_engine.settings["voice_batch_chars"], 900)
+        self.assertEqual(voice_engine.settings["voice_batch_size"], 16)
+        self.assertEqual(voice_engine.settings["voice_batch_chars"], 1800)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
         self.assertEqual(voice_engine.settings["speed"], 1.0)
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "mix")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 0.25)
 
-    def test_automation_voice_grouped_mode_uses_grouped_timeline(self):
-        """一键配音分组模式会走时间轴分组合成，并传入分组参数"""
+    def test_automation_voice_legacy_grouped_mode_uses_smart_timeline(self):
+        """旧分组参数会被兼容接收，但一键配音统一走智能时间轴"""
         class CapturingGroupedVoiceEngine:
             """记录分组配音输入，避免真实调用配音接口"""
 
@@ -2881,18 +2891,21 @@ class AutomationJobTests(unittest.TestCase):
                 self.settings: dict = {}
 
             async def generate_grouped_timed_voice_track(self, segments, output_path, settings=None, progress_callback=None, **_kwargs):
-                """模拟时间轴分组合成配音"""
+                """旧分组模式不应再被一键流程调用"""
+                raise AssertionError("旧分组模式应迁移到智能时间轴")
+
+            async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
+                """模拟智能时间轴配音"""
+                segments = _kwargs.get("segments") if "segments" in _kwargs else _args[0]
+                output_path = _kwargs.get("output_path") if "output_path" in _kwargs else _args[1]
                 self.segments = segments
-                self.settings = settings or {}
+                self.settings = _kwargs.get("settings") or {}
+                progress_callback = _kwargs.get("progress_callback")
                 if progress_callback:
                     progress_callback(100)
                 with open(output_path, "wb") as file:
                     file.write(b"voice")
                 return output_path
-
-            async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
-                """分组模式不应调用逐条并发接口"""
-                raise AssertionError("分组模式不应调用逐条并发接口")
 
             async def generate_timed_voice_track(self, *_args, **_kwargs):
                 """分组模式不应调用串行逐句接口"""
@@ -2967,10 +2980,12 @@ class AutomationJobTests(unittest.TestCase):
         stage_by_key = {stage.key: stage for stage in response.stages}
         self.assertEqual(stage_by_key["voice"].status, "completed")
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["本地识别字幕"])
-        self.assertEqual(voice_engine.settings["voice_group_size"], 5)
-        self.assertEqual(voice_engine.settings["voice_group_chars"], 360)
-        self.assertEqual(voice_engine.settings["voice_group_max_seconds"], 9)
-        self.assertEqual(voice_engine.settings["voice_group_gap_ms"], 600)
+        self.assertNotIn("voice_group_size", voice_engine.settings)
+        self.assertNotIn("voice_group_chars", voice_engine.settings)
+        self.assertNotIn("voice_group_max_seconds", voice_engine.settings)
+        self.assertNotIn("voice_group_gap_ms", voice_engine.settings)
+        self.assertEqual(voice_engine.settings["voice_batch_size"], 16)
+        self.assertEqual(voice_engine.settings["voice_batch_chars"], 1800)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
 
     def test_automation_voice_invalid_audio_mode_falls_back_to_mix(self):
@@ -3281,7 +3296,7 @@ Dialogue: 0,0:00:01.10,0:00:02.40,Default,,0,0,0,,续跑第二句
 
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["续跑第一句", "续跑第二句"])
         self.assertEqual([segment["start_ms"] for segment in voice_engine.segments], [0, 1100])
-        self.assertEqual(fake_processor.merge_calls[0]["audio_path"], os.path.join(temp_dir, "resume-voice_voice_batched.mp3"))
+        self.assertEqual(fake_processor.merge_calls[0]["audio_path"], os.path.join(temp_dir, "resume-voice_voice_smart.mp3"))
 
     def test_reexport_automation_job_uses_new_subtitle_and_updates_job_output(self):
         """字幕调整页重新导出会使用新 ASS 并覆盖任务的最新导出路径"""

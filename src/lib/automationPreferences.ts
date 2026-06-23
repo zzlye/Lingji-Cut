@@ -62,16 +62,10 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   export_subtitle_only_when_voice: false,
   voice_profile_id: null,
   voice_mode: 'batched',
-  audio_mode: 'mix',
+  audio_mode: 'background',
   original_volume: 0.25,
-  voice_batch_size: 16,
-  voice_batch_chars: 1800,
   voice_concurrency: 2,
   voice_min_gap_ms: 300,
-  voice_group_size: 6,
-  voice_group_chars: 500,
-  voice_group_max_seconds: 12,
-  voice_group_gap_ms: 800,
   multi_speaker_enabled: false,
   voice_speakers: [
     { id: 'narrator', label: '旁白', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
@@ -169,12 +163,10 @@ function normalizeBannedWords(value: unknown): string[] {
   return Array.from(new Set(raw.map((item) => String(item).trim()).filter(Boolean)))
 }
 
-/** 规范一键配音生成模式，旧版 segmented 继续保留 */
+/** 规范一键配音生成模式，旧版多模式统一迁移到智能时间轴 */
 function normalizeVoiceMode(value: unknown): AutomationPreferences['voice_mode'] {
-  const mode = String(value || '')
-  return ['full', 'batched', 'segmented', 'grouped'].includes(mode)
-    ? mode as AutomationPreferences['voice_mode']
-    : DEFAULT_AUTOMATION_PREFERENCES.voice_mode
+  void value
+  return 'batched'
 }
 
 /** 规范音频合成模式，旧版未确认的 replace 一律迁回混合原声 */
@@ -253,10 +245,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const voiceModeWasMigrated = parsed[VOICE_NATURAL_MODE_MIGRATED_KEY] === true
     const strictTimelineModeWasMigrated = parsed[VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY] === true
     const voiceGapWasMigrated = parsed[VOICE_GAP_300_MIGRATED_KEY] === true
-    const normalizedVoiceMode = normalizeVoiceMode(parsed.voice_mode)
-    const voiceMode = !strictTimelineModeWasMigrated && normalizedVoiceMode === 'grouped'
-      ? 'batched'
-      : normalizedVoiceMode
+    const voiceMode = normalizeVoiceMode(parsed.voice_mode)
     const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, parsed.voice_presets)
     const shouldPersistVoiceMigration = hasLegacyDefaultVoiceStylePrompts(parsed.voice_presets) || hasLegacyDefaultVoiceStylePrompts(parsed.voice_speakers)
     const preferences = {
@@ -282,14 +271,8 @@ export function loadAutomationPreferences(): AutomationPreferences {
       voice_mode: voiceMode,
       audio_mode: normalizeAudioMode(parsed.audio_mode, audioReplaceWasExplicitlyChosen),
       original_volume: Math.min(1, Math.max(0, Number(parsed.original_volume ?? DEFAULT_AUTOMATION_PREFERENCES.original_volume))),
-      voice_batch_size: normalizeVoiceNumber(parsed.voice_batch_size, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_size, 1, 80),
-      voice_batch_chars: normalizeVoiceNumber(parsed.voice_batch_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_batch_chars, 100, 12000),
       voice_concurrency: normalizeVoiceNumber(parsed.voice_concurrency, DEFAULT_AUTOMATION_PREFERENCES.voice_concurrency, 1, 8),
       voice_min_gap_ms: normalizeVoiceMinGapMs(parsed.voice_min_gap_ms, voiceGapWasMigrated),
-      voice_group_size: normalizeVoiceNumber(parsed.voice_group_size, DEFAULT_AUTOMATION_PREFERENCES.voice_group_size, 1, 12),
-      voice_group_chars: normalizeVoiceNumber(parsed.voice_group_chars, DEFAULT_AUTOMATION_PREFERENCES.voice_group_chars, 80, 2000),
-      voice_group_max_seconds: Math.min(30, Math.max(1, Number(parsed.voice_group_max_seconds ?? DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds) || DEFAULT_AUTOMATION_PREFERENCES.voice_group_max_seconds)),
-      voice_group_gap_ms: normalizeVoiceNumber(parsed.voice_group_gap_ms, DEFAULT_AUTOMATION_PREFERENCES.voice_group_gap_ms, 0, 5000),
       multi_speaker_enabled: Boolean(parsed.multi_speaker_enabled),
       voice_speakers: voiceSpeakers,
       glossary_terms: normalizeGlossaryTerms(parsed.glossary_terms),

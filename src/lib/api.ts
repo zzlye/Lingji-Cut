@@ -493,17 +493,11 @@ export type AutomationStartParams = {
   export_subtitle_only_when_voice?: boolean
   voice_profile_id?: number
   voice_text?: string
-  voice_mode?: 'full' | 'batched' | 'segmented' | 'grouped'
+  voice_mode?: 'batched'
   audio_mode?: 'replace' | 'mix' | 'background'
   original_volume?: number
-  voice_batch_size?: number
-  voice_batch_chars?: number
   voice_concurrency?: number
   voice_min_gap_ms?: number
-  voice_group_size?: number
-  voice_group_chars?: number
-  voice_group_max_seconds?: number
-  voice_group_gap_ms?: number
   multi_speaker_enabled?: boolean
   speaker_voice_map?: Record<string, string>
   speaker_voice_styles?: Record<string, string>

@@ -53,13 +53,6 @@ const BITRATE_OPTIONS: FieldOption[] = ['32000', '64000', '128000', '256000'].ma
 const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
-const VOICE_MODE_OPTIONS: FieldOption[] = [
-  ['batched', '严格时间轴（推荐，不重叠）'],
-  ['grouped', '自然分组（实验，可能逐行不同步）'],
-  ['segmented', '逐条串行（慢，便于排查）'],
-  ['full', '整段生成（自然但不保证同步）'],
-]
-
 /** 音色听感倾向展示文案 */
 function voiceGenderLabel(gender?: VoiceOption['gender']): string {
   if (gender === 'male') return '偏男声'
@@ -213,7 +206,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const voiceSettingsForRequest = (overrides: Partial<VoiceGenerateSettings> = {}): VoiceGenerateSettings => ({
     ...settings,
     ...overrides,
-    // 手动语速已下线：逐条配音保持自然语速，分组模式由后端按时间窗临时自适应。
+    // 手动语速已下线：智能时间轴配音保持自然语速，由模型根据字幕时长自行贴近。
     speed: 1,
   })
 
@@ -803,38 +796,13 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <AccordionContent className="space-y-3 pb-3">
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
             <SwitchField label="额外导出无配音字幕版" description="开启后会多生成一个保留原声、没有配音的字幕版视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
-            <SelectField label="生成方式" value={automationOptions.voice_mode} options={VOICE_MODE_OPTIONS} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_mode: v as typeof automationOptions.voice_mode }))} />
-            {automationOptions.voice_mode === 'grouped' && (
-              <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-                实验模式。它会把相邻字幕合成一段来提升连贯度，但组内没有每行真实发声时间点，成片可能出现声音还在上一句、字幕已切到下一句。
-              </p>
-            )}
-            {automationOptions.voice_mode === 'batched' && (
-              <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-                成片推荐。每条字幕独立生成，批次只控制调度数量，不合并文本；最终按真实音频时长排到时间轴上，0ms 间隔也不会互相覆盖。
-              </p>
-            )}
-            {automationOptions.voice_mode === 'grouped' ? (
-              <div className="grid gap-3 sm:grid-cols-3">
-                <NumberField label="每组最大行数" value={automationOptions.voice_group_size} min={1} max={12} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_size: Math.max(1, Math.round(v)) }))} />
-                <NumberField label="每组最长秒数" value={automationOptions.voice_group_max_seconds} min={1} max={30} step={1} suffix="秒" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_max_seconds: Math.max(1, Math.round(v)) }))} />
-                <NumberField label="每组字符上限" value={automationOptions.voice_group_chars} min={80} max={2000} step={20} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_chars: Math.max(80, Math.round(v)) }))} />
-                <NumberField label="最大合并停顿" value={automationOptions.voice_group_gap_ms} min={0} max={5000} step={100} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_group_gap_ms: Math.max(0, Math.round(v)) }))} />
-                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
-                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
-              </div>
-            ) : automationOptions.voice_mode === 'batched' ? (
-              <div className="grid gap-3 sm:grid-cols-3">
-                <NumberField label="每批最大行数" value={automationOptions.voice_batch_size} min={1} max={80} step={1} suffix="行" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_size: Math.max(1, Math.round(v)) }))} />
-                <NumberField label="每批字符上限" value={automationOptions.voice_batch_chars} min={100} max={12000} step={100} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_batch_chars: Math.max(100, Math.round(v)) }))} />
-                <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
-                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
-              </div>
-            ) : automationOptions.voice_mode === 'segmented' ? (
-              <div className="grid gap-3 sm:grid-cols-3">
-                <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
-              </div>
-            ) : null}
+            <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
+              一键配音固定使用智能时间轴：按最终中文字幕逐条生成，按真实音频时长排队，必要时顺延后续字幕，避免多段配音互相覆盖。
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />
+              <NumberField label="最小接句间隔" description="默认 300ms。0ms 表示不额外留空，但仍不会允许两段配音重叠。" value={automationOptions.voice_min_gap_ms} min={0} max={2000} step={20} suffix="ms" onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_min_gap_ms: Math.max(0, Math.round(v)) }))} />
+            </div>
             <SwitchField label="自动多人对话" description="字幕出现说话人标签时才按映射选音色，未检测到多人时保持默认音色" checked={automationOptions.multi_speaker_enabled} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ multi_speaker_enabled: v }))} />
             <SelectField label="音频合成" value={automationOptions.audio_mode} options={[['background', '本地 AI 去人声，保留背景声'], ['mix', '混合完整原视频声音'], ['replace', '仅保留配音']]} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ audio_mode: v as typeof automationOptions.audio_mode }))} />
             {automationOptions.audio_mode === 'background' && (
