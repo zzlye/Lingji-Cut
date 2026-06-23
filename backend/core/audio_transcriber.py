@@ -78,9 +78,10 @@ class GeminiAudioTranscriber:
             regions = self._asr._compute_vad_regions(audio)
             self._emit_progress(progress_callback, 16)
             logger.info(f"Gemini 识别 VAD 完成: {len(regions)} 个语音区间")
-            segments = self._plan_segments(regions, duration, self._segment_seconds())
+            segment_seconds = self._segment_seconds()
+            segments = self._plan_segments(regions, duration, segment_seconds)
             if not segments:
-                segments = [(0.0, duration)]
+                segments = self._split_long_segment(0.0, duration, duration, segment_seconds)
             self._emit_progress(progress_callback, 20)
             logger.info(f"Gemini 识别音频分段规划完成: {len(segments)} 段")
             seg_files = self._export_segment_files(audio_path, segments, progress_callback)
@@ -125,11 +126,12 @@ class GeminiAudioTranscriber:
         """旧版 VAD 分段：只发送检测到的人声区间，可用环境变量切回"""
         if not regions:
             return []
+        safe_max_len = max(20.0, float(max_len))
         segments: list[tuple[float, float]] = []
         seg_start, seg_end = regions[0]
         for region_start, region_end in regions[1:]:
             # 合并后跨度仍在上限内就继续并入当前段，否则在静音处断开
-            if region_end - seg_start <= max_len:
+            if region_end - seg_start <= safe_max_len:
                 seg_end = region_end
             else:
                 segments.append((seg_start, seg_end))
@@ -138,8 +140,27 @@ class GeminiAudioTranscriber:
         # 段首尾各留 0.3 秒余量，避免边界把首字尾字切掉
         padded: list[tuple[float, float]] = []
         for start, end in segments:
-            padded.append((max(0.0, start - 0.3), min(duration, end + 0.3)))
+            padded.extend(self._split_long_segment(max(0.0, start - 0.3), min(duration, end + 0.3), duration, safe_max_len))
         return padded
+
+    def _split_long_segment(self, start: float, end: float, duration: float, max_len: float) -> list[tuple[float, float]]:
+        """硬性拆开超长音频段，避免整段请求超时后字幕阶段失败"""
+        safe_start = max(0.0, float(start))
+        safe_end = min(max(safe_start, float(end)), max(0.0, float(duration)))
+        safe_max_len = max(20.0, float(max_len))
+        if safe_end - safe_start <= safe_max_len:
+            return [(safe_start, safe_end)] if safe_end - safe_start >= 0.2 else []
+        overlap = min(1.0, max(0.0, self._env_float("YTV_GEMINI_ASR_SEGMENT_OVERLAP_S", 0.3, 0.0, 3.0)))
+        chunks: list[tuple[float, float]] = []
+        cursor = safe_start
+        while cursor < safe_end - 0.05:
+            chunk_end = min(safe_end, cursor + safe_max_len)
+            chunks.append((cursor, chunk_end))
+            if chunk_end >= safe_end:
+                break
+            next_cursor = max(safe_start, chunk_end - overlap)
+            cursor = chunk_end if next_cursor <= cursor + 0.1 else next_cursor
+        return chunks
 
     def _plan_full_coverage_segments(self, regions: list[tuple[float, float]], duration: float, max_len: float) -> list[tuple[float, float]]:
         """默认覆盖整段音频切片，避免 VAD 漏掉细声细语后 Gemini 根本听不到"""
@@ -414,7 +435,7 @@ class GeminiAudioTranscriber:
         }
         response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
         if response.status_code != 200:
-            raise RuntimeError(f"Gemini 音频识别失败: HTTP {response.status_code} {response.text[:200]}")
+            self._raise_audio_http_error(response)
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
@@ -447,13 +468,55 @@ class GeminiAudioTranscriber:
             json=payload,
         )
         if response.status_code != 200:
-            raise RuntimeError(f"Gemini 音频识别失败: HTTP {response.status_code} {response.text[:200]}")
+            self._raise_audio_http_error(response)
         data = response.json()
         candidates = data.get("candidates") or []
         if not candidates:
             raise RuntimeError("Gemini 音频识别未返回 candidates")
         parts = ((candidates[0].get("content") or {}).get("parts") or [])
         return "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict)).strip()
+
+    def _raise_audio_http_error(self, response: Any) -> None:
+        """把接口错误转换成前端可读提示，避免把整页 HTML 直接展示出来"""
+        status = getattr(response, "status_code", "未知状态")
+        detail = self._response_error_message(response)
+        if str(status) == "524":
+            raise RuntimeError(
+                "Gemini 音频识别失败: HTTP 524 中转服务超时。"
+                "请重启软件加载最新分段逻辑后，从字幕阶段重试；"
+                f"接口返回: {detail}"
+            )
+        raise RuntimeError(f"Gemini 音频识别失败: HTTP {status} {detail}")
+
+    def _response_error_message(self, response: Any) -> str:
+        """提取接口错误摘要，优先使用 JSON 错误，HTML 错误页只保留标题或纯文本"""
+        text = str(getattr(response, "text", "") or "").strip()
+        try:
+            data = response.json()
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+                code = str(error.get("code") or "").strip()
+                if message and code:
+                    return f"{message}（{code}）"
+                if message:
+                    return message
+            for key in ("message", "detail"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        if text.lower().startswith(("<!doctype html", "<html")):
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
+            if title_match:
+                title = " ".join(re.sub(r"<[^>]+>", " ", title_match.group(1)).split())
+                if title:
+                    return title[:300]
+            plain = " ".join(re.sub(r"<[^>]+>", " ", text).split())
+            return plain[:300] if plain else "HTML 错误页"
+        return text[:500] if text else f"HTTP {getattr(response, 'status_code', '未知状态')}"
 
     def _parse_segment_response(self, text: str, seg_start: float) -> list[dict]:
         """解析模型返回的 JSON 句子数组，加段偏移转成完整时间轴字幕条目"""

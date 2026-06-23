@@ -58,6 +58,17 @@ class PlanSegmentsTest(unittest.TestCase):
         self.assertTrue(19.9 <= segments[0][1] <= 20.4)
         self.assertTrue(99.6 <= segments[1][0] <= 100.0)
 
+    def test_vad_only_long_region_is_force_split(self):
+        """即使 VAD 把整片当成一个语音区间，也不能发 421 秒单段给 Gemini"""
+        transcriber = _make_transcriber()
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "0"}):
+            segments = transcriber._plan_segments([(0.0, 421.3)], duration=421.3, max_len=90.0)
+
+        self.assertGreater(len(segments), 1)
+        self.assertAlmostEqual(segments[0][0], 0.0, places=1)
+        self.assertAlmostEqual(segments[-1][1], 421.3, places=1)
+        self.assertTrue(all(end - start <= 91.0 for start, end in segments))
+
     def test_splits_when_exceeding_max_len(self):
         """累计跨度超过上限时在静音处断成多段"""
         transcriber = _make_transcriber()
@@ -160,6 +171,34 @@ class GeminiSegmentFailureTest(unittest.TestCase):
                 ))
 
         self.assertIn("已停止避免漏字幕", str(context.exception))
+
+
+class AudioHttpErrorTest(unittest.TestCase):
+    """音频接口错误提示测试"""
+
+    def test_openai_audio_524_reports_gateway_timeout_without_html_dump(self):
+        """中转返回 524 HTML 时，应提示超时而不是把整页 HTML 打到前端"""
+        transcriber = _make_transcriber()
+
+        class FakeResponse:
+            status_code = 524
+            text = "<!DOCTYPE html><html><head><title>524 A timeout occurred</title></head><body>cloudflare</body></html>"
+
+            def json(self):
+                raise ValueError("not json")
+
+        class FakeClient:
+            async def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        with self.assertRaises(RuntimeError) as context:
+            asyncio.run(transcriber._call_openai_audio(FakeClient(), "abc", "prompt"))
+
+        message = str(context.exception)
+        self.assertIn("HTTP 524", message)
+        self.assertIn("中转服务超时", message)
+        self.assertIn("524 A timeout occurred", message)
+        self.assertNotIn("<!DOCTYPE", message)
 
 
 class AlignTimelineTest(unittest.TestCase):
