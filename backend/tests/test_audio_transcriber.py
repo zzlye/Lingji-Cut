@@ -2,6 +2,7 @@
 
 import os
 import sys
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -32,12 +33,26 @@ def _make_transcriber() -> GeminiAudioTranscriber:
 class PlanSegmentsTest(unittest.TestCase):
     """分段规划测试"""
 
-    def test_merges_adjacent_regions_within_limit(self):
-        """跨度不超过上限的相邻语音区间应合并成一段，切点落在静音处"""
+    def test_full_coverage_segments_fill_vad_gaps(self):
+        """默认覆盖完整音频，即使 VAD 没检测到的空档也会发给 Gemini"""
         transcriber = _make_transcriber()
         regions = [(0.0, 10.0), (12.0, 20.0), (100.0, 110.0)]
-        segments = transcriber._plan_segments(regions, duration=120.0, max_len=90.0)
-        # 前两段合并(跨度20s)，第三段单独
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "1"}):
+            segments = transcriber._plan_segments(regions, duration=120.0, max_len=90.0)
+
+        self.assertEqual(len(segments), 2)
+        self.assertAlmostEqual(segments[0][0], 0.0, places=1)
+        self.assertGreaterEqual(segments[0][1], 59.0)
+        self.assertLessEqual(segments[1][0], segments[0][1])
+        self.assertAlmostEqual(segments[-1][1], 120.0, places=1)
+
+    def test_vad_only_segments_can_be_enabled(self):
+        """需要省 token 时仍可用环境变量切回旧版只发 VAD 人声区间"""
+        transcriber = _make_transcriber()
+        regions = [(0.0, 10.0), (12.0, 20.0), (100.0, 110.0)]
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "0"}):
+            segments = transcriber._plan_segments(regions, duration=120.0, max_len=90.0)
+
         self.assertEqual(len(segments), 2)
         self.assertAlmostEqual(segments[0][0], 0.0, places=1)
         self.assertTrue(19.9 <= segments[0][1] <= 20.4)
@@ -47,13 +62,23 @@ class PlanSegmentsTest(unittest.TestCase):
         """累计跨度超过上限时在静音处断成多段"""
         transcriber = _make_transcriber()
         regions = [(0.0, 50.0), (55.0, 100.0), (105.0, 150.0)]
-        segments = transcriber._plan_segments(regions, duration=160.0, max_len=90.0)
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "1"}):
+            segments = transcriber._plan_segments(regions, duration=160.0, max_len=90.0)
         self.assertGreaterEqual(len(segments), 2)
+        self.assertAlmostEqual(segments[0][0], 0.0, places=1)
+        self.assertAlmostEqual(segments[-1][1], 160.0, places=1)
 
-    def test_empty_regions_returns_empty(self):
-        """没有语音区间时返回空，由上层兜底整段处理"""
+    def test_empty_regions_returns_whole_audio_in_full_coverage_mode(self):
+        """没有 VAD 区间时仍把整段音频交给 Gemini 判断，避免细声细语被整体跳过"""
         transcriber = _make_transcriber()
-        self.assertEqual(transcriber._plan_segments([], duration=60.0, max_len=90.0), [])
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "1"}):
+            self.assertEqual(transcriber._plan_segments([], duration=60.0, max_len=90.0), [(0.0, 60.0)])
+
+    def test_empty_regions_can_return_empty_in_vad_only_mode(self):
+        """旧版 VAD-only 模式没有语音区间时仍由上层兜底整段处理"""
+        transcriber = _make_transcriber()
+        with patch.dict(os.environ, {"YTV_GEMINI_ASR_FULL_COVERAGE": "0"}):
+            self.assertEqual(transcriber._plan_segments([], duration=60.0, max_len=90.0), [])
 
 
 class ParseSegmentResponseTest(unittest.TestCase):
@@ -99,6 +124,42 @@ class ParseSegmentResponseTest(unittest.TestCase):
         entries = transcriber._parse_segment_response(text, seg_start=0.0)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["text"], "有内容")
+
+
+class GeminiSegmentFailureTest(unittest.TestCase):
+    """Gemini 分段失败不能静默漏字幕"""
+
+    def test_invalid_non_empty_response_raises_for_retry(self):
+        """模型返回非空乱码时不能当作无字幕片段吞掉"""
+        transcriber = _make_transcriber()
+
+        async def fake_call(_client, _audio_b64, _language):
+            return "无法整理成 JSON"
+
+        with patch.object(transcriber, "_call_audio_once", side_effect=fake_call):
+            with self.assertRaises(RuntimeError) as context:
+                asyncio.run(transcriber._transcribe_one_segment(object(), 0.0, __file__, None))
+
+        self.assertIn("可解析的字幕 JSON", str(context.exception))
+
+    def test_segment_request_failure_stops_whole_transcription(self):
+        """任一音频分段失败时整体失败，避免显示成功但实际漏一段"""
+        transcriber = _make_transcriber()
+
+        async def fake_transcribe(_client, seg_start, _path, _language):
+            if seg_start == 0.0:
+                raise RuntimeError("接口超时")
+            return [{"index": 1, "start": "00:00:10,000", "end": "00:00:11,000", "text": "后半段"}]
+
+        with patch.object(transcriber, "_transcribe_one_segment", side_effect=fake_transcribe):
+            with self.assertRaises(RuntimeError) as context:
+                asyncio.run(transcriber._transcribe_segments(
+                    [(0, 0.0, __file__), (1, 10.0, __file__)],
+                    None,
+                    None,
+                ))
+
+        self.assertIn("已停止避免漏字幕", str(context.exception))
 
 
 class AlignTimelineTest(unittest.TestCase):

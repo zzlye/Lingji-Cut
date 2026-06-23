@@ -117,6 +117,12 @@ class GeminiAudioTranscriber:
 
     def _plan_segments(self, regions: list[tuple[float, float]], duration: float, max_len: float) -> list[tuple[float, float]]:
         """把 VAD 语音区间贪心合并成不超过 max_len 的分段，切点落在静音间隙避免切断句子"""
+        if self._full_coverage_segments_enabled():
+            return self._plan_full_coverage_segments(regions, duration, max_len)
+        return self._plan_vad_segments(regions, duration, max_len)
+
+    def _plan_vad_segments(self, regions: list[tuple[float, float]], duration: float, max_len: float) -> list[tuple[float, float]]:
+        """旧版 VAD 分段：只发送检测到的人声区间，可用环境变量切回"""
         if not regions:
             return []
         segments: list[tuple[float, float]] = []
@@ -134,6 +140,43 @@ class GeminiAudioTranscriber:
         for start, end in segments:
             padded.append((max(0.0, start - 0.3), min(duration, end + 0.3)))
         return padded
+
+    def _plan_full_coverage_segments(self, regions: list[tuple[float, float]], duration: float, max_len: float) -> list[tuple[float, float]]:
+        """默认覆盖整段音频切片，避免 VAD 漏掉细声细语后 Gemini 根本听不到"""
+        safe_duration = max(0.0, float(duration))
+        safe_max_len = max(20.0, float(max_len))
+        if safe_duration <= 0.0:
+            return []
+        if safe_duration <= safe_max_len:
+            return [(0.0, safe_duration)]
+
+        cut_candidates: list[float] = []
+        ordered_regions = sorted((max(0.0, start), min(safe_duration, end)) for start, end in regions if end > start)
+        for left, right in zip(ordered_regions, ordered_regions[1:]):
+            gap_start = left[1]
+            gap_end = right[0]
+            if gap_end - gap_start >= 0.3:
+                cut_candidates.append((gap_start + gap_end) / 2.0)
+
+        segments: list[tuple[float, float]] = []
+        start = 0.0
+        overlap = min(1.0, max(0.0, self._env_float("YTV_GEMINI_ASR_SEGMENT_OVERLAP_S", 0.3, 0.0, 3.0)))
+        min_piece = min(20.0, safe_max_len * 0.4)
+        while start < safe_duration - 0.05:
+            max_end = min(safe_duration, start + safe_max_len)
+            if max_end >= safe_duration:
+                end = safe_duration
+            else:
+                usable_cuts = [cut for cut in cut_candidates if start + min_piece <= cut <= max_end]
+                end = max(usable_cuts) if usable_cuts else max_end
+            if end <= start + 0.2:
+                end = min(safe_duration, start + safe_max_len)
+            segments.append((start, end))
+            if end >= safe_duration:
+                break
+            next_start = max(0.0, end - overlap)
+            start = end if next_start <= start + 0.1 else next_start
+        return segments
 
     def _export_segment_files(
         self,
@@ -186,6 +229,8 @@ class GeminiAudioTranscriber:
         total = len(seg_files)
 
         async with httpx.AsyncClient(timeout=self._timeout()) as client:
+            failures: list[str] = []
+
             async def run_one(slot: int, seg_start: float, mp3_path: str) -> None:
                 nonlocal done
                 async with semaphore:
@@ -193,6 +238,7 @@ class GeminiAudioTranscriber:
                         results[slot] = await self._transcribe_one_segment(client, seg_start, mp3_path, language)
                     except Exception as exc:
                         logger.warning(f"Gemini 识别分段(起点 {seg_start:.1f}s)失败: {exc}")
+                        failures.append(f"{seg_start:.1f}s: {exc}")
                         results[slot] = []
                     finally:
                         done += 1
@@ -200,6 +246,11 @@ class GeminiAudioTranscriber:
                             progress_callback(min(95.0, 30.0 + done / max(1, total) * 65.0))
 
             await asyncio.gather(*(run_one(slot, seg_start, path) for slot, (_, seg_start, path) in enumerate(seg_files)))
+
+        if failures:
+            sample = "；".join(failures[:3])
+            suffix = f"；另有 {len(failures) - 3} 段失败" if len(failures) > 3 else ""
+            raise RuntimeError(f"Gemini 识别有 {len(failures)} 个音频分段失败，已停止避免漏字幕: {sample}{suffix}")
 
         entries: list[dict] = []
         for chunk in results:
@@ -277,7 +328,10 @@ class GeminiAudioTranscriber:
         for attempt in range(retry + 1):
             try:
                 text = await self._call_audio_once(client, audio_b64, language)
-                return self._parse_segment_response(text, seg_start)
+                entries = self._parse_segment_response(text, seg_start)
+                if not entries and not self._is_explicit_empty_response(text):
+                    raise RuntimeError("模型没有返回可解析的字幕 JSON")
+                return entries
             except Exception as exc:
                 last_error = exc
                 if attempt < retry:
@@ -465,9 +519,34 @@ class GeminiAudioTranscriber:
             data = data.get("items") or data.get("segments") or data.get("result") or []
         return data if isinstance(data, list) else []
 
+    def _is_explicit_empty_response(self, text: str) -> bool:
+        """判断模型是否明确返回空数组，区别于返回乱码导致解析为空"""
+        cleaned = str(text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            return False
+        return data == [] or (isinstance(data, dict) and data.get("items") == [])
+
     def _segment_seconds(self) -> float:
         """单段目标时长，太长大模型时间戳易漂移，太短拖慢且丢上下文"""
         return self._asr._env_float("YTV_GEMINI_ASR_SEGMENT_S", 90.0, 20.0, 300.0)
+
+    def _full_coverage_segments_enabled(self) -> bool:
+        """Gemini 内容识别默认覆盖整段音频，避免低音量人声被 VAD 过滤掉"""
+        configured = str(os.environ.get("YTV_GEMINI_ASR_FULL_COVERAGE") or "true").strip().lower()
+        return configured not in {"0", "false", "off", "no"}
+
+    def _env_float(self, key: str, default: float, minimum: float, maximum: float) -> float:
+        """读取浮点环境变量并限制范围"""
+        try:
+            value = float(os.environ.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
 
     def _concurrency(self) -> int:
         """并发分段数，中转转发音频较慢且并发大易超时，默认保守"""
