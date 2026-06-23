@@ -799,7 +799,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <SwitchField label="一键流程启用配音" description="关闭时一键完成会跳过配音" checked={automationOptions.enable_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ enable_voice: v }))} />
             <SwitchField label="额外导出无配音字幕版" description="开启后会多生成一个保留原声、没有配音的字幕版视频" checked={automationOptions.export_subtitle_only_when_voice} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ export_subtitle_only_when_voice: v }))} />
             <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs leading-5 text-accent">
-              一键配音固定使用智能时间轴：按最终中文字幕逐条生成，按真实音频时长排队，必要时顺延后续字幕，避免多段配音互相覆盖。
+              一键配音固定使用连续语义窗口：同音色短停顿字幕会合并成一段自然配音，换说话人或长停顿才拆开；生成后按真实音频时长排队，避免多段配音互相覆盖。
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
               <NumberField label="并发数" value={automationOptions.voice_concurrency} min={1} max={8} step={1} onChange={(v) => setAutomationOptions(saveAutomationPreferences({ voice_concurrency: Math.max(1, Math.round(v)) }))} />

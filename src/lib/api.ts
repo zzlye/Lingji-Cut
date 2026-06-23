@@ -496,6 +496,10 @@ export type AutomationStartParams = {
   voice_mode?: 'batched'
   audio_mode?: 'replace' | 'mix' | 'background'
   original_volume?: number
+  voice_window_size?: number
+  voice_window_chars?: number
+  voice_window_max_ms?: number
+  voice_window_gap_ms?: number
   voice_concurrency?: number
   voice_min_gap_ms?: number
   multi_speaker_enabled?: boolean
@@ -512,6 +516,10 @@ export type AutomationRerunOverrides = Partial<Pick<AutomationStartParams,
   | 'voice_profile_id'
   | 'audio_mode'
   | 'original_volume'
+  | 'voice_window_size'
+  | 'voice_window_chars'
+  | 'voice_window_max_ms'
+  | 'voice_window_gap_ms'
   | 'voice_concurrency'
   | 'voice_min_gap_ms'
   | 'multi_speaker_enabled'

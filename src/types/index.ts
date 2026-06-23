@@ -363,6 +363,10 @@ export interface AutomationPreferences {
   voice_mode: 'batched'
   audio_mode: 'replace' | 'mix' | 'background'
   original_volume: number
+  voice_window_size: number
+  voice_window_chars: number
+  voice_window_max_ms: number
+  voice_window_gap_ms: number
   voice_concurrency: number
   voice_min_gap_ms: number
   multi_speaker_enabled: boolean

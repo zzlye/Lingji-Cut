@@ -270,69 +270,77 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """智能配音：逐条生成真实音频，再按真实尾音顺序拼接整轨"""
+        """智能配音：按连续语义窗口生成音频，再按窗口时间轴拼接整轨"""
         normalized_segments = self._normalize_timed_segments(segments)
         if not normalized_segments:
             raise ValueError("没有可生成配音的字幕分段")
 
-        options = settings or {}
+        options = dict(settings or {})
         audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        batch_size = max(1, min(80, self._int(options.get("voice_batch_size"), 16)))
-        max_chars = max(100, min(12000, self._int(options.get("voice_batch_chars"), 1800)))
+        fallback_group_size = min(max(1, self._int(options.get("voice_batch_size"), 8)), 8)
+        group_size = max(1, min(20, self._int(options.get("voice_window_size"), self._int(options.get("voice_group_size"), fallback_group_size))))
+        group_chars = max(40, min(1200, self._int(options.get("voice_window_chars"), self._int(options.get("voice_group_chars"), 320))))
+        raw_window_ms = options.get("voice_window_max_ms")
+        if raw_window_ms is None:
+            raw_window_seconds = options.get("voice_group_max_seconds")
+            raw_window_ms = int(self._float(raw_window_seconds, 12.0) * 1000) if raw_window_seconds is not None else 12000
+        group_window_ms = max(1500, min(30000, self._int(raw_window_ms, 12000)))
+        raw_gap_ms = options.get("voice_window_gap_ms")
+        if raw_gap_ms is None:
+            raw_gap_ms = options.get("voice_group_gap_ms")
+        group_gap_ms = max(0, min(3000, self._int(raw_gap_ms, 800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
         semaphore = asyncio.Semaphore(concurrency)
+        voice_groups = self._group_timed_segments(
+            normalized_segments,
+            group_size=group_size,
+            max_chars=group_chars,
+            max_window_ms=group_window_ms,
+            max_gap_ms=group_gap_ms,
+            voice_selector=voice_selector,
+            style_selector=style_selector,
+            default_voice=voice,
+        )
+        if not voice_groups:
+            raise ValueError("没有可生成配音的字幕分组")
 
         # 临时目录跟最终输出放在同一工作区，便于用户排查并避免跨盘移动。
         temp_dir = tempfile.mkdtemp(prefix="voice_videolingo_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         timed_audio_paths: list[dict[str, Any]] = []
 
-        async def generate_segment(index: int, segment: dict[str, Any]) -> dict[str, Any]:
-            """按单条字幕生成音频，任务表只记录真实时长，不在这里混音"""
+        async def generate_group(index: int, group: dict[str, Any]) -> list[dict[str, Any]]:
+            """按连续字幕窗口生成音频，减少逐句 TTS 的重新开口和机械换气"""
             async with semaphore:
-                segment_path = os.path.join(temp_dir, f"segment_{index:04d}.{audio_format}")
-                segment_voice = voice_selector(segment) if voice_selector else voice
-                segment_style = style_selector(segment) if style_selector else ""
-                segment_duration_ms = max(1, int(segment["end_ms"]) - int(segment["start_ms"]))
-                await self.generate_voice(
-                    text=str(segment["text"]),
-                    output_path=segment_path,
+                generated_items = await self._generate_grouped_voice_items(
+                    group=group,
+                    temp_dir=temp_dir,
+                    file_stem=f"window_{index:04d}",
+                    audio_format=audio_format,
                     provider_type=provider_type,
-                    voice=str(segment_voice or voice),
                     api_key=api_key,
                     base_url=base_url,
                     model=model,
-                    settings=self._settings_with_timing_prompt(options, str(segment_style or ""), segment_duration_ms),
+                    settings=options,
                 )
-                source_duration_seconds = self._audio_duration_seconds(segment_path)
-                return {
-                    "path": segment_path,
-                    "index": index,
-                    "start_ms": int(segment["start_ms"]),
-                    "end_ms": int(segment["end_ms"]),
-                    "duration_ms": segment_duration_ms,
-                    "source_duration_ms": int((source_duration_seconds or 0) * 1000),
-                    "text": str(segment.get("text") or ""),
-                    "speaker": str(segment.get("speaker") or ""),
-                    "voice": str(segment_voice or voice),
-                    "style_prompt": str(segment_style or ""),
-                }
+                for item in generated_items:
+                    item.setdefault("index", index)
+                    item.setdefault("voice", str(group.get("voice") or voice))
+                    item.setdefault("style_prompt", str(group.get("style_prompt") or ""))
+                return generated_items
 
         try:
-            total = len(normalized_segments)
+            total = len(voice_groups)
             completed = 0
-            index_offset = 0
-            for chunk in self._chunk_timed_segments(normalized_segments, batch_size, max_chars):
-                tasks = [
-                    asyncio.create_task(generate_segment(index_offset + index, segment))
-                    for index, segment in enumerate(chunk, 1)
-                ]
-                for task in asyncio.as_completed(tasks):
-                    timed_audio_paths.append(await task)
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(10 + completed / max(total, 1) * 70)
-                index_offset += len(chunk)
+            tasks = [
+                asyncio.create_task(generate_group(index, group))
+                for index, group in enumerate(voice_groups, 1)
+            ]
+            for task in asyncio.as_completed(tasks):
+                timed_audio_paths.extend(await task)
+                completed += 1
+                if progress_callback:
+                    progress_callback(10 + completed / max(total, 1) * 70)
 
             timed_audio_paths = self._plan_smart_dubbing_timeline(timed_audio_paths, options, temp_dir)
             if progress_callback:
@@ -1080,92 +1088,41 @@ class VoiceEngine:
         model: str,
         settings: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """生成分组音频；超出窗口时自动提速，仍失败则递归拆分"""
+        """生成连续语义窗口音频；每个窗口只请求一次 TTS，避免逐句重复开口"""
         segments = list(group.get("segments") or [])
         if not segments:
             return []
 
-        max_speed = max(1.0, min(2.0, self._float(settings.get("voice_group_max_speed"), 1.25)))
-        retry_margin = max(1.0, min(1.5, self._float(settings.get("voice_group_duration_margin"), 1.12)))
         window_ms = max(1, int(group["end_ms"]) - int(group["start_ms"]))
-        # 多句分组一旦超出原时间窗就会压住下一组；单句无法再拆，才允许少量尾音溢出。
-        strict_window_ms = window_ms if len(segments) > 1 else max(1, int(window_ms * retry_margin))
-        speed_values = [1.0]
-        if max_speed > 1.0 and self._provider_supports_speed(provider_type):
-            speed_values.extend([min(max_speed, 1.12), min(max_speed, 1.25), max_speed])
-        speed_values = self._unique_speeds(speed_values)
-        last_path = ""
-        last_duration_ms = 0
-
-        for attempt, speed in enumerate(speed_values, 1):
-            group_path = os.path.join(temp_dir, f"{file_stem}_try{attempt}.{audio_format}")
-            group_settings = self._settings_with_group_prompt(
-                settings,
-                str(group.get("style_prompt") or ""),
-                window_ms,
-            )
-            group_settings = dict(group_settings)
-            group_settings["speed"] = speed
-            await self.generate_voice(
-                text=str(group["text"]),
-                output_path=group_path,
-                provider_type=provider_type,
-                voice=str(group.get("voice") or ""),
-                api_key=api_key,
-                base_url=base_url,
-                model=model,
-                settings=group_settings,
-            )
-            duration_seconds = self._audio_duration_seconds(group_path)
-            duration_ms = int((duration_seconds or 0) * 1000)
-            last_path = group_path
-            last_duration_ms = duration_ms
-            if duration_ms <= strict_window_ms:
-                return [{
-                    "path": group_path,
-                    "start_ms": int(group["start_ms"]),
-                    "duration_ms": window_ms,
-                    "source_duration_ms": duration_ms,
-                    "text": str(group.get("text") or ""),
-                    "segments": segments,
-                }]
-
-        if len(segments) <= 1:
-            return [{
-                "path": last_path,
-                "start_ms": int(group["start_ms"]),
-                "duration_ms": window_ms,
-                "source_duration_ms": last_duration_ms,
-                "text": str(group.get("text") or ""),
-                "segments": segments,
-            }]
-
-        middle = max(1, len(segments) // 2)
-        left = self._build_voice_group(segments[:middle], str(group.get("voice") or ""), str(group.get("style_prompt") or ""))
-        right = self._build_voice_group(segments[middle:], str(group.get("voice") or ""), str(group.get("style_prompt") or ""))
-        left_items = await self._generate_grouped_voice_items(
-            group=left,
-            temp_dir=temp_dir,
-            file_stem=f"{file_stem}_a",
-            audio_format=audio_format,
+        group_path = os.path.join(temp_dir, f"{file_stem}.{audio_format}")
+        group_settings = self._settings_with_group_prompt(
+            settings,
+            str(group.get("style_prompt") or ""),
+            window_ms,
+        )
+        await self.generate_voice(
+            text=str(group["text"]),
+            output_path=group_path,
             provider_type=provider_type,
+            voice=str(group.get("voice") or ""),
             api_key=api_key,
             base_url=base_url,
             model=model,
-            settings=settings,
+            settings=group_settings,
         )
-        right_items = await self._generate_grouped_voice_items(
-            group=right,
-            temp_dir=temp_dir,
-            file_stem=f"{file_stem}_b",
-            audio_format=audio_format,
-            provider_type=provider_type,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            settings=settings,
-        )
-        return left_items + right_items
+        duration_seconds = self._audio_duration_seconds(group_path)
+        duration_ms = int((duration_seconds or 0) * 1000)
+        return [{
+            "path": group_path,
+            "start_ms": int(group["start_ms"]),
+            "original_start_ms": int(group["start_ms"]),
+            "end_ms": int(group["end_ms"]),
+            "duration_ms": window_ms,
+            "source_duration_ms": duration_ms,
+            "text": str(group.get("text") or ""),
+            "speaker": str(segments[0].get("speaker") or "") if segments else "",
+            "segments": segments,
+        }]
 
     def _unique_speeds(self, speeds: list[float]) -> list[float]:
         """清理重复语速，避免同一速度重复请求接口"""
@@ -1339,7 +1296,7 @@ class VoiceEngine:
         settings: dict[str, Any],
         temp_dir: str,
     ) -> list[dict[str, Any]]:
-        """按逐句真实音频排队，轻微超时才自动提速，绝不裁切或混叠"""
+        """按连续窗口规划真实音频，轻微超时本地提速，严重超时才顺延"""
         items = sorted(
             self._normalize_timed_audio_paths(timed_audio_paths),
             key=lambda value: self._int(value.get("start_ms"), 0),

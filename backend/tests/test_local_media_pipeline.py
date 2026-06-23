@@ -141,8 +141,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(temp_dir_calls, [output_dir])
         self.assertTrue(os.path.exists(output_audio))
 
-    def test_batched_timed_voice_generates_each_subtitle_separately(self):
-        """批量时间轴配音逐条生成音频，最后再按字幕时间混合"""
+    def test_batched_timed_voice_merges_continuous_windows(self):
+        """连续窗口配音会合并短间隔同音色字幕，减少逐句 TTS 的断裂感"""
         output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
         generated: list[dict[str, str]] = []
         stitched_items: list[dict] = []
@@ -165,24 +165,26 @@ class LocalMediaPipelineTest(unittest.TestCase):
         ):
             result_path = asyncio.run(self.voice_engine.generate_batched_timed_voice_track(
                 segments=[
-                    {"start_ms": 0, "end_ms": 3000, "text": "第一句", "speaker": "旁白"},
-                    {"start_ms": 3500, "end_ms": 6000, "text": "第二句", "speaker": "角色A"},
+                    {"start_ms": 0, "end_ms": 1200, "text": "第一句", "speaker": "旁白"},
+                    {"start_ms": 1400, "end_ms": 2600, "text": "第二句", "speaker": "旁白"},
+                    {"start_ms": 3500, "end_ms": 6000, "text": "第三句", "speaker": "角色A"},
                 ],
                 output_path=output_audio,
                 voice="alloy",
                 voice_selector=lambda segment: "nova" if segment.get("speaker") == "角色A" else "alloy",
                 style_selector=lambda segment: "对话风格" if segment.get("speaker") == "角色A" else "解说风格",
-                settings={"voice_batch_size": 8, "voice_batch_chars": 900, "voice_concurrency": 1},
+                settings={"voice_window_size": 8, "voice_window_chars": 900, "voice_window_gap_ms": 800, "voice_concurrency": 1},
             ))
 
         self.assertEqual(result_path, output_audio)
-        self.assertEqual([item["text"] for item in generated], ["第一句", "第二句"])
+        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第三句"])
         self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
         self.assertTrue(generated[0]["style"].startswith("解说风格"))
         self.assertTrue(generated[1]["style"].startswith("对话风格"))
         self.assertEqual([item["start_ms"] for item in stitched_items], [0, 3500])
         self.assertEqual([item["original_start_ms"] for item in stitched_items], [0, 3500])
-        self.assertEqual([item["duration_ms"] for item in stitched_items], [3000, 2500])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [2600, 2500])
+        self.assertEqual([len(item.get("segments") or []) for item in stitched_items], [2, 1])
 
     def test_batched_timed_voice_writes_timeline_metadata(self):
         """批量配音完成后保存真实片段时长，供最终字幕按配音尾音同步"""
@@ -221,11 +223,11 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual(metadata["segments"][0]["source_duration_ms"], 1420)
         self.assertIn("3.2 秒", generated_settings[0]["style_prompt"])
 
-    def test_batched_timed_voice_plans_timeline_without_overlap(self):
-        """配音真实时长超过原字幕窗时，应顺延后续片段而不是叠加抢话"""
+    def test_batched_timed_voice_keeps_window_timeline_without_sentence_overlap(self):
+        """窗口级配音只生成一段连续音频，不会把相邻短字幕做成两段重叠配音"""
         output_audio = os.path.join(self.temp_dir, "batched_voice.wav")
         stitched_items: list[dict] = []
-        durations = [1.8, 0.4]
+        durations = [1.8]
 
         async def fake_generate_voice(text: str, output_path: str, **_kwargs):
             with open(output_path, "wb") as file:
@@ -252,21 +254,24 @@ class LocalMediaPipelineTest(unittest.TestCase):
                     {"start_ms": 600, "end_ms": 1000, "text": "第二句"},
                 ],
                 output_path=output_audio,
-                settings={"voice_min_gap_ms": 300, "voice_max_speed": 1.0},
+                settings={"voice_window_gap_ms": 800, "voice_min_gap_ms": 300, "voice_max_speed": 1.0},
             ))
 
         self.assertEqual(result_path, output_audio)
+        self.assertEqual(len(stitched_items), 1)
         self.assertEqual(stitched_items[0]["start_ms"], 0)
         self.assertEqual(stitched_items[0]["source_duration_ms"], 1800)
-        self.assertEqual(stitched_items[1]["start_ms"], 2100)
-        self.assertEqual(stitched_items[1]["original_start_ms"], 600)
+        self.assertEqual(stitched_items[0]["duration_ms"], 1000)
+        self.assertEqual(len(stitched_items[0]["segments"]), 2)
         with open(VoiceEngine.timeline_metadata_path(output_audio), "r", encoding="utf-8") as file:
             metadata = json.load(file)
-        self.assertEqual([item["start_ms"] for item in metadata["segments"]], [0, 2100])
-        self.assertEqual(metadata["segments"][0]["audio_end_ms"], 1800)
+        self.assertEqual([item["text"] for item in metadata["segments"]], ["第一句", "第二句"])
+        self.assertLessEqual(metadata["segments"][0]["audio_end_ms"], metadata["segments"][1]["start_ms"])
+        self.assertEqual([item["start_ms"] for item in metadata["segments"]], [0, 1080])
+        self.assertEqual(metadata["segments"][1]["audio_end_ms"], 1800)
 
     def test_videolingo_voice_timeline_preserves_all_segments_without_trimming(self):
-        """新版配音排程只顺延不裁切，所有字幕行都必须保留"""
+        """窗口排程只在窗口之间避让，所有音频窗口都必须保留"""
         audio_paths: list[str] = []
         for index in range(3):
             audio_path = os.path.join(self.temp_dir, f"seg_{index}.wav")
@@ -289,8 +294,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([item["audio_end_ms"] for item in planned], [2200, 3120, 3940])
         self.assertTrue(all(item["path"] in audio_paths for item in planned))
 
-    def test_smart_voice_timeline_only_speeds_up_small_overflow(self):
-        """智能配音只对轻微超时自动提速，严重超时直接顺延后续字幕"""
+    def test_smart_voice_timeline_speeds_up_small_window_overflow(self):
+        """窗口配音只对轻微超时自动提速，严重超时才顺延后续窗口"""
         audio_paths: list[str] = []
         for index in range(3):
             audio_path = os.path.join(self.temp_dir, f"smart_{index}.wav")
@@ -342,8 +347,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([len(chunk) for chunk in chunks], [2, 2, 1])
         self.assertEqual([[segment["text"] for segment in chunk] for chunk in chunks], [["第一句", "第二句"], ["第三句", "第四句"], ["第五句"]])
 
-    def test_grouped_timed_voice_uses_videolingo_timeline_compatibility(self):
-        """旧分组入口也统一走 VideoLingo 式逐条配音时间轴"""
+    def test_grouped_timed_voice_uses_continuous_window_timeline(self):
+        """旧分组入口也统一走连续窗口时间轴"""
         output_audio = os.path.join(self.temp_dir, "grouped_voice.wav")
         generated: list[dict[str, str]] = []
         stitched_items: list[dict] = []
@@ -387,11 +392,12 @@ class LocalMediaPipelineTest(unittest.TestCase):
             ))
 
         self.assertEqual(result_path, output_audio)
-        self.assertEqual([item["text"] for item in generated], ["第一句", "第二句", "第三句"])
-        self.assertEqual([item["voice"] for item in generated], ["alloy", "alloy", "nova"])
-        self.assertTrue(all("参考字幕显示时长" in item["style"] for item in generated))
-        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 3000, 6500])
-        self.assertEqual([item["duration_ms"] for item in stitched_items], [3000, 3000, 3000])
+        self.assertEqual([item["text"] for item in generated], ["第一句，第二句", "第三句"])
+        self.assertEqual([item["voice"] for item in generated], ["alloy", "nova"])
+        self.assertTrue(all("整段目标时长" in item["style"] for item in generated))
+        self.assertEqual([item["start_ms"] for item in stitched_items], [0, 6500])
+        self.assertEqual([item["duration_ms"] for item in stitched_items], [6000, 3000])
+        self.assertEqual([len(item.get("segments") or []) for item in stitched_items], [2, 1])
         legacy_mix.assert_not_called()
 
     def test_timed_voice_mix_keeps_natural_segment_duration_by_default(self):
