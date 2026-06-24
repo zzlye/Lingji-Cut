@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
-import { TextField, SelectField, SegmentedField, SliderField, ColorField, SwitchField, PositionGrid, type FieldOption } from '@/components/fields'
+import { TextField, TextareaField, SelectField, SegmentedField, SliderField, ColorField, SwitchField, PositionGrid, type FieldOption } from '@/components/fields'
 
 /** 字幕位置类型 */
 type SubtitlePosition = SubtitlePreset['position']
@@ -534,6 +534,13 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                       <p className="text-sm font-medium">Gemini 音频切片</p>
                       <p className="text-xs leading-5 text-muted-foreground">切得短更稳、请求更多；切得长上下文更多，但更容易超时。低声细语多的视频建议开启完整覆盖。</p>
                     </div>
+                    <TextareaField
+                      label="Gemini 识别提示词"
+                      value={automationOptions.gemini_audio_prompt}
+                      rows={5}
+                      description="只影响字幕识别，不影响翻译和润色。想让识别更稳、少漏句、或强调逐句输出时改这里。"
+                      onChange={(v) => updateAutomationOptions({ gemini_audio_prompt: v })}
+                    />
                     <SwitchField
                       label="完整覆盖音频"
                       description="开启后按时间切完整音频；关闭后只发送 VAD 判定的人声区间，省接口但更容易漏轻声。"
@@ -580,6 +587,15 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                         suffix=" 秒"
                         description="慢接口可调大；超长卡住时优先调小单段最长。"
                         onChange={(v) => updateAutomationOptions({ gemini_audio_timeout_seconds: v })}
+                      />
+                      <SliderField
+                        label="自动重试"
+                        value={automationOptions.gemini_audio_retry_count}
+                        min={0}
+                        max={5}
+                        step={1}
+                        description="分段超时或中转不稳时自动重试同一段，建议 1-2。"
+                        onChange={(v) => updateAutomationOptions({ gemini_audio_retry_count: v })}
                       />
                     </div>
                   </div>
