@@ -676,9 +676,15 @@ class TextEngine:
         return text
 
     def _fallback_text_units(self, text: str) -> list[str]:
-        """生成字幕回填单元，中文按字、英文按词，方便保留时间轴数量"""
+        """生成字幕回填单元，中文按词、英文按词，方便保留时间轴数量并防止切碎中文词"""
         normalized = " ".join(str(text or "").split())
-        tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+        # 引入 jieba 中文分词进行边界保护
+        try:
+            import jieba
+            raw_tokens = list(jieba.cut(normalized))
+            tokens = [t.strip() for t in raw_tokens if t.strip()]
+        except ImportError:
+            tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
         if len(tokens) >= 2:
             return tokens
         return [char for char in normalized if not char.isspace()]

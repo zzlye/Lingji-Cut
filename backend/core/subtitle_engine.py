@@ -39,6 +39,24 @@ def adjust_cjk_split_boundary(text: str, split_at: int, min_index: int = 1, max_
     upper_bound = len(value) - 1 if max_index is None else min(max_index, len(value) - 1)
     lower_bound = max(1, min_index)
     safe_split = max(lower_bound, min(split_at, upper_bound))
+
+    # 使用 jieba 进行中文分词边界微调，防止切碎词语
+    try:
+        import jieba
+        words = list(jieba.tokenize(value))
+        for word, start, end in words:
+            if start < safe_split < end:
+                adjusted = start if abs(start - split_at) <= abs(end - split_at) else end
+                if lower_bound <= adjusted <= upper_bound:
+                    return adjusted
+                elif adjusted < lower_bound:
+                    return lower_bound
+                else:
+                    return upper_bound
+        return safe_split
+    except (ImportError, Exception):
+        pass
+
     if not _is_unsafe_cjk_split_pair(value[safe_split - 1], value[safe_split]):
         return safe_split
 
@@ -55,6 +73,46 @@ def adjust_cjk_unit_boundary(units: list[str], split_at: int, min_index: int = 1
     """按文本单元回填字幕时避开中文词中间的切点"""
     if len(units) < 2:
         return split_at
+
+    # 如果 units 是单个字符，使用 jieba 还原并微调分词边界
+    try:
+        import jieba
+        cjk_units = [u for u in units if CJK_CHAR_RE.search(u)]
+        if cjk_units and all(len(u) == 1 for u in cjk_units):
+            reconstructed = ""
+            unit_to_char_idx = []
+            for u in units:
+                unit_to_char_idx.append(len(reconstructed))
+                reconstructed += u
+            unit_to_char_idx.append(len(reconstructed))
+
+            char_split = unit_to_char_idx[split_at]
+            words = list(jieba.tokenize(reconstructed))
+            for word, start, end in words:
+                if start < char_split < end:
+                    unit_start = split_at
+                    for idx, char_pos in enumerate(unit_to_char_idx):
+                        if char_pos == start:
+                            unit_start = idx
+                            break
+                    unit_end = split_at
+                    for idx, char_pos in enumerate(unit_to_char_idx):
+                        if char_pos == end:
+                            unit_end = idx
+                            break
+                    adjusted = unit_start if abs(unit_start - split_at) <= abs(unit_end - split_at) else unit_end
+                    upper_bound = len(units) - 1 if max_index is None else min(max_index, len(units) - 1)
+                    lower_bound = max(1, min_index)
+                    if lower_bound <= adjusted <= upper_bound:
+                        return adjusted
+                    elif adjusted < lower_bound:
+                        return lower_bound
+                    else:
+                        return upper_bound
+            return split_at
+    except (ImportError, Exception):
+        pass
+
     upper_bound = len(units) - 1 if max_index is None else min(max_index, len(units) - 1)
     lower_bound = max(1, min_index)
     safe_split = max(lower_bound, min(split_at, upper_bound))

@@ -354,6 +354,8 @@ export interface AutomationPreferences {
   gemini_audio_full_coverage: boolean
   gemini_audio_concurrency: number
   gemini_audio_timeout_seconds: number
+  gemini_audio_prompt: string
+  gemini_audio_retry_count: number
   subtitle_operation: SubtitleTextOperation
   subtitle_target_language: string
   burn_subtitles: boolean

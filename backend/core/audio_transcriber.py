@@ -78,22 +78,14 @@ class GeminiAudioTranscriber:
             regions = self._asr._compute_vad_regions(audio)
             self._emit_progress(progress_callback, 16)
             logger.info(f"Gemini 识别 VAD 完成: {len(regions)} 个语音区间")
-            segment_seconds = self._segment_seconds()
-            segments = self._plan_segments(regions, duration, segment_seconds)
-            if not segments:
-                segments = self._split_long_segment(0.0, duration, duration, segment_seconds)
-            self._emit_progress(progress_callback, 20)
-            logger.info(f"Gemini 识别音频分段规划完成: {len(segments)} 段")
-            seg_files = self._export_segment_files(audio_path, segments, progress_callback)
-            if not seg_files:
-                raise RuntimeError("Gemini 识别音频分段失败")
-            self._emit_progress(progress_callback, 30)
-            logger.info(f"Gemini 识别音频分段导出完成: {len(seg_files)} 段")
-            try:
-                entries = asyncio.run(self._transcribe_segments(seg_files, language, progress_callback))
-            finally:
-                for _, _, path in seg_files:
-                    self._safe_remove(path)
+            entries, segment_count = self._transcribe_with_adaptive_segments(
+                audio_path,
+                regions,
+                duration,
+                self._segment_seconds(),
+                language,
+                progress_callback,
+            )
             if not entries:
                 raise RuntimeError("Gemini 识别没有返回字幕内容")
             entries.sort(key=lambda item: self._asr._srt_time_to_seconds(str(item.get("start") or "00:00:00,000")))
@@ -104,7 +96,7 @@ class GeminiAudioTranscriber:
             if progress_callback:
                 progress_callback(100)
             detected_language = str(language or "auto")
-            logger.info(f"Gemini 识别完成: {len(entries)} 条字幕, model={self.model}, 分段 {len(seg_files)}")
+            logger.info(f"Gemini 识别完成: {len(entries)} 条字幕, model={self.model}, 分段 {segment_count}")
             return entries, detected_language
         finally:
             if temp_audio:
@@ -234,6 +226,115 @@ class GeminiAudioTranscriber:
             self._emit_progress(progress_callback, min(29.0, 20.0 + (index + 1) / max(1, len(segments)) * 9.0))
         return seg_files
 
+    def _transcribe_with_adaptive_segments(
+        self,
+        audio_path: str,
+        regions: list[tuple[float, float]],
+        duration: float,
+        segment_seconds: float,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+    ) -> tuple[list[dict], int]:
+        """按配置分段识别；遇到接口超时类错误时自动缩短分段重试"""
+        attempts = self._adaptive_segment_lengths(segment_seconds)
+        last_error: Optional[Exception] = None
+        for attempt_index, attempt_seconds in enumerate(attempts):
+            segments = self._plan_segments(regions, duration, attempt_seconds)
+            if not segments:
+                segments = self._split_long_segment(0.0, duration, duration, attempt_seconds)
+            self._emit_progress(progress_callback, 20)
+            if attempt_index == 0:
+                logger.info(f"Gemini 识别音频分段规划完成: {len(segments)} 段, 单段上限 {attempt_seconds:.1f}s")
+            else:
+                logger.info(f"Gemini 识别改用更短分段重试: {len(segments)} 段, 单段上限 {attempt_seconds:.1f}s")
+
+            seg_files: list[tuple[int, float, str]] = []
+            try:
+                seg_files = self._export_segment_files(audio_path, segments, progress_callback)
+                if not seg_files:
+                    raise RuntimeError("Gemini 识别音频分段失败")
+                self._emit_progress(progress_callback, 30)
+                logger.info(f"Gemini 识别音频分段导出完成: {len(seg_files)} 段")
+                entries = asyncio.run(self._transcribe_segments(seg_files, language, progress_callback))
+                return entries, len(seg_files)
+            except Exception as exc:
+                last_error = exc
+                has_next = attempt_index < len(attempts) - 1
+                if not has_next or not self._is_retryable_audio_failure(exc):
+                    raise
+                next_seconds = attempts[attempt_index + 1]
+                logger.warning(
+                    "Gemini 识别请求超时或中转不稳定，"
+                    f"自动把音频分段从 {attempt_seconds:.1f}s 降到 {next_seconds:.1f}s 后重试: {exc}"
+                )
+            finally:
+                for _, _, path in seg_files:
+                    self._safe_remove(path)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("Gemini 识别音频分段失败")
+
+    def _adaptive_segment_lengths(self, segment_seconds: float) -> list[float]:
+        """生成降级分段长度，避免 60-90 秒单段在中转上读超时后只能手动重来"""
+        configured = max(20.0, min(300.0, float(segment_seconds or 90.0)))
+        candidates: list[float] = [configured]
+        next_len = configured / 2.0
+        while next_len >= 45.0:
+            candidates.append(next_len)
+            next_len = next_len / 2.0
+        candidates.extend([30.0, 20.0])
+
+        result: list[float] = []
+        for value in candidates:
+            normalized = max(20.0, min(300.0, round(float(value), 1)))
+            if normalized > configured:
+                continue
+            if result and normalized >= result[-1] - 0.1:
+                continue
+            if any(abs(normalized - existing) < 0.1 for existing in result):
+                continue
+            result.append(normalized)
+        return result or [configured]
+
+    def _is_retryable_audio_failure(self, exc: Exception) -> bool:
+        """判断是否适合自动缩短分段重试，避免把 JSON 格式错误等确定性问题反复请求"""
+        detail = f"{type(exc).__name__}: {exc}".lower()
+        retry_keywords = (
+            "readtimeout",
+            "writetimeout",
+            "connecttimeout",
+            "pooltimeout",
+            "timeout",
+            "timed out",
+            "http 502",
+            "http 503",
+            "http 504",
+            "http 524",
+            "connection reset",
+            "temporarily unavailable",
+            "中转服务超时",
+            "超时",
+        )
+        return any(keyword in detail for keyword in retry_keywords)
+
+    def _is_rate_limit_audio_failure(self, exc: Exception) -> bool:
+        """识别接口限流或额度耗尽错误，用退避等待而不是立即失败"""
+        detail = f"{type(exc).__name__}: {exc}".lower()
+        rate_limit_keywords = (
+            "http 429",
+            "429",
+            "rate limited",
+            "too many requests",
+            "resource has been exhausted",
+            "resource exhausted",
+            "quota",
+            "额度",
+            "限流",
+            "请求过于频繁",
+        )
+        return any(keyword in detail for keyword in rate_limit_keywords)
+
     async def _transcribe_segments(
         self,
         seg_files: list[tuple[int, float, str]],
@@ -346,7 +447,9 @@ class GeminiAudioTranscriber:
             audio_b64 = base64.b64encode(audio_file.read()).decode("ascii")
         retry = max(0, self._int(self.settings.get("retry_count"), 1))
         last_error: Optional[Exception] = None
-        for attempt in range(retry + 1):
+        max_retries = retry
+        attempt = 0
+        while attempt <= max_retries:
             try:
                 text = await self._call_audio_once(client, audio_b64, language)
                 entries = self._parse_segment_response(text, seg_start)
@@ -355,15 +458,47 @@ class GeminiAudioTranscriber:
                 return entries
             except Exception as exc:
                 last_error = exc
-                if attempt < retry:
-                    await asyncio.sleep(1.0)
-        # 带上异常类型名，避免 httpx 超时等异常 str 为空导致错误信息看不出原因
-        detail = f"{type(last_error).__name__}: {last_error}" if last_error else "未知错误"
+                # 429/额度繁忙通常需要等待，比普通接口抖动多给几轮退避，避免马上把整条任务暂停。
+                if retry > 0 and self._is_rate_limit_audio_failure(exc):
+                    max_retries = max(max_retries, min(5, max(3, retry)))
+                if attempt < max_retries:
+                    delay = self._segment_retry_delay_seconds(exc, attempt)
+                    logger.warning(
+                        f"Gemini 识别分段(起点 {seg_start:.1f}s)第 {attempt + 1}/{max_retries} 次失败，"
+                        f"{delay:.0f}s 后自动重试: {exc}"
+                    )
+                    await asyncio.sleep(delay)
+            attempt += 1
+        detail = self._format_exception_detail(last_error)
         raise RuntimeError(f"Gemini 音频识别失败({detail})")
+
+    def _segment_retry_delay_seconds(self, exc: Exception, attempt: int) -> float:
+        """计算单段识别重试等待；限流错误必须退避，普通抖动保持较短等待"""
+        if self._is_rate_limit_audio_failure(exc):
+            return min(120.0, 10.0 * (2 ** max(0, attempt)))
+        if self._is_retryable_audio_failure(exc):
+            return min(20.0, 2.0 * (2 ** max(0, attempt)))
+        return 1.0
+
+    def _format_exception_detail(self, exc: Optional[Exception]) -> str:
+        """格式化底层异常，httpx 超时这类空消息也要给用户可理解的原因"""
+        if not exc:
+            return "未知错误"
+        type_name = type(exc).__name__
+        message = str(exc).strip()
+        if not message and "timeout" in type_name.lower():
+            message = "接口在超时时间内没有返回"
+        if self._is_rate_limit_audio_failure(exc):
+            suffix = "，已按限流策略自动重试；如果仍失败，说明接口额度或频率仍受限，请降低识别并发或稍后继续"
+            return f"{type_name}: {message}{suffix}" if message else f"{type_name}: {suffix.lstrip('，')}"
+        if self._is_retryable_audio_failure(exc):
+            suffix = "，已尝试自动缩短音频分段；如果仍失败，请稍后重试或把 Gemini 音频分段改成 20-30 秒"
+            return f"{type_name}: {message}{suffix}" if message else f"{type_name}: {suffix.lstrip('，')}"
+        return f"{type_name}: {message}" if message else type_name
 
     async def _call_audio_once(self, client: Any, audio_b64: str, language: Optional[str]) -> str:
         """根据渠道类型发一次音频转写请求，返回模型输出文本"""
-        prompt = _TRANSCRIBE_PROMPT
+        prompt = str(self.settings.get("audio_prompt") or "").strip() or _TRANSCRIBE_PROMPT
         if language:
             prompt = f"音频语言是 {language}。{prompt}"
         return await self._call_audio_prompt(client, audio_b64, prompt)

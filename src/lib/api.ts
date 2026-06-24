@@ -485,6 +485,8 @@ export type AutomationStartParams = {
   gemini_audio_full_coverage?: boolean
   gemini_audio_concurrency?: number
   gemini_audio_timeout_seconds?: number
+  gemini_audio_prompt?: string
+  gemini_audio_retry_count?: number
   subtitle_operation?: 'skip' | 'none' | 'generate' | 'translate' | 'polish'
   subtitle_target_language?: string
   text_system_prompt?: string
@@ -523,6 +525,8 @@ export type AutomationRerunOverrides = Partial<Pick<AutomationStartParams,
   | 'voice_concurrency'
   | 'voice_min_gap_ms'
   | 'multi_speaker_enabled'
+  | 'gemini_audio_prompt'
+  | 'gemini_audio_retry_count'
   | 'speaker_voice_map'
   | 'speaker_voice_styles'
   | 'glossary_terms'

@@ -52,11 +52,13 @@ export function buildAutomationPayload(url: string): AutomationStartParams {
       : undefined,
     text_profile_id: textProfileId,
     subtitle_recognition_mode: preferences.subtitle_recognition_mode,
+    gemini_audio_prompt: preferences.gemini_audio_prompt,
     gemini_audio_segment_seconds: preferences.gemini_audio_segment_seconds,
     gemini_audio_overlap_seconds: preferences.gemini_audio_overlap_seconds,
     gemini_audio_full_coverage: preferences.gemini_audio_full_coverage,
     gemini_audio_concurrency: preferences.gemini_audio_concurrency,
     gemini_audio_timeout_seconds: preferences.gemini_audio_timeout_seconds,
+    gemini_audio_retry_count: preferences.gemini_audio_retry_count,
     subtitle_operation: preferences.subtitle_operation,
     subtitle_target_language: subtitleTargetLanguage,
     text_system_prompt: getActiveTextSystemPrompt(),
@@ -103,6 +105,7 @@ export function buildAutomationRerunOverrides(): AutomationRerunOverrides {
   return {
     text_profile_id: preferences.text_profile_id || undefined,
     text_system_prompt: getActiveTextSystemPrompt(),
+    gemini_audio_prompt: preferences.gemini_audio_prompt,
     voice_profile_id: preferences.voice_profile_id || undefined,
     audio_mode: preferences.audio_mode,
     original_volume: preferences.original_volume,
@@ -118,5 +121,6 @@ export function buildAutomationRerunOverrides(): AutomationRerunOverrides {
     glossary_terms: preferences.glossary_terms,
     banned_words: preferences.banned_words,
     banned_word_action: preferences.banned_word_action,
+    gemini_audio_retry_count: preferences.gemini_audio_retry_count,
   }
 }

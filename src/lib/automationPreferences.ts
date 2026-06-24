@@ -50,11 +50,13 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_language: 'auto',
   text_profile_id: null,
   subtitle_recognition_mode: 'local',
+  gemini_audio_prompt: '这是一段视频音频。请把里面所有说话内容逐句转写成原始语言的文字，保持原文不要翻译，包括轻声、语气词、笑声里的话也要尽量转写出来。按时间顺序输出一个 JSON 数组，每个元素形如 {"start": 起始秒, "end": 结束秒, "text": "该句原文"}，start/end 是该句在这段音频内的相对秒数（从 0 开始，可带小数）。只输出 JSON 数组本身，不要 markdown 代码块，不要任何解释。确实没有任何说话内容时才输出 []。',
   gemini_audio_segment_seconds: 90,
   gemini_audio_overlap_seconds: 0.3,
   gemini_audio_full_coverage: true,
   gemini_audio_concurrency: 2,
   gemini_audio_timeout_seconds: 300,
+  gemini_audio_retry_count: 1,
   subtitle_operation: 'polish',
   subtitle_target_language: 'zh-CN',
   burn_subtitles: true,
@@ -263,11 +265,15 @@ export function loadAutomationPreferences(): AutomationPreferences {
       subtitle_recognition_mode: ['local', 'gemini_full', 'gemini_align'].includes(parsed.subtitle_recognition_mode)
         ? parsed.subtitle_recognition_mode
         : 'local',
+      gemini_audio_prompt: typeof parsed.gemini_audio_prompt === 'string' && parsed.gemini_audio_prompt.trim()
+        ? parsed.gemini_audio_prompt.trim()
+        : DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_prompt,
       gemini_audio_segment_seconds: normalizeGeminiNumber(parsed.gemini_audio_segment_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_segment_seconds, 20, 300),
       gemini_audio_overlap_seconds: normalizeGeminiNumber(parsed.gemini_audio_overlap_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_overlap_seconds, 0, 3, 1),
       gemini_audio_full_coverage: parsed.gemini_audio_full_coverage !== false,
       gemini_audio_concurrency: normalizeGeminiNumber(parsed.gemini_audio_concurrency, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_concurrency, 1, 8),
       gemini_audio_timeout_seconds: normalizeGeminiNumber(parsed.gemini_audio_timeout_seconds, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_timeout_seconds, 60, 900),
+      gemini_audio_retry_count: normalizeGeminiNumber(parsed.gemini_audio_retry_count, DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_retry_count, 0, 5),
       subtitle_operation: normalizeSubtitleOperation(parsed.subtitle_operation),
       enable_voice: Boolean(parsed.enable_voice && voiceWasExplicitlyChosen),
       export_subtitle_only_when_voice: Boolean(parsed.export_subtitle_only_when_voice),

@@ -200,6 +200,97 @@ class GeminiSegmentFailureTest(unittest.TestCase):
 
         self.assertIn("已停止避免漏字幕", str(context.exception))
 
+    def test_timeout_failure_retries_with_shorter_segments(self):
+        """接口读超时时自动缩短音频分段重试，避免用户只能手动改配置"""
+        transcriber = _make_transcriber()
+        planned_lengths = []
+        fake_segment_path = "D:\\tmp\\ytv_fake_gemini_segment.mp3"
+
+        def fake_plan(_regions, duration, max_len):
+            planned_lengths.append(max_len)
+            return [(0.0, min(duration, max_len))]
+
+        def fake_export(_audio_path, _segments, _progress_callback=None):
+            return [(0, 0.0, fake_segment_path)]
+
+        async def fake_transcribe(_seg_files, _language, _progress_callback):
+            if len(planned_lengths) == 1:
+                raise RuntimeError("Gemini 音频识别失败(ReadTimeout:)")
+            return [{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "ok"}]
+
+        with (
+            patch.object(transcriber, "_plan_segments", side_effect=fake_plan),
+            patch.object(transcriber, "_export_segment_files", side_effect=fake_export),
+            patch.object(transcriber, "_transcribe_segments", side_effect=fake_transcribe),
+        ):
+            entries, segment_count = transcriber._transcribe_with_adaptive_segments(
+                "D:\\tmp\\fake.wav",
+                [],
+                59.7,
+                90.0,
+                None,
+                None,
+            )
+
+        self.assertEqual(entries[0]["text"], "ok")
+        self.assertEqual(segment_count, 1)
+        self.assertEqual(planned_lengths[:2], [90.0, 45.0])
+
+    def test_non_timeout_failure_does_not_adaptive_retry(self):
+        """模型返回格式错误属于确定性失败，不应自动重复消耗接口额度"""
+        transcriber = _make_transcriber()
+        call_count = 0
+        fake_segment_path = "D:\\tmp\\ytv_fake_gemini_segment.mp3"
+
+        async def fake_transcribe(_seg_files, _language, _progress_callback):
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("模型没有返回可解析的字幕 JSON")
+
+        with (
+            patch.object(transcriber, "_plan_segments", return_value=[(0.0, 30.0)]),
+            patch.object(transcriber, "_export_segment_files", return_value=[(0, 0.0, fake_segment_path)]),
+            patch.object(transcriber, "_transcribe_segments", side_effect=fake_transcribe),
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                transcriber._transcribe_with_adaptive_segments(
+                    "D:\\tmp\\fake.wav",
+                    [],
+                    59.7,
+                    90.0,
+                    None,
+                    None,
+                )
+
+        self.assertEqual(call_count, 1)
+        self.assertIn("可解析的字幕 JSON", str(context.exception))
+
+    def test_rate_limit_failure_uses_backoff_before_retry(self):
+        """HTTP 429 不能一秒内立刻重试，否则很容易再次触发限流后暂停整条任务"""
+        transcriber = _make_transcriber()
+        call_count = 0
+        delays: list[float] = []
+
+        async def fake_call(_client, _audio_b64, _language):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Gemini 音频识别失败: HTTP 429 Resource has been exhausted (rate limited)")
+            return '[{"start":0,"end":1,"text":"ok"}]'
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+
+        with (
+            patch.object(transcriber, "_call_audio_once", side_effect=fake_call),
+            patch("backend.core.audio_transcriber.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            entries = asyncio.run(transcriber._transcribe_one_segment(object(), 0.0, __file__, None))
+
+        self.assertEqual(entries[0]["text"], "ok")
+        self.assertEqual(call_count, 2)
+        self.assertGreaterEqual(delays[0], 10.0)
+
 
 class AudioHttpErrorTest(unittest.TestCase):
     """音频接口错误提示测试"""

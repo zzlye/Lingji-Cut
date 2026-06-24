@@ -75,6 +75,9 @@ STAGE_WEIGHTS = {
 # 字幕降级只尝试高价值语言，避免 YouTube 自动翻译列表过长导致任务长时间卡住。
 SUBTITLE_FALLBACK_LANGUAGES = ("zh-CN", "zh-Hans", "zh", "en", "ja", "ko")
 SUBTITLE_MAX_DOWNLOAD_CANDIDATES = 12
+AUTO_RESUME_RUNTIME_KEY = "_auto_resume"
+AUTO_RESUME_BASE_DELAY_SECONDS = 30
+AUTO_RESUME_MAX_DELAY_SECONDS = 180
 
 
 class BannedWordsDetected(RuntimeError):
@@ -158,11 +161,13 @@ class AutomationRunRequest(BaseModel):
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
     subtitle_recognition_mode: str = "local"
+    gemini_audio_prompt: Optional[str] = None
     gemini_audio_segment_seconds: float = Field(default=90.0, ge=20.0, le=300.0)
     gemini_audio_overlap_seconds: float = Field(default=0.3, ge=0.0, le=3.0)
     gemini_audio_full_coverage: bool = True
     gemini_audio_concurrency: int = Field(default=2, ge=1, le=8)
     gemini_audio_timeout_seconds: float = Field(default=300.0, ge=60.0, le=900.0)
+    gemini_audio_retry_count: int = Field(default=1, ge=0, le=5)
     subtitle_operation: str = "none"
     subtitle_target_language: Optional[str] = None
     text_system_prompt: Optional[str] = None
@@ -200,6 +205,7 @@ class AutomationRerunOverrideRequest(BaseModel):
     """继续或重试旧任务时允许从当前设置刷新的参数"""
     text_profile_id: Optional[int] = None
     text_system_prompt: Optional[str] = None
+    gemini_audio_prompt: Optional[str] = None
     voice_profile_id: Optional[int] = None
     audio_mode: Optional[str] = None
     original_volume: Optional[float] = None
@@ -209,6 +215,7 @@ class AutomationRerunOverrideRequest(BaseModel):
     voice_window_gap_ms: Optional[int] = Field(default=None, ge=0, le=3000)
     voice_concurrency: Optional[int] = Field(default=None, ge=1, le=8)
     voice_min_gap_ms: Optional[int] = Field(default=None, ge=0, le=2000)
+    gemini_audio_retry_count: Optional[int] = Field(default=None, ge=0, le=5)
     multi_speaker_enabled: Optional[bool] = None
     speaker_voice_map: Optional[dict[str, str]] = None
     speaker_voice_styles: Optional[dict[str, str]] = None
@@ -1463,11 +1470,13 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
     settings = _load_profile_settings(profile)
     # 前端一键策略里的 Gemini 音频参数优先，避免隐藏环境变量和文本通用参数影响实际切片。
     settings.update({
+        "audio_prompt": str(request.gemini_audio_prompt or "").strip(),
         "segment_seconds": max(20.0, min(300.0, float(request.gemini_audio_segment_seconds or 90.0))),
         "segment_overlap_seconds": max(0.0, min(3.0, float(request.gemini_audio_overlap_seconds or 0.0))),
         "full_coverage": bool(request.gemini_audio_full_coverage),
         "audio_concurrency": max(1, min(8, int(request.gemini_audio_concurrency or 2))),
         "audio_timeout_seconds": max(60.0, min(900.0, float(request.gemini_audio_timeout_seconds or 300.0))),
+        "retry_count": max(0, min(5, int(request.gemini_audio_retry_count or 1))),
     })
     # 识别模型独立于翻译模型：flash 类模型转写音频会编造内容，默认用已验证可靠的 gemini-2.5-pro
     asr_model = os.environ.get("YTV_GEMINI_ASR_MODEL") or (profile.model or "gemini-2.5-pro")
@@ -2271,9 +2280,16 @@ def _join_processed_lines(lines: list[str]) -> str:
 
 
 def _mapping_text_units(text: str, target_count: int) -> list[str]:
-    """生成用于回填时间轴的文本单元，英文优先按词，中文优先按字"""
+    """生成用于回填时间轴的文本单元，英文优先按词，中文优先按词/字"""
     normalized = " ".join(str(text or "").split())
-    tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+    # 使用 jieba 进行中文分词以保证词语完整性
+    try:
+        import jieba
+        raw_tokens = list(jieba.cut(normalized))
+        tokens = [t.strip() for t in raw_tokens if t.strip()]
+    except ImportError:
+        tokens = re.findall(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s]", normalized)
+
     tokens = _attach_mapping_punctuation(tokens)
     if len(tokens) >= max(2, target_count // 2):
         return tokens
@@ -3277,11 +3293,16 @@ def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> No
     except Exception as exc:
         job = db.query(AutomationJobRecord).filter(AutomationJobRecord.id == job_id).first()
         if job:
-            job.status = "failed"
-            job.error_message = str(exc)
-            job.current_step = "流程失败"
-            job.completed_at = datetime.now()
-            db.commit()
+            auto_resume_delay = _prepare_auto_resume_for_transient_failure(db, job, exc)
+            if auto_resume_delay is not None:
+                logger.warning(f"自动化任务遇到临时 Gemini 识别错误，{auto_resume_delay}s 后自动断点续跑: job_id={job_id}, reason={exc}")
+                _schedule_auto_resume_job(job_id, auto_resume_delay)
+            else:
+                job.status = "failed"
+                job.error_message = str(exc)
+                job.current_step = "流程失败"
+                job.completed_at = datetime.now()
+                db.commit()
     finally:
         db.close()
 
@@ -3289,6 +3310,10 @@ def _run_background_job(job_id: str, resume_from_checkpoint: bool = False) -> No
 def _reset_job_for_retry(job: AutomationJobRecord) -> None:
     """重置失败任务，保留原始参数后重新进入后台队列"""
     clear_job_control_requests(None, job)
+    params = _get_job_params(job)
+    if params:
+        _clear_auto_resume_runtime(params)
+        _set_job_params(job, params)
     job.status = "pending"
     job.progress = 0
     job.current_step = "等待重试"
@@ -3513,10 +3538,98 @@ def _set_job_params(job: AutomationJobRecord, params: dict[str, Any]) -> None:
     job.params = json.dumps(params, ensure_ascii=False)
 
 
+def _clear_auto_resume_runtime(params: dict[str, Any]) -> None:
+    """用户手动重试/继续时清掉自动续跑计数，避免旧计数挡住新的继续操作"""
+    params.pop(AUTO_RESUME_RUNTIME_KEY, None)
+
+
+def _auto_resume_delay_seconds(attempt: int) -> int:
+    """计算自动断点续跑等待时间，避免限流后立刻再次打爆接口"""
+    return int(min(AUTO_RESUME_MAX_DELAY_SECONDS, AUTO_RESUME_BASE_DELAY_SECONDS * (2 ** max(0, attempt - 1))))
+
+
+def _is_transient_gemini_audio_failure(params: dict[str, Any], error: Exception) -> bool:
+    """判断是否属于 Gemini 字幕识别的临时失败，可自动从断点续跑"""
+    mode = str(params.get("subtitle_recognition_mode") or "").strip().lower()
+    if mode not in {"gemini_full", "gemini_align"}:
+        return False
+    detail = str(error or "").lower()
+    transient_keywords = (
+        "gemini 音频识别",
+        "http 429",
+        "429",
+        "rate limited",
+        "too many requests",
+        "resource has been exhausted",
+        "resource exhausted",
+        "quota",
+        "readtimeout",
+        "timeout",
+        "http 502",
+        "http 503",
+        "http 504",
+        "http 524",
+        "可解析的字幕 json",
+        "请求过于频繁",
+        "额度",
+        "限流",
+        "中转服务超时",
+    )
+    return any(keyword in detail for keyword in transient_keywords)
+
+
+def _prepare_auto_resume_for_transient_failure(db: Session, job: AutomationJobRecord, error: Exception) -> Optional[int]:
+    """临时 Gemini 识别失败时自动准备断点续跑，返回等待秒数；不可续跑返回 None"""
+    params = _get_job_params(job)
+    if not _is_transient_gemini_audio_failure(params, error):
+        return None
+    try:
+        retry_limit = max(0, min(5, int(params.get("gemini_audio_retry_count") or 0)))
+    except (TypeError, ValueError):
+        retry_limit = 0
+    if retry_limit <= 0:
+        return None
+
+    runtime = params.get(AUTO_RESUME_RUNTIME_KEY)
+    if not isinstance(runtime, dict):
+        runtime = {}
+    try:
+        used_count = max(0, int(runtime.get("gemini_audio_retry_count") or 0))
+    except (TypeError, ValueError):
+        used_count = 0
+    if used_count >= retry_limit:
+        return None
+
+    next_count = used_count + 1
+    delay = _auto_resume_delay_seconds(next_count)
+    runtime["gemini_audio_retry_count"] = next_count
+    runtime["last_error"] = str(error)
+    runtime["updated_at"] = datetime.now().isoformat()
+    params[AUTO_RESUME_RUNTIME_KEY] = runtime
+    _set_job_params(job, params)
+    _prepare_job_for_resume(job)
+    job.current_step = f"临时错误，{delay} 秒后自动继续（{next_count}/{retry_limit}）"
+    job.error_message = f"{error}；系统将在 {delay} 秒后自动继续（{next_count}/{retry_limit}）"
+    db.commit()
+    return delay
+
+
+def _schedule_auto_resume_job(job_id: str, delay_seconds: int) -> None:
+    """延迟提交自动续跑任务，不占用当前自动化线程"""
+    def submit_later() -> None:
+        _submit_automation_job(job_id, True)
+
+    timer = threading.Timer(max(0, delay_seconds), submit_later)
+    timer.daemon = True
+    timer.start()
+
+
 def _merge_rerun_overrides(job: AutomationJobRecord, overrides: Optional[AutomationRerunOverrideRequest]) -> dict[str, Any]:
     """把当前设置里的 API 配置合并进旧任务，避免继续/重试还使用失效配置"""
     params = _get_job_params(job)
+    _clear_auto_resume_runtime(params)
     if not overrides:
+        _set_job_params(job, params)
         return params
     data = overrides.model_dump(exclude_unset=True)
     for key, value in data.items():

@@ -1580,13 +1580,22 @@ class VoiceEngine:
 
         nested_segments = item.get("segments")
         if isinstance(nested_segments, list) and len(nested_segments) > 1 and source_duration_ms > 0:
-            expanded = self._expand_group_timeline_segments(
+            expanded = self._align_group_segments_with_asr(
                 nested_segments,
+                path=path,
                 start_ms=start_ms,
                 original_start_ms=original_start_ms,
                 duration_ms=duration_ms,
                 source_duration_ms=source_duration_ms,
             )
+            if not expanded:
+                expanded = self._expand_group_timeline_segments(
+                    nested_segments,
+                    start_ms=start_ms,
+                    original_start_ms=original_start_ms,
+                    duration_ms=duration_ms,
+                    source_duration_ms=source_duration_ms,
+                )
             if expanded:
                 return expanded
 
@@ -1599,6 +1608,249 @@ class VoiceEngine:
             "text": str(item.get("text") or ""),
             "speaker": str(item.get("speaker") or ""),
         }]
+
+    def _align_group_segments_with_asr(
+        self,
+        nested_segments: list[Any],
+        path: str,
+        start_ms: int,
+        original_start_ms: int,
+        duration_ms: int,
+        source_duration_ms: int,
+    ) -> Optional[list[dict[str, Any]]]:
+        """使用 ASR 语音对齐算法获取更精确的分组字幕时间轴"""
+        if not path or not os.path.exists(path):
+            return None
+        if not nested_segments or len(nested_segments) <= 1:
+            return None
+
+        try:
+            from faster_whisper import WhisperModel
+            import zhconv
+        except ImportError:
+            logger.info("未安装 faster-whisper 或 zhconv，跳过 ASR 语音对齐并使用比例展开")
+            return None
+
+        try:
+            # 1. 实例化或从缓存加载 WhisperModel
+            model = None
+            try:
+                from .local_asr import LocalSpeechRecognizer, _MODEL_CACHE
+                # 尝试用本地识别器配置来加载或复用模型
+                recognizer = LocalSpeechRecognizer()
+                key = (recognizer.model_name, recognizer.model_dir, recognizer.device, recognizer.compute_type, recognizer.cpu_threads)
+                if key in _MODEL_CACHE:
+                    model = _MODEL_CACHE[key]
+                else:
+                    os.makedirs(recognizer.model_dir, exist_ok=True)
+                    model = WhisperModel(
+                        recognizer.model_name,
+                        device=recognizer.device,
+                        compute_type=recognizer.compute_type,
+                        cpu_threads=recognizer.cpu_threads,
+                        download_root=recognizer.model_dir,
+                    )
+                    _MODEL_CACHE[key] = model
+            except Exception as e:
+                logger.warning(f"从 LocalSpeechRecognizer 获取模型失败: {e}，尝试使用默认 CPU/int8 模型...")
+                model = WhisperModel("base", device="cpu", compute_type="int8")
+
+            if not model:
+                return None
+
+            # 2. 识别该小音频片段的字级时间戳
+            segments, info = model.transcribe(path, word_timestamps=True, beam_size=5)
+            words_list = []
+            for segment in segments:
+                if getattr(segment, "words", None):
+                    for w in segment.words:
+                        words_list.append({
+                            "word": w.word,
+                            "start": w.start,
+                            "end": w.end
+                        })
+
+            if not words_list:
+                logger.warning("ASR 语音对齐: Whisper 没有识别到任何单词时间戳")
+                return None
+
+            # 3. 构造平坦的字符流与时间码，统一转换为简体中文进行比对
+            flat_chars = []
+            char_times = []
+            for w in words_list:
+                w_text = zhconv.convert(w["word"], "zh-cn")
+                w_start = w["start"]
+                w_end = w["end"]
+                n_chars = len(w_text)
+                if n_chars > 0:
+                    char_dur = (w_end - w_start) / n_chars
+                    for i, c in enumerate(w_text):
+                        flat_chars.append(c)
+                        char_times.append((w_start + i * char_dur, w_start + (i + 1) * char_dur))
+
+            transcribed_str = "".join(flat_chars)
+
+            def clean_char(c):
+                if c.isalnum():
+                    return c.lower()
+                if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff':
+                    return c
+                return ""
+
+            cleaned_transcribed = [clean_char(c) for c in transcribed_str]
+            non_empty_indices = [i for i, c in enumerate(cleaned_transcribed) if c != ""]
+            cleaned_transcribed_str = "".join([cleaned_transcribed[i] for i in non_empty_indices])
+
+            if not cleaned_transcribed_str:
+                logger.warning("ASR 语音对齐: 转换后的简体中文字符流为空")
+                return None
+
+            # 4. 对齐每一句 nested_segment
+            results = []
+            search_start_idx = 0
+
+            for segment in nested_segments:
+                if not isinstance(segment, dict):
+                    continue
+                text_raw = str(segment.get("text") or "").strip()
+                text = zhconv.convert(text_raw, "zh-cn")
+                cleaned_seg = "".join([clean_char(c) for c in text if clean_char(c) != ""])
+                if not cleaned_seg:
+                    results.append((text_raw, None))
+                    continue
+
+                best_pos = -1
+                best_score = -1
+                best_len = 0
+
+                # 局部搜索窗口 (限制在当前搜索起始索引附近)
+                window_size = len(cleaned_seg) * 2 + 100
+                search_limit = min(len(cleaned_transcribed_str), search_start_idx + window_size)
+
+                for pos in range(search_start_idx, search_limit):
+                    sub = cleaned_transcribed_str[pos : pos + len(cleaned_seg)]
+                    if not sub:
+                        break
+                    score = sum(1 for c1, c2 in zip(cleaned_seg, sub) if c1 == c2)
+                    if score > best_score:
+                        best_score = score
+                        best_pos = pos
+                        best_len = len(sub)
+
+                # 匹配度门槛，容忍部分转写误差
+                if best_pos != -1 and best_score >= max(1, int(len(cleaned_seg) * 0.25)):
+                    start_flat_idx = non_empty_indices[best_pos]
+                    end_flat_idx = non_empty_indices[min(len(non_empty_indices) - 1, best_pos + best_len - 1)]
+
+                    start_sec = char_times[start_flat_idx][0]
+                    end_sec = char_times[end_flat_idx][1]
+                    results.append((text_raw, (start_sec, end_sec)))
+                    search_start_idx = best_pos + int(best_len * 0.8)
+                else:
+                    # 全局回退搜索
+                    best_pos = -1
+                    best_score = -1
+                    best_len = 0
+                    for pos in range(0, len(cleaned_transcribed_str)):
+                        sub = cleaned_transcribed_str[pos : pos + len(cleaned_seg)]
+                        if not sub:
+                            break
+                        score = sum(1 for c1, c2 in zip(cleaned_seg, sub) if c1 == c2)
+                        if score > best_score:
+                            best_score = score
+                            best_pos = pos
+                            best_len = len(sub)
+                    if best_pos != -1 and best_score >= max(1, int(len(cleaned_seg) * 0.3)):
+                        start_flat_idx = non_empty_indices[best_pos]
+                        end_flat_idx = non_empty_indices[min(len(non_empty_indices) - 1, best_pos + best_len - 1)]
+                        start_sec = char_times[start_flat_idx][0]
+                        end_sec = char_times[end_flat_idx][1]
+                        results.append((text_raw, (start_sec, end_sec)))
+                        search_start_idx = best_pos + int(best_len * 0.8)
+                    else:
+                        results.append((text_raw, None))
+
+            # 5. 校验对齐结果：对齐成功的比例过低时放弃 alignment 并回退比例展开
+            valid_aligns = [r for r in results if r[1] is not None]
+            if len(valid_aligns) < len(nested_segments) * 0.5:
+                logger.warning(f"ASR 语音对齐: 对齐成功率过低 ({len(valid_aligns)}/{len(nested_segments)})，回退比例展开")
+                return None
+
+            # 6. 对未对齐成功的片段做线性插值/分配
+            audio_duration_sec = source_duration_ms / 1000.0
+            anchors = []
+            for idx, (text_raw, times) in enumerate(results):
+                if times is not None:
+                    anchors.append((idx, times[0], times[1]))
+
+            final_times = [None] * len(results)
+            for idx, start_sec, end_sec in anchors:
+                final_times[idx] = (start_sec, end_sec)
+
+            for idx in range(len(results)):
+                if final_times[idx] is not None:
+                    continue
+                prev_anchor = None
+                for a_idx, a_start, a_end in reversed(anchors):
+                    if a_idx < idx:
+                        prev_anchor = (a_idx, a_start, a_end)
+                        break
+                next_anchor = None
+                for a_idx, a_start, a_end in anchors:
+                    if a_idx > idx:
+                        next_anchor = (a_idx, a_start, a_end)
+                        break
+
+                left_bound = prev_anchor[2] if prev_anchor else 0.0
+                right_bound = next_anchor[0] if next_anchor else audio_duration_sec
+                left_idx = prev_anchor[0] if prev_anchor else -1
+                right_idx = next_anchor[0] if next_anchor else len(results)
+
+                segment_count = right_idx - left_idx
+                step_idx = idx - left_idx
+                chunk_duration = (right_bound - left_bound) / segment_count
+
+                start_sec = left_bound + chunk_duration * (step_idx - 1)
+                end_sec = left_bound + chunk_duration * step_idx
+                final_times[idx] = (start_sec, end_sec)
+
+            expanded = []
+            previous_end_ms = start_ms
+            audio_end_ms = start_ms + source_duration_ms
+
+            for idx, segment in enumerate(nested_segments):
+                if not isinstance(segment, dict):
+                    continue
+                t_start, t_end = final_times[idx]
+
+                v_start_ms = start_ms + int(t_start * 1000)
+                v_end_ms = start_ms + int(t_end * 1000)
+
+                v_start_ms = max(start_ms, min(v_start_ms, audio_end_ms - 1))
+                v_end_ms = max(v_start_ms + 1, min(v_end_ms, audio_end_ms))
+
+                if v_start_ms < previous_end_ms:
+                    v_start_ms = min(previous_end_ms, v_end_ms - 1)
+                previous_end_ms = v_end_ms
+
+                expanded.append({
+                    "start_ms": v_start_ms,
+                    "original_start_ms": self._int(segment.get("start_ms"), original_start_ms),
+                    "duration_ms": max(1, self._int(segment.get("end_ms"), segment.get("start_ms") or 0) - self._int(segment.get("start_ms"), 0)),
+                    "source_duration_ms": max(1, v_end_ms - v_start_ms),
+                    "audio_end_ms": v_end_ms,
+                    "text": str(segment.get("text") or ""),
+                    "speaker": str(segment.get("speaker") or ""),
+                })
+
+            logger.info(f"ASR 语音对齐: 成功对齐 {len(valid_aligns)}/{len(nested_segments)} 条字幕时间轴")
+            return expanded
+
+        except Exception as exc:
+            import traceback
+            logger.warning(f"ASR 语音对齐异常，回退比例展开: {exc}\n{traceback.format_exc()}")
+            return None
+
 
     def _expand_group_timeline_segments(
         self,
