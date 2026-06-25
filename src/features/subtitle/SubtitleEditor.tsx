@@ -274,6 +274,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
   const shouldSkipSubtitle = automationOptions.subtitle_operation === 'skip'
   const usesGeminiRecognition = automationOptions.subtitle_recognition_mode !== 'local'
+  const usesLocalRecognitionModel = automationOptions.subtitle_recognition_mode !== 'gemini_full'
   const localModelOptions = automationOptions.subtitle_recognition_mode === 'local'
     ? EXPLICIT_SUBTITLE_LOCAL_MODEL_OPTIONS
     : SUBTITLE_LOCAL_MODEL_OPTIONS
@@ -553,15 +554,17 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
                   })
                 }} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <SelectField
-                    label="本地识别模型"
-                    value={selectedLocalModel}
-                    options={localModelOptions}
-                    description={automationOptions.subtitle_recognition_mode === 'local'
-                      ? '本地识别必须指定模型；large-v3 最准但更慢更吃显存。'
-                      : '本地识别和 Gemini+本地时间轴使用；large-v3 最准但更慢更吃显存。'}
-                    onChange={(v) => updateAutomationOptions({ subtitle_local_model: v as typeof automationOptions.subtitle_local_model })}
-                  />
+                  {usesLocalRecognitionModel && (
+                    <SelectField
+                      label="本地识别模型"
+                      value={selectedLocalModel}
+                      options={localModelOptions}
+                      description={automationOptions.subtitle_recognition_mode === 'local'
+                        ? '本地识别必须指定模型；large-v3 最准但更慢更吃显存。'
+                        : 'Gemini+本地时间轴会使用这个模型生成时间轴；large-v3 最准但更慢更吃显存。'}
+                      onChange={(v) => updateAutomationOptions({ subtitle_local_model: v as typeof automationOptions.subtitle_local_model })}
+                    />
+                  )}
                   <SelectField
                     label="识别语言"
                     value={automationOptions.subtitle_recognition_language}
