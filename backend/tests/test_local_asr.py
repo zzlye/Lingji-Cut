@@ -253,7 +253,17 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         self.assertEqual(entries[1]["start"], "00:00:01,100")
         self.assertEqual(FakeQwen3ASRModel.from_pretrained_calls[0]["model_id"], "Qwen/Qwen3-ASR-0.6B")
         self.assertEqual(FakeQwen3ASRModel.from_pretrained_calls[0]["forced_aligner"], "Qwen/Qwen3-ForcedAligner-0.6B")
-        self.assertEqual(FakeQwen3ASRModel.transcribe_calls[0]["language"], "en")
+        self.assertEqual(FakeQwen3ASRModel.transcribe_calls[0]["language"], "English")
+        self.assertTrue(FakeQwen3ASRModel.transcribe_calls[0]["return_time_stamps"])
+
+    def test_qwen3_asr_language_argument_normalization(self):
+        """Qwen3-ASR 需要英文语言名，自动检测必须传 None"""
+        recognizer = LocalSpeechRecognizer(model_name="Qwen3-ASR", device="cpu", model_dir=self.temp_dir, cpu_threads=2)
+
+        self.assertIsNone(recognizer._qwen3_language_arg("auto"))
+        self.assertIsNone(recognizer._qwen3_language_arg(None))
+        self.assertEqual(recognizer._qwen3_language_arg("zh"), "Chinese")
+        self.assertEqual(recognizer._qwen3_language_arg("ja"), "Japanese")
 
     def test_transcribe_video_prefers_gpu_when_cuda_is_available(self):
         """有 CUDA 时默认优先使用 GPU float16，保证识别速度"""

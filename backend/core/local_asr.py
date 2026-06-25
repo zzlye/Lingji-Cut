@@ -971,14 +971,15 @@ class LocalSpeechRecognizer:
 
     def _call_qwen3_asr_transcribe(self, model: Any, audio_path: str, language: Optional[str]) -> Any:
         """调用 Qwen3-ASR transcribe，兼容不同版本的时间戳参数命名"""
-        language_arg = language or "auto"
+        language_arg = self._qwen3_language_arg(language)
         attempts = [
-            ([audio_path], {"language": language_arg, "return_timestamps": True}),
-            ([audio_path], {"language": language_arg, "enable_timestamp": True}),
-            ([audio_path], {"language": language_arg, "timestamps": True}),
-            ([audio_path], {"language": language_arg}),
+            (audio_path, {"language": language_arg, "return_time_stamps": True}),
+            ([audio_path], {"language": [language_arg], "return_time_stamps": True}),
             (audio_path, {"language": language_arg, "return_timestamps": True}),
+            (audio_path, {"language": language_arg, "enable_timestamp": True}),
+            (audio_path, {"language": language_arg, "timestamps": True}),
             (audio_path, {"language": language_arg}),
+            ([audio_path], {"language": [language_arg]}),
         ]
         last_error: Optional[Exception] = None
         for first_arg, kwargs in attempts:
@@ -1697,9 +1698,10 @@ class LocalSpeechRecognizer:
         base_kwargs: dict[str, Any] = {}
         if aligner_enabled:
             base_kwargs["forced_aligner"] = aligner_id
+            base_kwargs["forced_aligner_kwargs"] = {"device_map": device_label}
         attempts = [
-            {**base_kwargs, "device": device_label},
             {**base_kwargs, "device_map": device_label},
+            {**base_kwargs, "device": device_label},
             base_kwargs,
             {},
         ]
@@ -1718,6 +1720,45 @@ class LocalSpeechRecognizer:
         """本地模型目录存在时优先使用本地路径，否则使用官方模型 ID 让运行时自行下载"""
         candidate = os.path.join(self.model_dir, folder_name)
         return candidate if os.path.isdir(candidate) else default_model_id
+
+    def _qwen3_language_arg(self, language: Optional[str]) -> Optional[str]:
+        """把界面里的短语言码转换成 Qwen3-ASR 需要的英文语言名，None 表示自动检测"""
+        normalized = (language or "").strip().lower()
+        if not normalized or normalized == "auto":
+            return None
+        mapping = {
+            "zh": "Chinese",
+            "zh-cn": "Chinese",
+            "cn": "Chinese",
+            "chinese": "Chinese",
+            "en": "English",
+            "english": "English",
+            "ja": "Japanese",
+            "jp": "Japanese",
+            "japanese": "Japanese",
+            "ko": "Korean",
+            "kr": "Korean",
+            "korean": "Korean",
+            "es": "Spanish",
+            "spanish": "Spanish",
+            "fr": "French",
+            "french": "French",
+            "de": "German",
+            "german": "German",
+            "ru": "Russian",
+            "russian": "Russian",
+            "pt": "Portuguese",
+            "portuguese": "Portuguese",
+            "vi": "Vietnamese",
+            "vietnamese": "Vietnamese",
+            "th": "Thai",
+            "thai": "Thai",
+            "id": "Indonesian",
+            "indonesian": "Indonesian",
+            "ar": "Arabic",
+            "arabic": "Arabic",
+        }
+        return mapping.get(normalized, language)
 
     def _torch_device_label(self) -> str:
         """把内部设备名转换成 torch/funasr 常用设备写法"""
