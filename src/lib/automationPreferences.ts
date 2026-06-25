@@ -2,6 +2,7 @@
 // 一键自动化偏好 - 统一保存字幕、文本 API、配音和导出参数
 
 import type { AutomationPreferences } from '@/types'
+import { SUBTITLE_LOCAL_MODEL_VALUES } from '@/lib/subtitleRecognitionOptions'
 
 /** 一键自动化偏好本地缓存键 */
 const AUTOMATION_PREFERENCES_STORAGE_KEY = 'lingjian-workshop:auto-preferences'
@@ -50,6 +51,8 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   subtitle_language: 'auto',
   text_profile_id: null,
   subtitle_recognition_mode: 'local',
+  subtitle_recognition_language: 'auto',
+  subtitle_local_model: 'auto',
   gemini_audio_prompt: '这是一段视频音频。请把里面所有说话内容逐句转写成原始语言的文字，保持原文不要翻译，包括轻声、语气词、笑声里的话也要尽量转写出来。按时间顺序输出一个 JSON 数组，每个元素形如 {"start": 起始秒, "end": 结束秒, "text": "该句原文"}，start/end 是该句在这段音频内的相对秒数（从 0 开始，可带小数）。只输出 JSON 数组本身，不要 markdown 代码块，不要任何解释。确实没有任何说话内容时才输出 []。',
   gemini_audio_segment_seconds: 90,
   gemini_audio_overlap_seconds: 0.3,
@@ -234,6 +237,20 @@ function normalizeSubtitleOperation(value: unknown): AutomationPreferences['subt
     : DEFAULT_AUTOMATION_PREFERENCES.subtitle_operation
 }
 
+/** 规范本地识别模型，旧缓存或拼错值回到自动选择 */
+function normalizeSubtitleLocalModel(value: unknown): AutomationPreferences['subtitle_local_model'] {
+  const model = String(value || '').trim()
+  return SUBTITLE_LOCAL_MODEL_VALUES.includes(model)
+    ? model as AutomationPreferences['subtitle_local_model']
+    : DEFAULT_AUTOMATION_PREFERENCES.subtitle_local_model
+}
+
+/** 规范识别语言，空值回到自动检测 */
+function normalizeRecognitionLanguage(value: unknown): string {
+  const language = String(value || '').trim()
+  return language || DEFAULT_AUTOMATION_PREFERENCES.subtitle_recognition_language
+}
+
 /** 读取一键自动化偏好 */
 export function loadAutomationPreferences(): AutomationPreferences {
   if (typeof localStorage === 'undefined') {
@@ -265,6 +282,8 @@ export function loadAutomationPreferences(): AutomationPreferences {
       subtitle_recognition_mode: ['local', 'gemini_full', 'gemini_align'].includes(parsed.subtitle_recognition_mode)
         ? parsed.subtitle_recognition_mode
         : 'local',
+      subtitle_recognition_language: normalizeRecognitionLanguage(parsed.subtitle_recognition_language),
+      subtitle_local_model: normalizeSubtitleLocalModel(parsed.subtitle_local_model),
       gemini_audio_prompt: typeof parsed.gemini_audio_prompt === 'string' && parsed.gemini_audio_prompt.trim()
         ? parsed.gemini_audio_prompt.trim()
         : DEFAULT_AUTOMATION_PREFERENCES.gemini_audio_prompt,

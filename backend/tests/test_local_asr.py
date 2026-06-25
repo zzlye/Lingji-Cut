@@ -45,6 +45,49 @@ class FakeInfo:
     duration = 4.0
 
 
+class FakeSenseVoiceAutoModel:
+    """测试用 SenseVoice 模型，模拟 FunASR 返回句级时间戳"""
+
+    init_calls: list[dict] = []
+    generate_calls: list[dict] = []
+
+    def __init__(self, **kwargs):
+        self.init_calls.append(kwargs)
+
+    def generate(self, **kwargs):
+        self.generate_calls.append(kwargs)
+        return [{
+            "language": "zh",
+            "sentence_info": [
+                {"start": 0, "end": 1200, "text": "<|zh|><|Speech|>你好 世界"},
+                {"start": 1200, "end": 2500, "text": "第二句"},
+            ],
+        }]
+
+
+class FakeQwen3ASRModel:
+    """测试用 Qwen3-ASR 模型，模拟 qwen-asr 返回时间戳"""
+
+    from_pretrained_calls: list[dict] = []
+    transcribe_calls: list[dict] = []
+
+    @classmethod
+    def from_pretrained(cls, model_id, **kwargs):
+        cls.from_pretrained_calls.append({"model_id": model_id, **kwargs})
+        return cls()
+
+    def transcribe(self, audio, **kwargs):
+        self.transcribe_calls.append({"audio": audio, **kwargs})
+        return [{
+            "language": "en",
+            "text": "hello qwen",
+            "time_stamps": [
+                {"start": 0.0, "end": 1.1, "text": "hello"},
+                {"start": 1.1, "end": 2.2, "text": "qwen"},
+            ],
+        }]
+
+
 class FakeWhisperModel:
     """测试用 Whisper 模型，记录初始化参数和识别参数"""
 
@@ -117,6 +160,10 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         local_asr_module._clear_asr_cuda_process_cooldown()
         FakeWhisperModel.init_calls.clear()
         FakeWhisperModel.transcribe_calls.clear()
+        FakeSenseVoiceAutoModel.init_calls.clear()
+        FakeSenseVoiceAutoModel.generate_calls.clear()
+        FakeQwen3ASRModel.from_pretrained_calls.clear()
+        FakeQwen3ASRModel.transcribe_calls.clear()
         # 测试中关闭音频预处理，避免真实调用 ffmpeg
         self.env_patcher = patch.dict(os.environ, {"YTV_ASR_PREPROCESS": "0", "YTV_ASR_CUDA_WORKER": "0"})
         self.env_patcher.start()
@@ -168,6 +215,45 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         # 垫片不能太大，否则字幕会比声音早出
         self.assertLessEqual(FakeWhisperModel.transcribe_calls[0]["vad_parameters"]["speech_pad_ms"], 250)
         self.assertEqual(progress_values[-1], 100)
+
+    def test_transcribe_video_uses_sensevoice_runtime(self):
+        """选择 SenseVoice 时走 FunASR 运行时，并解析句级毫秒时间戳"""
+        fake_module = types.ModuleType("funasr")
+        fake_module.AutoModel = FakeSenseVoiceAutoModel
+
+        with (
+            patch.dict(sys.modules, {"funasr": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_name="SenseVoice", device="cpu", model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path, language="zh")
+
+        self.assertEqual(language, "zh")
+        self.assertEqual(entries[0]["start"], "00:00:00,000")
+        self.assertEqual(entries[0]["end"], "00:00:01,200")
+        self.assertEqual(entries[0]["text"], "你好 世界")
+        self.assertEqual(entries[1]["text"], "第二句")
+        self.assertEqual(FakeSenseVoiceAutoModel.init_calls[0]["model"], "iic/SenseVoiceSmall")
+        self.assertEqual(FakeSenseVoiceAutoModel.generate_calls[0]["language"], "zh")
+
+    def test_transcribe_video_uses_qwen3_asr_runtime(self):
+        """选择 Qwen3-ASR 时走 qwen-asr 运行时，并读取 forced aligner 时间戳"""
+        fake_module = types.ModuleType("qwen_asr")
+        fake_module.Qwen3ASRModel = FakeQwen3ASRModel
+
+        with (
+            patch.dict(sys.modules, {"qwen_asr": fake_module}),
+            patch("backend.core.local_asr.cuda_device_count", return_value=0),
+        ):
+            recognizer = LocalSpeechRecognizer(model_name="Qwen3-ASR", device="cpu", model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path, language="en")
+
+        self.assertEqual(language, "en")
+        self.assertEqual([entry["text"] for entry in entries], ["hello", "qwen"])
+        self.assertEqual(entries[1]["start"], "00:00:01,100")
+        self.assertEqual(FakeQwen3ASRModel.from_pretrained_calls[0]["model_id"], "Qwen/Qwen3-ASR-0.6B")
+        self.assertEqual(FakeQwen3ASRModel.from_pretrained_calls[0]["forced_aligner"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertEqual(FakeQwen3ASRModel.transcribe_calls[0]["language"], "en")
 
     def test_transcribe_video_prefers_gpu_when_cuda_is_available(self):
         """有 CUDA 时默认优先使用 GPU float16，保证识别速度"""
@@ -468,12 +554,82 @@ class LocalSpeechRecognizerTest(unittest.TestCase):
         env = captured["env"]
         self.assertEqual(language, "zh")
         self.assertEqual(entries[0]["text"], "测试")
+        self.assertEqual(env.get("YTV_ASR_ALLOW_CPU_FALLBACK"), "0")
         path_value = str(env.get("PATH") or env.get("Path") or "")
         path_parts = path_value.split(os.pathsep)
         self.assertLess(path_parts.index(cublas_bin), 4)
         self.assertLess(path_parts.index(cudnn_bin), 4)
         self.assertIn(ctranslate2_dir, path_parts)
         local_asr_module.cuda_dll_search_dirs.cache_clear()
+
+    def test_cuda_worker_silence_timeout_falls_back_to_cpu(self):
+        """CUDA worker 卡死且没有任何输出时应主动终止并回退 CPU，不能让任务永久停在字幕准备"""
+        fake_module = types.ModuleType("faster_whisper")
+        fake_module.WhisperModel = FakeWhisperModel
+        marker_path = os.path.join(self.temp_dir, "cuda-worker-silent.flag")
+        worker_processes = []
+
+        class HangingStdout:
+            """模拟 worker 卡死：stdout 一直阻塞，没有任何进度事件"""
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                time.sleep(10)
+                raise StopIteration
+
+        class HangingWorkerProcess:
+            """测试用卡死子进程，记录父进程是否主动终止"""
+
+            stdout = HangingStdout()
+
+            def __init__(self):
+                self.returncode = None
+                self.terminated = False
+                self.killed = False
+
+            def wait(self, timeout=None):
+                return self.returncode if self.returncode is not None else -15
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.killed = True
+                self.returncode = -9
+
+        def fake_popen(command, **kwargs):
+            process = HangingWorkerProcess()
+            worker_processes.append(process)
+            return process
+
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch.dict(os.environ, {
+                "YTV_ASR_CUDA_WORKER": "1",
+                "YTV_ASR_CUDA_DISABLED_FLAG": marker_path,
+            }),
+            patch("backend.core.local_asr.cuda_device_count", return_value=1),
+            patch("backend.core.local_asr.cuda_memory_mib", return_value=8192),
+            patch("backend.core.local_asr.cuda_free_memory_mib", return_value=6000),
+            patch("backend.core.local_asr.subprocess.Popen", side_effect=fake_popen),
+            patch.object(LocalSpeechRecognizer, "_cuda_worker_retry_profiles", return_value=[{
+                "model_name": "large-v3-turbo",
+                "compute_type": "float16",
+                "beam_size": 5,
+                "reason": "测试卡死",
+            }]),
+            patch.object(LocalSpeechRecognizer, "_worker_silence_timeout_seconds", return_value=0.05),
+        ):
+            recognizer = LocalSpeechRecognizer(model_dir=self.temp_dir, cpu_threads=2)
+            entries, language = recognizer.transcribe_video(self.video_path)
+
+        self.assertEqual(language, "en")
+        self.assertTrue(entries)
+        self.assertTrue(worker_processes[0].terminated)
+        self.assertEqual(FakeWhisperModel.init_calls[0]["device"], "cpu")
 
     def test_missing_video_raises_clear_error(self):
         """视频文件不存在时给出本地识别错误"""

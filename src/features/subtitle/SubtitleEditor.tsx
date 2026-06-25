@@ -6,8 +6,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronDown, Download, Loader2, Pencil, Plus, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
+import { SUBTITLE_LOCAL_MODEL_OPTIONS, SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS } from '@/lib/subtitleRecognitionOptions'
 import type { AutomationPreferences, SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
+import { usePrefsStore } from '@/stores/prefsStore'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -258,6 +260,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false)
   const [renameDraft, setRenameDraft] = useState('')
   const { addLog } = useTaskStore()
+  const reloadAutomationPreferences = usePrefsStore((state) => state.reload)
 
   const usesCustomLanguage = useMemo(() => !LANGUAGE_OPTIONS.some(([value]) => value === form.language), [form.language])
   const selectedLanguage = usesCustomLanguage ? 'custom' : form.language
@@ -272,6 +275,13 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const shouldSkipSubtitle = automationOptions.subtitle_operation === 'skip'
   const usesGeminiRecognition = automationOptions.subtitle_recognition_mode !== 'local'
 
+  const saveAutomationOptions = (updates: Partial<AutomationPreferences>) => {
+    const next = saveAutomationPreferences(updates)
+    setAutomationOptions(next)
+    reloadAutomationPreferences()
+    return next
+  }
+
   const loadPresets = async () => {
     try {
       const data = await subtitleApi.listPresets()
@@ -280,7 +290,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
         const preferred = data.find((p) => p.id === automationOptions.subtitle_preset_id) || data.find((p) => p.is_default) || data[0]
         setSelectedId(preferred.id)
         setForm(presetToForm(preferred))
-        setAutomationOptions(saveAutomationPreferences({ subtitle_preset_id: preferred.id, subtitle_language: automationOptions.subtitle_language || preferred.language }))
+        saveAutomationOptions({ subtitle_preset_id: preferred.id, subtitle_language: automationOptions.subtitle_language || preferred.language })
       }
     } catch (error) {
       addLog('error', `加载字幕预设失败: ${error instanceof Error ? error.message : '未知错误'}`)
@@ -295,7 +305,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     if (!preset) return
     setSelectedId(preset.id)
     setForm(presetToForm(preset))
-    setAutomationOptions(saveAutomationPreferences({ subtitle_preset_id: preset.id, subtitle_language: preset.language || automationOptions.subtitle_language }))
+    saveAutomationOptions({ subtitle_preset_id: preset.id, subtitle_language: preset.language || automationOptions.subtitle_language })
     setCustomLanguage('')
   }
 
@@ -306,7 +316,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   }
 
   const updateForm = <K extends keyof SubtitlePresetForm>(key: K, value: SubtitlePresetForm[K]) => setForm((current) => ({ ...current, [key]: value }))
-  const updateAutomationOptions = (updates: Partial<AutomationPreferences>) => setAutomationOptions(saveAutomationPreferences(updates))
+  const updateAutomationOptions = saveAutomationOptions
 
   const handleSave = async () => {
     const name = form.name.trim()
@@ -317,7 +327,7 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
     try {
       const payload = { ...form, name, language, font_size: Number(form.font_size), secondary_font_size: Number(form.secondary_font_size), outline_width: Number(form.outline_width), shadow_x: Number(form.shadow_x), shadow_y: Number(form.shadow_y), background_alpha: Number(form.background_alpha), margin_v: Number(form.margin_v) }
       const saved = selectedId === 'new' ? await subtitleApi.createPreset(payload) : await subtitleApi.updatePreset(selectedId, payload)
-      setAutomationOptions(saveAutomationPreferences({ subtitle_preset_id: saved.id, subtitle_language: language }))
+      saveAutomationOptions({ subtitle_preset_id: saved.id, subtitle_language: language })
       addLog('info', `字幕预设 "${saved.name}" 已保存`)
       setSelectedId(saved.id)
       setForm(presetToForm(saved))
@@ -528,6 +538,22 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
               <AccordionTrigger className="text-sm">一键完成字幕策略</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
                 <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => updateAutomationOptions({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode })} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <SelectField
+                    label="本地识别模型"
+                    value={automationOptions.subtitle_local_model}
+                    options={SUBTITLE_LOCAL_MODEL_OPTIONS}
+                    description="本地识别和 Gemini+本地时间轴使用；large-v3 最准但更慢更吃显存。"
+                    onChange={(v) => updateAutomationOptions({ subtitle_local_model: v as typeof automationOptions.subtitle_local_model })}
+                  />
+                  <SelectField
+                    label="识别语言"
+                    value={automationOptions.subtitle_recognition_language}
+                    options={SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS}
+                    description="默认自动检测；视频语言明确时手动指定可减少误判和漏识别。"
+                    onChange={(v) => updateAutomationOptions({ subtitle_recognition_language: v })}
+                  />
+                </div>
                 {usesGeminiRecognition && (
                   <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
                     <div>

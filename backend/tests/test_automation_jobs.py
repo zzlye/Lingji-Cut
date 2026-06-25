@@ -217,7 +217,7 @@ class FakeAutomationRecognizer:
     def __init__(self):
         self.video_paths: list[str] = []
 
-    def transcribe_video(self, video_path, progress_callback=None):
+    def transcribe_video(self, video_path, language=None, progress_callback=None):
         """记录识别输入并模拟识别进度"""
         self.video_paths.append(video_path)
         if progress_callback:
@@ -1194,7 +1194,7 @@ class AutomationJobTests(unittest.TestCase):
                 self.devices.append(kwargs.get("device") or "auto")
                 self.model_names.append(kwargs.get("model_name") or "auto")
 
-            def transcribe_video(self, video_path, progress_callback=None):
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
                 self.transcribe_paths.append(video_path)
                 if progress_callback:
                     progress_callback(100)
@@ -1273,6 +1273,116 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_gemini.languages, ["en", "en"])
         self.assertIn(50, progress_values)
         self.assertTrue(cache_exists)
+
+    def test_local_recognition_uses_selected_model_and_language(self):
+        """一键本地识别使用前端选择的模型和识别语言"""
+        class FakeLocalRecognizer:
+            """测试用本地识别器，记录构造参数和语言参数"""
+
+            init_kwargs: list[dict] = []
+            transcribe_calls: list[dict] = []
+
+            def __init__(self, *_, **kwargs):
+                self.init_kwargs.append(kwargs)
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                self.transcribe_calls.append({"video_path": video_path, "language": language})
+                if progress_callback:
+                    progress_callback(100)
+                return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "hello"}], language or "auto")
+
+        request = AutomationRunRequest(
+            url="https://example.test/video",
+            subtitle_recognition_mode="local",
+            subtitle_local_model="large-v3",
+            subtitle_recognition_language="ja",
+            enable_effects=False,
+            processing_preset={},
+            enable_voice=False,
+            burn_subtitles=False,
+            output_format="mp4",
+        )
+        with patch("backend.api.automation.LocalSpeechRecognizer", FakeLocalRecognizer):
+            entries, language = _recognize_subtitle_entries(FakeDb([]), request, "D:/tmp/video.mp4", lambda _value: None)
+
+        self.assertEqual(language, "ja")
+        self.assertEqual(entries[0]["text"], "hello")
+        self.assertEqual(FakeLocalRecognizer.init_kwargs[0]["model_name"], "large-v3")
+        self.assertEqual(FakeLocalRecognizer.transcribe_calls[0]["language"], "ja")
+
+    def test_gemini_align_uses_selected_model_language_and_cache_profile(self):
+        """Gemini+本地时间轴把用户选择的本地模型和识别语言写入实际识别与缓存"""
+        class FakeTimelineRecognizer:
+            """测试用时间轴识别器，兼做对齐时间工具"""
+
+            init_kwargs: list[dict] = []
+            transcribe_calls: list[dict] = []
+
+            def __init__(self, *_, **kwargs):
+                self.init_kwargs.append(kwargs)
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                self.transcribe_calls.append({"video_path": video_path, "language": language})
+                if progress_callback:
+                    progress_callback(100)
+                return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "local timeline"}], language or "auto")
+
+            def _srt_time_to_seconds(self, value):
+                text = str(value).replace(",", ".")
+                hours, minutes, seconds = text.split(":")
+                return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+            def _seconds_to_srt_time(self, seconds):
+                total_ms = max(0, int(round(float(seconds) * 1000)))
+                hours = total_ms // 3600000
+                minutes = (total_ms % 3600000) // 60000
+                secs = (total_ms % 60000) // 1000
+                millis = total_ms % 1000
+                return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+        class FakeGeminiTranscriber:
+            """测试用 Gemini 转写器，记录识别语言"""
+
+            languages: list[str | None] = []
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                self.languages.append(language)
+                if progress_callback:
+                    progress_callback(100)
+                return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:04,000", "text": "Gemini content"}], language or "auto")
+
+        with tempfile.TemporaryDirectory(prefix="automation_selected_asr_") as temp_dir:
+            video_path = os.path.join(temp_dir, "enhanced.mp4")
+            with open(video_path, "wb") as file:
+                file.write(b"video")
+            request = AutomationRunRequest(
+                url="https://example.test/video",
+                subtitle_recognition_mode="gemini_align",
+                subtitle_local_model="large-v3",
+                subtitle_recognition_language="ja",
+                enable_effects=False,
+                processing_preset={},
+                enable_voice=False,
+                burn_subtitles=False,
+                output_format="mp4",
+            )
+            fake_gemini = FakeGeminiTranscriber()
+            with (
+                patch.dict(os.environ, {"YTV_GEMINI_ALIGN_TIMELINE_DEVICE": "cpu"}, clear=False),
+                patch("backend.api.automation.LocalSpeechRecognizer", FakeTimelineRecognizer),
+                patch("backend.api.automation._build_gemini_transcriber", return_value=fake_gemini),
+            ):
+                entries, language = _recognize_subtitle_entries(FakeDb([]), request, video_path, lambda _value: None)
+            meta_path = os.path.join(temp_dir, "enhanced_local_timeline.meta.json")
+            with open(meta_path, "r", encoding="utf-8") as file:
+                meta = json.load(file)
+
+        self.assertEqual(language, "ja")
+        self.assertEqual([entry["text"] for entry in entries], ["Gemini content"])
+        self.assertEqual(FakeTimelineRecognizer.init_kwargs[0]["model_name"], "large-v3")
+        self.assertEqual(FakeTimelineRecognizer.transcribe_calls[0]["language"], "ja")
+        self.assertEqual(fake_gemini.languages, ["ja"])
+        self.assertEqual(meta["cache_profile"], {"model_name": "large-v3", "language": "ja"})
 
     def test_gemini_align_timeline_profile_uses_safe_gpu_when_vram_is_enough(self):
         """Gemini 对齐时间轴在显存足够时走低 beam GPU，避免长视频固定 CPU 太慢"""
@@ -1376,7 +1486,7 @@ class AutomationJobTests(unittest.TestCase):
             def __init__(self, *_, **__):
                 pass
 
-            def transcribe_video(self, video_path, progress_callback=None):
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
                 self.transcribe_paths.append(video_path)
                 if progress_callback:
                     progress_callback(100)
@@ -1474,7 +1584,7 @@ class AutomationJobTests(unittest.TestCase):
         class EnglishRecognizer:
             """测试用英文识别器"""
 
-            def transcribe_video(self, video_path, progress_callback=None):
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
                 if progress_callback:
                     progress_callback(100)
                 return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,200", "text": "hello world"}], "en")
@@ -1567,7 +1677,7 @@ class AutomationJobTests(unittest.TestCase):
         class EnglishRecognizer:
             """测试用英文识别器"""
 
-            def transcribe_video(self, video_path, progress_callback=None):
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
                 if progress_callback:
                     progress_callback(100)
                 return ([

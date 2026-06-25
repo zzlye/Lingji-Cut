@@ -16,3 +16,7 @@ cryptography>=44.0.0
 
 # HTTP 客户端（API 调用）
 httpx>=0.28.0
+
+# 可选本地识别模型：
+# - SenseVoice 需要安装 funasr，并提前下载/缓存 SenseVoiceSmall 模型。
+# - Qwen3-ASR 需要安装 qwen-asr，并提前下载/缓存 Qwen3-ASR 与 ForcedAligner 模型。

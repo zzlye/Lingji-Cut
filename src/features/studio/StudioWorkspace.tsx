@@ -21,6 +21,7 @@ import { cn } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { AUTOMATION_STAGE_KEYS, AUTOMATION_STAGE_META } from '@/lib/automationMapper'
 import { toLocalVideoSource } from '@/lib/automationPayload'
+import { SUBTITLE_LOCAL_MODEL_OPTIONS, SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS } from '@/lib/subtitleRecognitionOptions'
 import { automationApi, videoApi } from '@/lib/api'
 import { useParseVideo } from '@/hooks/useParseVideo'
 import { useAutoRun } from '@/hooks/useAutoRun'
@@ -37,6 +38,11 @@ const SUBTITLE_OP_LABEL: Record<AutomationPreferences['subtitle_operation'], str
   generate: '生成字幕',
   translate: '翻译字幕',
   polish: '润色字幕',
+}
+
+/** 读取下拉选项中文名，未知值直接显示原始值，方便兼容旧缓存 */
+function optionLabel(options: Array<[string, string]>, value: string, fallback: string) {
+  return options.find(([optionValue]) => optionValue === value)?.[1] || value || fallback
 }
 
 /** 阶段状态的视觉样式 */
@@ -510,6 +516,8 @@ function ConfigSummary({
   const updatePrefs = usePrefsStore((state) => state.update)
   const subtitleOptions = Object.entries(SUBTITLE_OP_LABEL) as Array<[AutomationPreferences['subtitle_operation'], string]>
   const shouldSkipSubtitle = preferences.subtitle_operation === 'skip'
+  const localModelLabel = optionLabel(SUBTITLE_LOCAL_MODEL_OPTIONS, preferences.subtitle_local_model, '自动选择')
+  const recognitionLanguageLabel = optionLabel(SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS, preferences.subtitle_recognition_language, '自动检测')
 
   return (
     <Card className="glass lg:self-start">
@@ -547,7 +555,7 @@ function ConfigSummary({
             value="subtitle"
             icon={Captions}
             label="字幕策略"
-            summary={shouldSkipSubtitle ? '不处理字幕' : `${SUBTITLE_OP_LABEL[preferences.subtitle_operation]} · ${preferences.burn_subtitles ? '烧录' : '不烧录'}`}
+            summary={shouldSkipSubtitle ? '不处理字幕' : `${SUBTITLE_OP_LABEL[preferences.subtitle_operation]} · ${recognitionLanguageLabel}`}
           >
             <ConfigSelectRow
               icon={Captions}
@@ -559,10 +567,26 @@ function ConfigSummary({
                 : { subtitle_operation: value as AutomationPreferences['subtitle_operation'] })}
               onOpenSettings={() => onOpenSettings('subtitle')}
             />
+            <ConfigSelectRow
+              icon={Captions}
+              label="识别模型"
+              value={preferences.subtitle_local_model}
+              options={SUBTITLE_LOCAL_MODEL_OPTIONS}
+              onChange={(value) => updatePrefs({ subtitle_local_model: value as AutomationPreferences['subtitle_local_model'] })}
+              onOpenSettings={() => onOpenSettings('subtitle')}
+            />
+            <ConfigSelectRow
+              icon={Captions}
+              label="识别语言"
+              value={preferences.subtitle_recognition_language}
+              options={SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS}
+              onChange={(value) => updatePrefs({ subtitle_recognition_language: value })}
+              onOpenSettings={() => onOpenSettings('subtitle')}
+            />
             <ConfigSwitchRow
               icon={Captions}
               label="烧录硬字幕"
-              description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}
+              description={shouldSkipSubtitle ? '不处理字幕时自动跳过' : `${localModelLabel} · ${preferences.burn_subtitles ? '字幕写入画面' : '只保留字幕文件'}`}
               checked={!shouldSkipSubtitle && preferences.burn_subtitles}
               onChange={(value) => updatePrefs({ burn_subtitles: value })}
               onOpenSettings={() => onOpenSettings('subtitle')}

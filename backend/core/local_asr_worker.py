@@ -55,6 +55,9 @@ def main() -> int:
             compute_type=args.compute_type,
             cpu_threads=args.cpu_threads,
             beam_size=args.beam_size,
+            # CUDA worker 失败时交还父进程尝试其它 GPU 档位或主流程 CPU 回退；
+            # 不在 worker 内部切 CPU，避免长时间无输出导致一键任务看起来卡死。
+            allow_cpu_fallback=False if args.device == "cuda" else None,
             # 补漏开关由父进程透传：模式3 时间轴识别传 0 关闭，加速 GPU 子进程识别
             gap_rescue=(None if args.gap_rescue is None else bool(args.gap_rescue)),
         )

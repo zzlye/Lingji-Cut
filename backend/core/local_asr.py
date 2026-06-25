@@ -3,6 +3,7 @@
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -55,8 +56,8 @@ LEADING_FRAGMENT_WORDS = {
     "those",
 }
 
-# 模型缓存，避免同一轮任务重复加载模型。
-_MODEL_CACHE: dict[tuple[str, str, str, str, int], object] = {}
+# 模型缓存，避免同一轮任务重复加载模型；不同运行时会带上各自模型路径。
+_MODEL_CACHE: dict[tuple[Any, ...], object] = {}
 # CUDA 一旦出现运行级错误，短时间内继续使用 CUDA 往往会反复失败。
 _CUDA_ASR_DISABLED = False
 _CUDA_ASR_DISABLED_UNTIL = 0.0
@@ -66,6 +67,10 @@ _CUDA_DLL_REGISTERED_DIRS: set[str] = set()
 CUDA_DISABLED_FLAG_NAME = "asr-cuda-disabled.flag"
 ASR_WORKER_EVENT_PREFIX = "__YTV_ASR_WORKER__"
 ASR_INPUT_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".opus", ".ogg"}
+WHISPER_ASR_MODEL_NAMES = {"tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"}
+SENSEVOICE_MODEL_NAME = "sensevoice"
+QWEN3_ASR_MODEL_NAME = "qwen3-asr"
+LOCAL_ASR_MODEL_NAMES = WHISPER_ASR_MODEL_NAMES | {SENSEVOICE_MODEL_NAME, QWEN3_ASR_MODEL_NAME}
 CUDA_RUNTIME_DLL_NAMES = (
     "cublas64_12.dll",
     "cublasLt64_12.dll",
@@ -436,11 +441,35 @@ class LocalSpeechRecognizer:
         configured_model = model_name or os.environ.get("YTV_ASR_MODEL")
         self.auto_model_name = not configured_model
         # 有 GPU 时按显存提升模型准确率，CPU 仍用 base，兼顾准确率和中低配可用性。
-        self.model_name = configured_model or (default_gpu_asr_model_name() if self.device == "cuda" else default_asr_model_name())
+        self.model_name = self._normalize_model_name(configured_model or (default_gpu_asr_model_name() if self.device == "cuda" else default_asr_model_name()))
         self.compute_type = compute_type or default_asr_compute_type(self.device)
         self.cpu_threads = cpu_threads or min(4, max(1, os.cpu_count() or 1))
         self.beam_size = beam_size
         self._log_device_profile(requested_device, normalized_device)
+
+    def _normalize_model_name(self, model_name: str) -> str:
+        """规范本地识别模型名，兼容前端展示名和环境变量写法"""
+        normalized = str(model_name or "").strip()
+        lowered = normalized.lower()
+        aliases = {
+            "sensevoice-small": SENSEVOICE_MODEL_NAME,
+            "sensevoicesmall": SENSEVOICE_MODEL_NAME,
+            "sensevoice": SENSEVOICE_MODEL_NAME,
+            "qwen3_asr": QWEN3_ASR_MODEL_NAME,
+            "qwen3asr": QWEN3_ASR_MODEL_NAME,
+            "qwen3-asr": QWEN3_ASR_MODEL_NAME,
+            "qwen3-asr-0.6b": QWEN3_ASR_MODEL_NAME,
+            "qwen/qwen3-asr-0.6b": QWEN3_ASR_MODEL_NAME,
+        }
+        return aliases.get(lowered, lowered or default_asr_model_name())
+
+    def _model_backend(self) -> str:
+        """返回当前模型所属运行时，非 Whisper 模型需要走专用推理接口"""
+        if self.model_name == SENSEVOICE_MODEL_NAME:
+            return "sensevoice"
+        if self.model_name == QWEN3_ASR_MODEL_NAME:
+            return "qwen3-asr"
+        return "whisper"
 
     def _log_device_profile(self, requested_device: str, normalized_device: str) -> None:
         """记录本地识别最终使用的模型和设备，方便排查 CPU/GPU 选择"""
@@ -693,6 +722,10 @@ class LocalSpeechRecognizer:
         worker_path = os.path.join(project_root, "backend", "core", "local_asr_worker.py")
         env = os.environ.copy()
         env["YTV_ASR_CHILD_WORKER"] = "1"
+        # CUDA worker 只负责尝试 GPU 档位，失败必须返回父进程统一调度；
+        # 不能在子进程里偷偷回退 CPU，否则父进程只能等 stdout，卡死时任务会一直 running。
+        if self.device == "cuda":
+            env["YTV_ASR_ALLOW_CPU_FALLBACK"] = "0"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = os.pathsep.join([project_root, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
         if preprocessed_input:
@@ -738,7 +771,32 @@ class LocalSpeechRecognizer:
         result_payload: Optional[dict[str, Any]] = None
         error_message = ""
         assert process.stdout is not None
-        for raw_line in process.stdout:
+        line_queue: queue.Queue[Optional[str]] = queue.Queue()
+        silence_timeout = self._worker_silence_timeout_seconds()
+        last_output_at = time.monotonic()
+
+        def read_stdout() -> None:
+            """后台读取 worker stdout，让父线程能检测无输出卡死"""
+            try:
+                for raw in process.stdout:
+                    line_queue.put(raw)
+            finally:
+                line_queue.put(None)
+
+        reader = threading.Thread(target=read_stdout, name="ytv-asr-worker-stdout", daemon=True)
+        reader.start()
+
+        while True:
+            try:
+                raw_line = line_queue.get(timeout=1.0)
+            except queue.Empty:
+                if time.monotonic() - last_output_at > silence_timeout:
+                    self._terminate_worker_process(process)
+                    raise RuntimeError(f"本地识别 CUDA 子进程超过 {silence_timeout:.0f} 秒没有输出，已终止避免任务卡死")
+                continue
+            if raw_line is None:
+                break
+            last_output_at = time.monotonic()
             line = raw_line.rstrip()
             if not line:
                 continue
@@ -774,6 +832,26 @@ class LocalSpeechRecognizer:
         language_value = str(result_payload.get("language") or language or "auto")
         return entries, language_value
 
+    def _worker_silence_timeout_seconds(self) -> float:
+        """读取 CUDA worker 无输出超时，避免 native 推理卡死后任务永久停在字幕准备"""
+        return self._env_float("YTV_ASR_WORKER_SILENCE_TIMEOUT_S", 300.0, 30.0, 3600.0)
+
+    def _terminate_worker_process(self, process: Any) -> None:
+        """终止卡死的本地识别 worker，失败只记录日志，后续由父流程回退处理"""
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5)
+            return
+        except Exception:
+            pass
+        try:
+            process.kill()
+        except Exception as exc:
+            logger.warning(f"终止卡死的本地识别子进程失败: {exc}")
+
     def _switch_to_cpu_after_cuda_failure(self, reason: Exception) -> None:
         """切换到 CPU 识别参数，供 CUDA 初始化、推理和子进程失败共用"""
         self._disable_cuda_asr_for_process(reason)
@@ -808,6 +886,12 @@ class LocalSpeechRecognizer:
         progress_callback: Optional[Callable[[float], None]],
     ):
         """加载模型并执行一次识别"""
+        backend = self._model_backend()
+        if backend == "sensevoice":
+            return self._transcribe_with_sensevoice(video_path, language, progress_callback)
+        if backend == "qwen3-asr":
+            return self._transcribe_with_qwen3_asr(video_path, language, progress_callback)
+
         model = self._load_model()
         logger.info(f"本地识别字幕: model={self.model_name}, device={self.device}, compute={self.compute_type}")
         if progress_callback:
@@ -824,6 +908,86 @@ class LocalSpeechRecognizer:
             hallucination_silence_threshold=self._hallucination_silence_threshold(),
             condition_on_previous_text=False,
         )
+
+    def _transcribe_with_sensevoice(
+        self,
+        audio_path: str,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+    ):
+        """使用 FunASR SenseVoice 本地识别，并转换成 faster-whisper 兼容片段"""
+        model = self._load_sensevoice_model()
+        logger.info(f"本地识别字幕: model={self.model_name}, runtime=funasr, device={self.device}")
+        if progress_callback:
+            progress_callback(5)
+        result = self._call_sensevoice_generate(model, audio_path, language)
+        segments, detected_language = self._segments_from_sensevoice_result(result, audio_path, language)
+        if progress_callback:
+            progress_callback(95)
+        return segments, SimpleNamespace(language=detected_language, duration=self._audio_duration_seconds(audio_path) or 0.0)
+
+    def _transcribe_with_qwen3_asr(
+        self,
+        audio_path: str,
+        language: Optional[str],
+        progress_callback: Optional[Callable[[float], None]],
+    ):
+        """使用 Qwen3-ASR 本地识别，并尽量读取 forced aligner 产出的时间戳"""
+        model = self._load_qwen3_asr_model()
+        logger.info(f"本地识别字幕: model={self.model_name}, runtime=qwen-asr, device={self.device}")
+        if progress_callback:
+            progress_callback(5)
+        result = self._call_qwen3_asr_transcribe(model, audio_path, language)
+        segments, detected_language = self._segments_from_qwen3_result(result, audio_path, language)
+        if progress_callback:
+            progress_callback(95)
+        return segments, SimpleNamespace(language=detected_language, duration=self._audio_duration_seconds(audio_path) or 0.0)
+
+    def _call_sensevoice_generate(self, model: Any, audio_path: str, language: Optional[str]) -> Any:
+        """调用 SenseVoice generate；不同 funasr 版本参数有差异，按能力逐级降级"""
+        base_kwargs = {
+            "input": audio_path,
+            "cache": {},
+            "language": language or "auto",
+            "use_itn": True,
+            "batch_size_s": self._env_int("YTV_SENSEVOICE_BATCH_SIZE_S", 60, 5, 300),
+            "merge_vad": True,
+            "merge_length_s": self._env_int("YTV_SENSEVOICE_MERGE_LENGTH_S", 15, 1, 120),
+        }
+        attempts = [
+            base_kwargs,
+            {key: value for key, value in base_kwargs.items() if key not in {"merge_vad", "merge_length_s"}},
+            {"input": audio_path, "language": language or "auto", "use_itn": True},
+            {"input": audio_path},
+        ]
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                return model.generate(**kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"SenseVoice 调用失败，当前 funasr 版本不兼容: {last_error}")
+
+    def _call_qwen3_asr_transcribe(self, model: Any, audio_path: str, language: Optional[str]) -> Any:
+        """调用 Qwen3-ASR transcribe，兼容不同版本的时间戳参数命名"""
+        language_arg = language or "auto"
+        attempts = [
+            ([audio_path], {"language": language_arg, "return_timestamps": True}),
+            ([audio_path], {"language": language_arg, "enable_timestamp": True}),
+            ([audio_path], {"language": language_arg, "timestamps": True}),
+            ([audio_path], {"language": language_arg}),
+            (audio_path, {"language": language_arg, "return_timestamps": True}),
+            (audio_path, {"language": language_arg}),
+        ]
+        last_error: Optional[Exception] = None
+        for first_arg, kwargs in attempts:
+            try:
+                return model.transcribe(first_arg, **kwargs)
+            except TypeError as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"Qwen3-ASR 调用失败，当前 qwen-asr 版本不兼容: {last_error}")
 
     def _start_transcribe_heartbeat(self, progress_callback: Optional[Callable[[float], None]]) -> Callable[[], None]:
         """识别过程中发送心跳进度，避免长视频 CPU/GPU 推理看起来卡死"""
@@ -1469,12 +1633,277 @@ class LocalSpeechRecognizer:
         _CUDA_ASR_DISABLED_UNTIL = time.time() + cooldown_seconds if cooldown_seconds > 0 else 0.0
         _CUDA_ASR_DISABLED_REASON = str(reason or "").strip()
         for key in list(_MODEL_CACHE):
-            if len(key) >= 3 and key[2] == "cuda":
+            if any(part == "cuda" or part == "cuda:0" for part in key):
                 _MODEL_CACHE.pop(key, None)
         if cooldown_seconds > 0:
             logger.warning(f"本地识别 CUDA 冷却 {cooldown_seconds:.0f} 秒后会自动重试，当前先改用 CPU，原因: {reason}")
         else:
             logger.warning(f"本地识别 CUDA 失败但未启用进程冷却，原因: {reason}")
+
+    def _load_sensevoice_model(self):
+        """延迟加载 SenseVoice 模型，依赖缺失时给出可执行提示"""
+        try:
+            from funasr import AutoModel
+        except ImportError as exc:
+            raise RuntimeError("缺少 SenseVoice 本地识别依赖 funasr，请安装到 D:\\tools 的 Python 环境后再选择 SenseVoice") from exc
+
+        model_id = os.environ.get("YTV_SENSEVOICE_MODEL") or self._local_model_path_or_default("SenseVoiceSmall", "iic/SenseVoiceSmall")
+        vad_model = os.environ.get("YTV_SENSEVOICE_VAD_MODEL") or "fsmn-vad"
+        key = ("sensevoice", model_id, vad_model, self.device)
+        if key in _MODEL_CACHE:
+            return _MODEL_CACHE[key]
+
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "trust_remote_code": True,
+            "device": self._torch_device_label(),
+        }
+        if vad_model and vad_model.lower() not in {"none", "off", "false", "0"}:
+            kwargs["vad_model"] = vad_model
+            kwargs["vad_kwargs"] = {"max_single_segment_time": self._env_int("YTV_SENSEVOICE_MAX_SEGMENT_MS", 30000, 5000, 120000)}
+
+        attempts = [
+            kwargs,
+            {key: value for key, value in kwargs.items() if key != "device"},
+            {"model": model_id, "trust_remote_code": True},
+            {"model": model_id},
+        ]
+        last_error: Optional[Exception] = None
+        for attempt in attempts:
+            try:
+                model = AutoModel(**attempt)
+                _MODEL_CACHE[key] = model
+                return model
+            except TypeError as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"SenseVoice 模型加载失败，当前 funasr 版本不兼容: {last_error}")
+
+    def _load_qwen3_asr_model(self):
+        """延迟加载 Qwen3-ASR 模型，默认启用 forced aligner 以获得字幕时间戳"""
+        try:
+            from qwen_asr import Qwen3ASRModel
+        except ImportError as exc:
+            raise RuntimeError("缺少 Qwen3-ASR 本地识别依赖 qwen-asr，请安装到 D:\\tools 的 Python 环境后再选择 Qwen3-ASR") from exc
+
+        model_id = os.environ.get("YTV_QWEN3_ASR_MODEL") or self._local_model_path_or_default("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B")
+        aligner_id = os.environ.get("YTV_QWEN3_ASR_ALIGNER") or "Qwen/Qwen3-ForcedAligner-0.6B"
+        key = ("qwen3-asr", model_id, aligner_id, self.device, self.compute_type)
+        if key in _MODEL_CACHE:
+            return _MODEL_CACHE[key]
+
+        aligner_enabled = aligner_id and aligner_id.lower() not in {"none", "off", "false", "0"}
+        device_label = self._torch_device_label()
+        base_kwargs: dict[str, Any] = {}
+        if aligner_enabled:
+            base_kwargs["forced_aligner"] = aligner_id
+        attempts = [
+            {**base_kwargs, "device": device_label},
+            {**base_kwargs, "device_map": device_label},
+            base_kwargs,
+            {},
+        ]
+        last_error: Optional[Exception] = None
+        for kwargs in attempts:
+            try:
+                model = Qwen3ASRModel.from_pretrained(model_id, **kwargs)
+                _MODEL_CACHE[key] = model
+                return model
+            except TypeError as exc:
+                last_error = exc
+                continue
+        raise RuntimeError(f"Qwen3-ASR 模型加载失败，当前 qwen-asr 版本不兼容: {last_error}")
+
+    def _local_model_path_or_default(self, folder_name: str, default_model_id: str) -> str:
+        """本地模型目录存在时优先使用本地路径，否则使用官方模型 ID 让运行时自行下载"""
+        candidate = os.path.join(self.model_dir, folder_name)
+        return candidate if os.path.isdir(candidate) else default_model_id
+
+    def _torch_device_label(self) -> str:
+        """把内部设备名转换成 torch/funasr 常用设备写法"""
+        return "cuda:0" if self.device == "cuda" else "cpu"
+
+    def _segments_from_sensevoice_result(self, result: Any, audio_path: str, language: Optional[str]) -> tuple[list[Any], str]:
+        """把 SenseVoice 返回结构转换成通用字幕片段"""
+        segments: list[Any] = []
+        detected_language = language or "auto"
+        for item in self._result_items(result):
+            detected_language = self._detect_result_language(item, detected_language)
+            sentence_info = self._field(item, "sentence_info", "sentences", "segments", "chunks")
+            if isinstance(sentence_info, list):
+                for sentence in sentence_info:
+                    segment = self._segment_from_timestamp_item(sentence, time_unit="ms")
+                    if segment:
+                        segments.append(segment)
+            if not segments:
+                text = self._clean_asr_text(self._field(item, "text", "sentence", "raw_text") or "")
+                if text:
+                    segments.append(self._whole_text_segment(text, audio_path))
+        return segments, detected_language
+
+    def _segments_from_qwen3_result(self, result: Any, audio_path: str, language: Optional[str]) -> tuple[list[Any], str]:
+        """把 Qwen3-ASR 返回结构转换成通用字幕片段"""
+        segments: list[Any] = []
+        detected_language = language or "auto"
+        for item in self._result_items(result):
+            detected_language = self._detect_result_language(item, detected_language)
+            text = self._clean_asr_text(self._field(item, "text", "transcription", "sentence", "raw_text") or "")
+            timestamp_payload = self._field(item, "time_stamps", "timestamps", "timestamp", "segments", "chunks")
+            parsed = self._segments_from_timestamp_payload(timestamp_payload, text)
+            segments.extend(parsed)
+            if not parsed and text:
+                segments.append(self._whole_text_segment(text, audio_path))
+        return segments, detected_language
+
+    def _result_items(self, result: Any) -> list[Any]:
+        """统一模型返回值为列表，兼容 tuple(result, meta) 和单对象返回"""
+        payload = result[0] if isinstance(result, tuple) and result else result
+        if isinstance(payload, list):
+            return payload
+        return [payload]
+
+    def _detect_result_language(self, item: Any, fallback: str) -> str:
+        """从识别结果中提取语言，没有就沿用入参或 auto"""
+        language = self._field(item, "language", "lang", "detected_language")
+        return str(language or fallback or "auto")
+
+    def _segments_from_timestamp_payload(self, payload: Any, fallback_text: str) -> list[Any]:
+        """解析常见时间戳数组结构，失败时返回空列表交给整段兜底"""
+        if not isinstance(payload, list):
+            return []
+        segments: list[Any] = []
+        for item in payload:
+            segment = self._segment_from_timestamp_item(item)
+            if segment:
+                segments.append(segment)
+        if segments:
+            return segments
+        if fallback_text:
+            bounds = [self._timestamp_bounds(item) for item in payload]
+            valid_bounds = [(start, end) for start, end in bounds if start is not None and end is not None and end > start]
+            if valid_bounds:
+                start = min(start for start, _ in valid_bounds)
+                end = max(end for _, end in valid_bounds)
+                return [SimpleNamespace(start=start, end=end, text=fallback_text, words=[])]
+        return []
+
+    def _segment_from_timestamp_item(self, item: Any, time_unit: str = "auto") -> Optional[Any]:
+        """把单个带时间戳的结果项转为片段"""
+        text = self._clean_asr_text(self._timestamp_text(item))
+        start, end = self._timestamp_bounds(item, time_unit=time_unit)
+        if not text or start is None or end is None or end <= start:
+            return None
+        return SimpleNamespace(start=start, end=max(end, start + 0.2), text=text, words=[])
+
+    def _timestamp_text(self, item: Any) -> str:
+        """从时间戳结果项中取文本，兼容 dict、对象和列表"""
+        if isinstance(item, (list, tuple)):
+            for value in item:
+                if isinstance(value, str) and value.strip():
+                    return value
+            return ""
+        return str(self._field(item, "text", "word", "sentence", "content") or "")
+
+    def _timestamp_bounds(self, item: Any, time_unit: str = "auto") -> tuple[Optional[float], Optional[float]]:
+        """从时间戳结果项中取起止时间，auto 模式按数值大小判断毫秒/秒"""
+        if isinstance(item, (list, tuple)):
+            numeric = [self._safe_float(value) for value in item if not isinstance(value, str)]
+            numeric = [value for value in numeric if value is not None]
+            if len(numeric) >= 2:
+                return self._normalize_model_time(numeric[0], time_unit), self._normalize_model_time(numeric[1], time_unit)
+            return None, None
+        start = self._field(item, "start", "start_time", "begin", "begin_time", "start_ms", "offset_start")
+        end = self._field(item, "end", "end_time", "finish", "finish_time", "end_ms", "offset_end")
+        unit = "ms" if any(name in self._available_field_names(item) for name in {"start_ms", "end_ms"}) else time_unit
+        start_value = self._safe_float(start)
+        end_value = self._safe_float(end)
+        return self._normalize_model_time(start_value, unit), self._normalize_model_time(end_value, unit)
+
+    def _field(self, item: Any, *names: str) -> Any:
+        """从 dict 或对象中按多个候选字段读取值"""
+        if isinstance(item, dict):
+            for name in names:
+                if name in item:
+                    return item.get(name)
+            return None
+        for name in names:
+            if hasattr(item, name):
+                return getattr(item, name)
+        return None
+
+    def _available_field_names(self, item: Any) -> set[str]:
+        """返回结果项可见字段名，用于判断毫秒字段"""
+        if isinstance(item, dict):
+            return set(item.keys())
+        return {name for name in dir(item) if not name.startswith("_")}
+
+    def _safe_float(self, value: Any) -> Optional[float]:
+        """安全转浮点数"""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_model_time(self, value: Optional[float], time_unit: str = "auto") -> Optional[float]:
+        """把模型时间戳统一成秒；SenseVoice 常见毫秒，Qwen 通常为秒"""
+        if value is None:
+            return None
+        if time_unit == "ms":
+            return max(0.0, value / 1000.0)
+        if time_unit == "s":
+            return max(0.0, value)
+        return max(0.0, value / 1000.0 if abs(value) > 1000 else value)
+
+    def _whole_text_segment(self, text: str, audio_path: str) -> Any:
+        """模型未返回时间戳时，用整段音频时长兜底生成一个片段"""
+        duration = self._audio_duration_seconds(audio_path) or 1.0
+        return SimpleNamespace(start=0.0, end=max(0.2, duration), text=text, words=[])
+
+    def _clean_asr_text(self, text: Any) -> str:
+        """清理模型标签和多余空白，避免 SenseVoice 控制标签进入字幕"""
+        cleaned = re.sub(r"<\|[^|]+?\|>", "", str(text or ""))
+        return " ".join(cleaned.split())
+
+    def _audio_duration_seconds(self, audio_path: str) -> Optional[float]:
+        """读取音频时长，用于非 Whisper 模型的整段兜底和进度估算"""
+        try:
+            import wave
+            with wave.open(audio_path, "rb") as wav_file:
+                frames = wav_file.getnframes()
+                rate = wav_file.getframerate()
+                if rate > 0:
+                    return frames / float(rate)
+        except Exception:
+            pass
+        ffprobe = self._ffprobe_command()
+        if not ffprobe:
+            return None
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            if result.returncode == 0:
+                duration = float(result.stdout.strip())
+                return duration if duration > 0 else None
+        except Exception:
+            return None
+        return None
+
+    def _ffprobe_command(self) -> Optional[str]:
+        """优先使用 D:\\tools\\ffmpeg 同目录的 ffprobe"""
+        ffmpeg = get_ffmpeg_command()
+        ffmpeg_dir = os.path.dirname(ffmpeg)
+        exe_name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        candidate = os.path.join(ffmpeg_dir, exe_name)
+        if candidate and os.path.exists(candidate):
+            return candidate
+        return exe_name
 
     def _load_model(self):
         """延迟加载 faster-whisper 模型，缺依赖时给出明确提示"""

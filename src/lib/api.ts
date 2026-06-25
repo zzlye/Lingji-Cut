@@ -480,6 +480,8 @@ export type AutomationStartParams = {
   subtitle_language?: string
   text_profile_id?: number
   subtitle_recognition_mode?: 'local' | 'gemini_full' | 'gemini_align'
+  subtitle_recognition_language?: string
+  subtitle_local_model?: import('@/types').SubtitleLocalModel
   gemini_audio_segment_seconds?: number
   gemini_audio_overlap_seconds?: number
   gemini_audio_full_coverage?: boolean
@@ -527,6 +529,8 @@ export type AutomationRerunOverrides = Partial<Pick<AutomationStartParams,
   | 'multi_speaker_enabled'
   | 'gemini_audio_prompt'
   | 'gemini_audio_retry_count'
+  | 'subtitle_recognition_language'
+  | 'subtitle_local_model'
   | 'speaker_voice_map'
   | 'speaker_voice_styles'
   | 'glossary_terms'

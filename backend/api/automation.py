@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from ..core import DedupChecker, Downloader, FFmpegProcessor, SubtitleEngine, LocalSpeechRecognizer, TextEngine, VoiceEngine, GeminiAudioTranscriber, align_gemini_content_to_whisper_timeline
 from ..core.voice_engine import VoiceEngine as CoreVoiceEngine, provider_audio_format
-from ..core.local_asr import asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
+from ..core.local_asr import LOCAL_ASR_MODEL_NAMES, asr_cuda_disabled_by_marker, cuda_device_count, cuda_free_memory_mib, cuda_memory_mib
 from ..core.paths import ensure_project_dirs, ensure_video_workspace, detect_video_workspace, find_video_workspace
 from ..core.process_control import TaskControlRequested, clear_control_request, raise_if_control_requested
 from ..core.subtitle_engine import adjust_cjk_unit_boundary
@@ -129,6 +129,22 @@ def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
     return max(0.0, min(1.0, volume))
 
 
+def _normalize_asr_model_name(value: Any) -> Optional[str]:
+    """规范本地识别模型名，auto 表示继续按显存自动选择"""
+    model_name = str(value or "").strip().lower()
+    if not model_name or model_name == "auto":
+        return None
+    return model_name if model_name in LOCAL_ASR_MODEL_NAMES else None
+
+
+def _normalize_asr_language(value: Any) -> Optional[str]:
+    """规范识别语言，auto/空值交给模型自动检测"""
+    language = str(value or "").strip()
+    if not language or language.lower() == "auto":
+        return None
+    return language
+
+
 def _audio_merge_volume(mode: str, original_volume: Any) -> float:
     """按合成模式返回音量；AI 去人声背景轨默认完整保留"""
     normalized_mode = _normalize_audio_mode(mode)
@@ -161,6 +177,8 @@ class AutomationRunRequest(BaseModel):
     subtitle_language: Optional[str] = None
     text_profile_id: Optional[int] = None
     subtitle_recognition_mode: str = "local"
+    subtitle_recognition_language: str = "auto"
+    subtitle_local_model: str = "auto"
     gemini_audio_prompt: Optional[str] = None
     gemini_audio_segment_seconds: float = Field(default=90.0, ge=20.0, le=300.0)
     gemini_audio_overlap_seconds: float = Field(default=0.3, ge=0.0, le=3.0)
@@ -206,6 +224,8 @@ class AutomationRerunOverrideRequest(BaseModel):
     text_profile_id: Optional[int] = None
     text_system_prompt: Optional[str] = None
     gemini_audio_prompt: Optional[str] = None
+    subtitle_recognition_language: Optional[str] = None
+    subtitle_local_model: Optional[str] = None
     voice_profile_id: Optional[int] = None
     audio_mode: Optional[str] = None
     original_volume: Optional[float] = None
@@ -1489,9 +1509,9 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
     )
 
 
-def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
+def _gemini_align_timeline_recognizer(request: Optional["AutomationRunRequest"] = None) -> LocalSpeechRecognizer:
     """构造 Gemini 对齐模式的本地时间轴识别器，按显存安全选择 GPU 或 CPU"""
-    profile = _gemini_align_timeline_profile()
+    profile = _gemini_align_timeline_profile(request)
     return LocalSpeechRecognizer(
         device=profile["device"],
         model_name=profile["model_name"],
@@ -1501,7 +1521,7 @@ def _gemini_align_timeline_recognizer() -> LocalSpeechRecognizer:
     )
 
 
-def _gemini_align_timeline_profile() -> dict[str, str]:
+def _gemini_align_timeline_profile(request: Optional["AutomationRunRequest"] = None) -> dict[str, str]:
     """返回 Gemini 对齐本地时间轴识别配置，写入缓存用于自动失效旧结果"""
     requested_device = (
         os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_DEVICE")
@@ -1511,7 +1531,8 @@ def _gemini_align_timeline_profile() -> dict[str, str]:
     if requested_device not in {"auto", "cpu", "cuda"}:
         requested_device = "auto"
     configured_model = (
-        os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL")
+        _normalize_asr_model_name(getattr(request, "subtitle_local_model", None))
+        or os.environ.get("YTV_GEMINI_ALIGN_TIMELINE_MODEL")
         or os.environ.get("YTV_ASR_MODEL")
         or ""
     ).strip()
@@ -1542,10 +1563,16 @@ def _gemini_align_timeline_profile() -> dict[str, str]:
     return {"device": "cpu", "model_name": configured_model or "base", "beam_size": str(beam_size)}
 
 
-def _gemini_align_cache_profile(profile: Optional[dict[str, str]] = None) -> dict[str, str]:
-    """生成时间轴缓存签名，只保留会影响时间轴质量的模型名，忽略 CPU/GPU 执行设备"""
-    current = profile or _gemini_align_timeline_profile()
-    return {"model_name": str(current.get("model_name") or "base")}
+def _gemini_align_cache_profile(
+    profile: Optional[dict[str, str]] = None,
+    request: Optional["AutomationRunRequest"] = None,
+) -> dict[str, str]:
+    """生成时间轴缓存签名，只保留会影响时间轴质量的模型名和识别语言，忽略 CPU/GPU 执行设备"""
+    current = profile or _gemini_align_timeline_profile(request)
+    return {
+        "model_name": str(current.get("model_name") or "base"),
+        "language": _normalize_asr_language(getattr(request, "subtitle_recognition_language", None)) or "auto",
+    }
 
 
 def _safe_gemini_align_gpu_model() -> str:
@@ -1612,7 +1639,20 @@ def _media_cache_signature(video_path: str) -> dict[str, Any]:
         return {"size": 0, "mtime": 0.0}
 
 
-def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[dict], str]]:
+def _normalize_gemini_align_cached_profile(value: Any, fallback_profile: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """把旧缓存和新缓存的签名统一成可比较结构"""
+    raw = value if isinstance(value, dict) else {}
+    fallback = fallback_profile if isinstance(fallback_profile, dict) else {}
+    return {
+        "model_name": str(raw.get("model_name") or fallback.get("model_name") or "base"),
+        "language": str(raw.get("language") or raw.get("recognition_language") or "auto"),
+    }
+
+
+def _load_gemini_align_timeline_cache(
+    video_path: str,
+    request: Optional["AutomationRunRequest"] = None,
+) -> Optional[tuple[list[dict], str]]:
     """读取 Gemini 对齐模式的本地时间轴缓存，后端重启后可跳过本地 ASR"""
     cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
     if not os.path.exists(cache_path) or not os.path.exists(meta_path):
@@ -1624,8 +1664,8 @@ def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[di
         if meta.get("cache_version") not in {2, GEMINI_ALIGN_TIMELINE_CACHE_VERSION}:
             return None
         old_profile = meta.get("timeline_profile") if isinstance(meta.get("timeline_profile"), dict) else None
-        cached_profile = meta.get("cache_profile") or _gemini_align_cache_profile(old_profile)
-        if cached_profile != _gemini_align_cache_profile():
+        cached_profile = _normalize_gemini_align_cached_profile(meta.get("cache_profile"), old_profile)
+        if cached_profile != _gemini_align_cache_profile(request=request):
             return None
         if meta.get("video_path") != os.path.abspath(video_path):
             return None
@@ -1645,13 +1685,18 @@ def _load_gemini_align_timeline_cache(video_path: str) -> Optional[tuple[list[di
         return None
 
 
-def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], language: str) -> None:
+def _save_gemini_align_timeline_cache(
+    video_path: str,
+    entries: list[dict],
+    language: str,
+    request: Optional["AutomationRunRequest"] = None,
+) -> None:
     """保存 Gemini 对齐模式的本地时间轴缓存，避免继续完成时从头识别"""
     if not entries:
         return
     cache_path, meta_path = _gemini_align_timeline_cache_paths(video_path)
-    timeline_profile = _gemini_align_timeline_profile()
-    cache_profile = _gemini_align_cache_profile(timeline_profile)
+    timeline_profile = _gemini_align_timeline_profile(request)
+    cache_profile = _gemini_align_cache_profile(timeline_profile, request)
     try:
         with open(cache_path, "w", encoding="utf-8") as file:
             json.dump(
@@ -1662,6 +1707,7 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
                     "timeline_profile": timeline_profile,
                     "cache_profile": cache_profile,
                     "language": language,
+                    "recognition_language": cache_profile["language"],
                     "entries": entries,
                     "created_at": datetime.now().isoformat(),
                 },
@@ -1678,6 +1724,7 @@ def _save_gemini_align_timeline_cache(video_path: str, entries: list[dict], lang
                     "timeline_profile": timeline_profile,
                     "cache_profile": cache_profile,
                     "language": language,
+                    "recognition_language": cache_profile["language"],
                 },
                 file,
                 ensure_ascii=False,
@@ -1696,30 +1743,39 @@ def _recognize_subtitle_entries(
 ) -> tuple[list[dict], str]:
     """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
     mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    recognition_language = _normalize_asr_language(request.subtitle_recognition_language)
+    local_model_name = _normalize_asr_model_name(request.subtitle_local_model)
     # 记录识别模式，便于排查前端配置是否传到后端。
-    logger.info(f"字幕识别模式: mode={mode}, subtitle_recognition_mode={request.subtitle_recognition_mode}")
+    logger.info(
+        "字幕识别模式: "
+        f"mode={mode}, subtitle_recognition_mode={request.subtitle_recognition_mode}, "
+        f"language={recognition_language or 'auto'}, local_model={local_model_name or 'auto'}"
+    )
     if mode == "gemini_full":
         # 方案2：Gemini 分段转写整片，时间戳由内部 VAD 边界校准
         return _build_gemini_transcriber(db, request).transcribe_video(
             video_path=video_path,
+            language=recognition_language,
             progress_callback=progress_callback,
         )
     if mode == "gemini_align":
         # 方案3：本地识别出精确时间轴骨架，Gemini 出准确内容，按时间重叠对齐
-        cached_timeline = _load_gemini_align_timeline_cache(video_path)
+        cached_timeline = _load_gemini_align_timeline_cache(video_path, request)
         if cached_timeline:
             whisper_entries, language = cached_timeline
             if progress_callback:
                 progress_callback(50)
         else:
-            whisper_entries, language = _gemini_align_timeline_recognizer().transcribe_video(
+            whisper_entries, language = _gemini_align_timeline_recognizer(request).transcribe_video(
                 video_path=video_path,
+                language=recognition_language,
                 progress_callback=lambda value: progress_callback(value * 0.5),
             )
-            _save_gemini_align_timeline_cache(video_path, whisper_entries, language)
+            _save_gemini_align_timeline_cache(video_path, whisper_entries, language, request)
+        gemini_language = recognition_language or (None if not language or language == "auto" else language)
         gemini_entries, _ = _build_gemini_transcriber(db, request).transcribe_video(
             video_path=video_path,
-            language=None if not language or language == "auto" else language,
+            language=gemini_language,
             progress_callback=lambda value: progress_callback(50.0 + value * 0.5),
         )
         asr = LocalSpeechRecognizer()
@@ -1729,10 +1785,11 @@ def _recognize_subtitle_entries(
             asr._srt_time_to_seconds,
             asr._seconds_to_srt_time,
         )
-        return aligned, language
+        return aligned, recognition_language or language
     # 默认本地 Whisper 识别
-    return LocalSpeechRecognizer().transcribe_video(
+    return LocalSpeechRecognizer(model_name=local_model_name).transcribe_video(
         video_path=video_path,
+        language=recognition_language,
         progress_callback=progress_callback,
     )
 

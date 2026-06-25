@@ -313,6 +313,9 @@ export type SubtitleTextOperation = 'skip' | 'none' | 'generate' | 'translate' |
 /** 字幕识别方式：本地 Whisper / Gemini 全片转写 / Gemini 内容+本地时间轴 */
 export type SubtitleRecognitionMode = 'local' | 'gemini_full' | 'gemini_align'
 
+/** 本地字幕识别模型 */
+export type SubtitleLocalModel = 'auto' | 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo' | 'large-v3' | 'sensevoice' | 'qwen3-asr'
+
 /** 配音说话人音色配置 */
 export interface VoiceSpeakerProfile {
   id: string
@@ -349,6 +352,8 @@ export interface AutomationPreferences {
   subtitle_language: string
   text_profile_id: number | null
   subtitle_recognition_mode: SubtitleRecognitionMode
+  subtitle_recognition_language: string
+  subtitle_local_model: SubtitleLocalModel
   gemini_audio_segment_seconds: number
   gemini_audio_overlap_seconds: number
   gemini_audio_full_coverage: boolean
