@@ -41,6 +41,7 @@ from .subtitles import _parse_subtitle_entries, _preset_to_dict, entries_to_plai
 router = APIRouter(prefix="/automation", tags=["automation"])
 logger = get_logger("automation")
 GEMINI_ALIGN_TIMELINE_CACHE_VERSION = 3
+DEFAULT_EXPLICIT_LOCAL_ASR_MODEL = "large-v3-turbo"
 
 # 后台自动化任务线程池，避免多个长视频同时阻塞 API 线程。
 AUTOMATION_EXECUTOR = ThreadPoolExecutor(max_workers=8)
@@ -129,12 +130,34 @@ def _normalize_original_volume(value: Any, default: float = 0.25) -> float:
     return max(0.0, min(1.0, volume))
 
 
-def _normalize_asr_model_name(value: Any) -> Optional[str]:
-    """规范本地识别模型名，auto 表示继续按显存自动选择"""
+def _normalize_asr_model_name(value: Any, *, allow_auto: bool = True) -> Optional[str]:
+    """规范本地识别模型名；纯本地识别不允许 auto，避免误用低精度自动档"""
     model_name = str(value or "").strip().lower()
-    if not model_name or model_name == "auto":
-        return None
-    return model_name if model_name in LOCAL_ASR_MODEL_NAMES else None
+    if not model_name:
+        return DEFAULT_EXPLICIT_LOCAL_ASR_MODEL if not allow_auto else None
+    if model_name == "auto":
+        return None if allow_auto else DEFAULT_EXPLICIT_LOCAL_ASR_MODEL
+    if model_name in LOCAL_ASR_MODEL_NAMES:
+        return model_name
+    if not allow_auto:
+        return DEFAULT_EXPLICIT_LOCAL_ASR_MODEL
+    return None
+
+
+def _normalize_asr_model_for_mode(value: Any, mode: str) -> Optional[str]:
+    """按识别方式规范本地模型：本地识别必须明确，混合时间轴模式可以自动选择"""
+    if mode == "local":
+        return _normalize_asr_model_name(value, allow_auto=False)
+    return _normalize_asr_model_name(value, allow_auto=True)
+
+
+def _asr_model_log_label(model_name: Optional[str], mode: str) -> str:
+    """日志里区分自动选择和纯本地识别的明确兜底模型"""
+    if model_name:
+        return model_name
+    if mode == "local":
+        return DEFAULT_EXPLICIT_LOCAL_ASR_MODEL
+    return "auto"
 
 
 def _normalize_asr_language(value: Any) -> Optional[str]:
@@ -1744,12 +1767,12 @@ def _recognize_subtitle_entries(
     """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
     mode = (request.subtitle_recognition_mode or "local").strip().lower()
     recognition_language = _normalize_asr_language(request.subtitle_recognition_language)
-    local_model_name = _normalize_asr_model_name(request.subtitle_local_model)
+    local_model_name = _normalize_asr_model_for_mode(request.subtitle_local_model, mode)
     # 记录识别模式，便于排查前端配置是否传到后端。
     logger.info(
         "字幕识别模式: "
         f"mode={mode}, subtitle_recognition_mode={request.subtitle_recognition_mode}, "
-        f"language={recognition_language or 'auto'}, local_model={local_model_name or 'auto'}"
+        f"language={recognition_language or 'auto'}, local_model={_asr_model_log_label(local_model_name, mode)}"
     )
     if mode == "gemini_full":
         # 方案2：Gemini 分段转写整片，时间戳由内部 VAD 边界校准

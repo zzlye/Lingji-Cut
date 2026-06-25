@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronDown, Download, Loader2, Pencil, Plus, Search, Type } from 'lucide-react'
 import { subtitleApi } from '@/lib/api'
 import { loadAutomationPreferences, saveAutomationPreferences } from '@/lib/automationPreferences'
-import { SUBTITLE_LOCAL_MODEL_OPTIONS, SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS } from '@/lib/subtitleRecognitionOptions'
+import { DEFAULT_EXPLICIT_SUBTITLE_LOCAL_MODEL, EXPLICIT_SUBTITLE_LOCAL_MODEL_OPTIONS, SUBTITLE_LOCAL_MODEL_OPTIONS, SUBTITLE_RECOGNITION_LANGUAGE_OPTIONS } from '@/lib/subtitleRecognitionOptions'
 import type { AutomationPreferences, SubtitlePreset } from '@/types'
 import { useTaskStore } from '@/stores/taskStore'
 import { usePrefsStore } from '@/stores/prefsStore'
@@ -274,6 +274,12 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
   const currentFontAvailable = getFontAvailability(fontAvailability, form.font_name)
   const shouldSkipSubtitle = automationOptions.subtitle_operation === 'skip'
   const usesGeminiRecognition = automationOptions.subtitle_recognition_mode !== 'local'
+  const localModelOptions = automationOptions.subtitle_recognition_mode === 'local'
+    ? EXPLICIT_SUBTITLE_LOCAL_MODEL_OPTIONS
+    : SUBTITLE_LOCAL_MODEL_OPTIONS
+  const selectedLocalModel = automationOptions.subtitle_recognition_mode === 'local' && automationOptions.subtitle_local_model === 'auto'
+    ? DEFAULT_EXPLICIT_SUBTITLE_LOCAL_MODEL
+    : automationOptions.subtitle_local_model
 
   const saveAutomationOptions = (updates: Partial<AutomationPreferences>) => {
     const next = saveAutomationPreferences(updates)
@@ -537,13 +543,23 @@ export function SubtitleEditor({ compact = false }: { compact?: boolean }) {
             <AccordionItem value="auto" className="rounded-lg border px-4">
               <AccordionTrigger className="text-sm">一键完成字幕策略</AccordionTrigger>
               <AccordionContent className="space-y-3 pb-3">
-                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => updateAutomationOptions({ subtitle_recognition_mode: v as typeof automationOptions.subtitle_recognition_mode })} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
+                <SelectField label="字幕识别方式" value={automationOptions.subtitle_recognition_mode} options={[['local', '本地识别（快·免费）'], ['gemini_full', 'Gemini 转写（最准·较慢·走文本API）'], ['gemini_align', 'Gemini 内容+本地时间轴（内容准·音画同步）']]} onChange={(v) => {
+                  const mode = v as typeof automationOptions.subtitle_recognition_mode
+                  updateAutomationOptions({
+                    subtitle_recognition_mode: mode,
+                    ...(mode === 'local' && automationOptions.subtitle_local_model === 'auto'
+                      ? { subtitle_local_model: DEFAULT_EXPLICIT_SUBTITLE_LOCAL_MODEL }
+                      : {}),
+                  })
+                }} description="Gemini 模式识别更准但更慢，需先在「文本 API」配置 Gemini 渠道" />
                 <div className="grid gap-3 sm:grid-cols-2">
                   <SelectField
                     label="本地识别模型"
-                    value={automationOptions.subtitle_local_model}
-                    options={SUBTITLE_LOCAL_MODEL_OPTIONS}
-                    description="本地识别和 Gemini+本地时间轴使用；large-v3 最准但更慢更吃显存。"
+                    value={selectedLocalModel}
+                    options={localModelOptions}
+                    description={automationOptions.subtitle_recognition_mode === 'local'
+                      ? '本地识别必须指定模型；large-v3 最准但更慢更吃显存。'
+                      : '本地识别和 Gemini+本地时间轴使用；large-v3 最准但更慢更吃显存。'}
                     onChange={(v) => updateAutomationOptions({ subtitle_local_model: v as typeof automationOptions.subtitle_local_model })}
                   />
                   <SelectField

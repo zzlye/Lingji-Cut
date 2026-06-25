@@ -1,6 +1,9 @@
 // src/lib/subtitleRecognitionOptions.ts
 // 字幕识别选项 - 设置页和工作台共用，保证一键流程参数一致
 
+/** 纯本地识别必须使用明确模型，避免自动选择跑到低精度模型 */
+export const DEFAULT_EXPLICIT_SUBTITLE_LOCAL_MODEL = 'large-v3-turbo'
+
 /** 本地 ASR 模型选项，auto 表示后端按设备和显存自动选择 */
 export const SUBTITLE_LOCAL_MODEL_OPTIONS: Array<[string, string]> = [
   ['auto', '自动选择'],
@@ -13,6 +16,9 @@ export const SUBTITLE_LOCAL_MODEL_OPTIONS: Array<[string, string]> = [
   ['base', 'base（最快）'],
   ['tiny', 'tiny（最低占用）'],
 ]
+
+/** 纯本地识别模型选项，不允许自动选择 */
+export const EXPLICIT_SUBTITLE_LOCAL_MODEL_OPTIONS = SUBTITLE_LOCAL_MODEL_OPTIONS.filter(([value]) => value !== 'auto')
 
 /** 本地 ASR 模型值，保存偏好时用于过滤旧值或拼错值 */
 export const SUBTITLE_LOCAL_MODEL_VALUES = SUBTITLE_LOCAL_MODEL_OPTIONS.map(([value]) => value)

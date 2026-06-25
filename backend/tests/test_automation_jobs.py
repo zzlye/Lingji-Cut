@@ -1310,6 +1310,36 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(FakeLocalRecognizer.init_kwargs[0]["model_name"], "large-v3")
         self.assertEqual(FakeLocalRecognizer.transcribe_calls[0]["language"], "ja")
 
+    def test_local_recognition_rejects_auto_model(self):
+        """纯本地识别不允许自动选择模型，旧配置会兜底到明确模型"""
+        class FakeLocalRecognizer:
+            """测试用本地识别器，记录构造参数"""
+
+            init_kwargs: list[dict] = []
+
+            def __init__(self, *_, **kwargs):
+                self.init_kwargs.append(kwargs)
+
+            def transcribe_video(self, video_path, language=None, progress_callback=None):
+                if progress_callback:
+                    progress_callback(100)
+                return ([{"index": 1, "start": "00:00:00,000", "end": "00:00:01,000", "text": "hello"}], "auto")
+
+        request = AutomationRunRequest(
+            url="https://example.test/video",
+            subtitle_recognition_mode="local",
+            subtitle_local_model="auto",
+            enable_effects=False,
+            processing_preset={},
+            enable_voice=False,
+            burn_subtitles=False,
+            output_format="mp4",
+        )
+        with patch("backend.api.automation.LocalSpeechRecognizer", FakeLocalRecognizer):
+            _recognize_subtitle_entries(FakeDb([]), request, "D:/tmp/video.mp4", lambda _value: None)
+
+        self.assertEqual(FakeLocalRecognizer.init_kwargs[0]["model_name"], "large-v3-turbo")
+
     def test_gemini_align_uses_selected_model_language_and_cache_profile(self):
         """Gemini+本地时间轴把用户选择的本地模型和识别语言写入实际识别与缓存"""
         class FakeTimelineRecognizer:
