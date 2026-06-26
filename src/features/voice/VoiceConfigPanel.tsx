@@ -20,6 +20,7 @@ const VOICE_PROVIDERS = [
   { id: 'gemini_tts', name: 'Gemini TTS', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash-preview-tts' },
   { id: 'minimax_tts', name: 'MiniMax T2A', baseUrl: 'https://api.minimax.io/v1', model: 'speech-2.8-hd' },
   { id: 'xiaomi_mimo_tts', name: '小米 MiMo TTS', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts' },
+  { id: 'local_tts', name: '本地 TTS 命令', baseUrl: '', model: 'local-command' },
   { id: 'custom_tts', name: '自定义 OpenAI 兼容', baseUrl: '', model: '' },
 ]
 
@@ -34,6 +35,7 @@ function createDefaultSettings(): VoiceGenerateSettings {
     speed: 1, volume: 1, pitch: 0, format: 'mp3', sample_rate: 32000, bitrate: 128000, channel: 1,
     emotion: '', style_prompt: '', language_boost: 'auto', intensity: 0, timbre: 0, voice_pitch: 0, sound_effects: '',
     xiaomi_voice_design_prompt: '', xiaomi_voice_clone_audio_path: '', xiaomi_voice_clone_audio_name: '',
+    local_tts_command: '', local_tts_workdir: '', local_tts_timeout_seconds: 600,
     retry_count: 2, retry_interval_ms: 1200,
   }
 }
@@ -186,10 +188,17 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const selectedVoice = customVoice.trim() || voice
   const activeModel = profileForm.custom_model.trim() || profileForm.model
   const isXiaomiMiMo = activeProvider === 'xiaomi_mimo_tts'
+  const isLocalTts = activeProvider === 'local_tts'
   const isXiaomiVoiceDesign = isXiaomiMiMo && activeModel.toLowerCase().includes('voicedesign')
   const isXiaomiVoiceClone = isXiaomiMiMo && activeModel.toLowerCase().includes('voiceclone')
   const supportsMiniMaxAdvanced = activeProvider === 'minimax_tts'
-  const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts'
+  const supportsStylePrompt = activeProvider === 'openai_tts' || activeProvider === 'gemini_tts' || activeProvider === 'xiaomi_mimo_tts' || activeProvider === 'custom_tts' || isLocalTts
+  const baseUrlLabel = isLocalTts ? '命令模板' : 'Base URL'
+  const baseUrlPlaceholder = isLocalTts
+    ? '例如 python D:\\tools\\f5tts\\infer.py --text-file {text_file} --output {output} --voice {voice}'
+    : undefined
+  const requiresApiKey = !isLocalTts
+  const localCommandTemplate = (settings.local_tts_command || profileForm.base_url).trim()
   const activeVoiceValue = (() => {
     if (isXiaomiVoiceDesign) {
       const prompt = settings.xiaomi_voice_design_prompt?.trim() || decodeXiaomiVoiceDesign(selectedVoice)
@@ -329,18 +338,22 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         ...current,
         provider_type: provider.id,
         // 用户填了 NewAPI 这类自定义网关地址时，切换渠道不能强行覆盖成官方地址。
-        base_url: shouldUseProviderDefault ? (provider.baseUrl || current.base_url) : current.base_url,
+        base_url: provider.id === 'local_tts'
+          ? ''
+          : shouldUseProviderDefault
+            ? (provider.baseUrl || current.base_url)
+            : current.base_url,
         model: provider.model || current.model,
         custom_model: '',
         name: current.name || provider.name,
       }
     })
     setModelOptions(provider.model ? [{ id: provider.model, label: provider.model, owned_by: provider.id }] : [])
-    setNotice({ type: 'info', message: `已切换到 ${provider.name}，请确认模型、音色和密钥。` })
+    setNotice({ type: 'info', message: provider.id === 'local_tts' ? '已切换到本地 TTS，请填写命令模板并确认输出文件参数。' : `已切换到 ${provider.name}，请确认模型、音色和密钥。` })
   }
 
   const handleLoadModels = async () => {
-    if (!profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
     setIsLoadingModels(true)
     setNotice({ type: 'info', message: '正在获取配音模型列表...' })
     try {
@@ -359,8 +372,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const result = await voiceApi.voices(providerType, model)
       setVoices(result.voices)
-      if (providerType === 'custom_tts') {
-        // 自定义 OpenAI 兼容渠道要保留用户填写的 voice id，不能用占位音色覆盖。
+      if (providerType === 'custom_tts' || providerType === 'local_tts') {
+        // 自定义和本地命令渠道要保留用户填写的 voice id，不能用占位音色覆盖。
         setVoice((current) => current || result.voices[0]?.id || 'custom')
       } else if (result.voices.length > 0) {
         const normalizedModel = String(model || '').toLowerCase()
@@ -378,9 +391,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleSaveProfile = async () => {
-    if (!profileForm.name.trim() || !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请填写配音配置名称和 Base URL' }); return }
+    if (!profileForm.name.trim() || (!isLocalTts && !profileForm.base_url.trim())) { setNotice({ type: 'warning', message: `请填写配音配置名称和 ${baseUrlLabel}` }); return }
+    if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请填写本地 TTS 命令模板' }); return }
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
-    if (!selectedProfileId && !profileForm.api_key.trim()) { setNotice({ type: 'warning', message: '新建配音配置需要填写 API Key' }); return }
+    if (requiresApiKey && !selectedProfileId && !profileForm.api_key.trim()) { setNotice({ type: 'warning', message: '新建配音配置需要填写 API Key' }); return }
     setIsSaving(true)
     setNotice({ type: 'info', message: '正在保存配音配置...' })
     try {
@@ -397,7 +411,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleTestProfile = async () => {
-    if (!profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
     setIsTesting(true)
     setNotice({ type: 'info', message: '正在生成短试听并测试连接...' })
@@ -411,7 +426,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handlePreview = async () => {
-    if (!profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
     if (!previewText.trim()) { setNotice({ type: 'warning', message: '请输入试听文本' }); return }
     setIsGenerating(true)
@@ -507,7 +523,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleSpeakerPreview = async (speaker: VoiceSpeakerProfile) => {
-    if (!profileForm.base_url.trim() || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
+    if ((!isLocalTts && !profileForm.base_url.trim()) || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
+    if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
     setIsGenerating(true)
     setAudioUrl('')
     setNotice({ type: 'info', message: `正在生成 ${speaker.label} 的试听...` })
@@ -654,17 +671,29 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
           <div className="grid gap-4 sm:grid-cols-2">
             <TextField label="配置名称" value={profileForm.name} onChange={(v) => setProfileForm({ ...profileForm, name: v })} />
             <SelectField label="渠道" value={profileForm.provider_type} options={VOICE_PROVIDERS.map((p) => [p.id, p.name] as FieldOption)} onChange={updateProvider} />
-            <TextField label="Base URL" value={profileForm.base_url} onChange={(v) => setProfileForm({ ...profileForm, base_url: v })} />
-            <SecretField
-              label="API Key"
-              value={profileForm.api_key}
-              placeholder={selectedProfileId ? '已保存密钥' : '请输入 API Key'}
-              description={selectedProfileId ? '已保存配置会自动带出密钥，默认隐藏；点击右侧眼睛可查看。' : undefined}
-              visible={showApiKey}
-              maskWhenHidden={Boolean(selectedProfileId)}
-              onToggleVisible={() => setShowApiKey((current) => !current)}
-              onChange={(v) => setProfileForm({ ...profileForm, api_key: v })}
+            <TextField
+              label={baseUrlLabel}
+              value={profileForm.base_url}
+              placeholder={baseUrlPlaceholder}
+              description={isLocalTts ? '可直接把命令写在这里；也可以在高级参数里填写命令模板。本地命令必须生成 {output} 指定的音频文件。' : undefined}
+              onChange={(v) => setProfileForm({ ...profileForm, base_url: v })}
             />
+            {requiresApiKey ? (
+              <SecretField
+                label="API Key"
+                value={profileForm.api_key}
+                placeholder={selectedProfileId ? '已保存密钥' : '请输入 API Key'}
+                description={selectedProfileId ? '已保存配置会自动带出密钥，默认隐藏；点击右侧眼睛可查看。' : undefined}
+                visible={showApiKey}
+                maskWhenHidden={Boolean(selectedProfileId)}
+                onToggleVisible={() => setShowApiKey((current) => !current)}
+                onChange={(v) => setProfileForm({ ...profileForm, api_key: v })}
+              />
+            ) : (
+              <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+                本地 TTS 不需要 API Key，软件会调用你填写的本地命令生成音频。
+              </div>
+            )}
             <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
             <TextField label="自定义模型" value={profileForm.custom_model} placeholder={profileForm.model || activeProviderMeta.model || '例如 gpt-4o-mini-tts'} onChange={(v) => setProfileForm({ ...profileForm, custom_model: v })} />
           </div>
@@ -772,6 +801,22 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               <NumberField label="失败重试" value={settings.retry_count} min={0} max={10} step={1} suffix="次" onChange={(v) => updateSetting('retry_count', Math.max(0, Math.round(v)))} />
               <NumberField label="重试间隔" value={settings.retry_interval_ms} min={0} max={30000} step={100} suffix="ms" onChange={(v) => updateSetting('retry_interval_ms', Math.max(0, Math.round(v)))} />
             </div>
+            {isLocalTts && (
+              <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+                <TextareaField
+                  label="本地 TTS 命令模板"
+                  value={settings.local_tts_command || ''}
+                  rows={3}
+                  placeholder="例如：python D:\\tools\\f5tts\\infer.py --text-file {text_file} --output {output} --voice {voice}"
+                  description="支持 {text}、{text_file}、{output}、{voice}、{model}、{format}、{style}、{sample_rate}。推荐用 {text_file}，避免长文本和特殊符号破坏命令。"
+                  onChange={(v) => updateSetting('local_tts_command', v)}
+                />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <TextField label="工作目录" value={settings.local_tts_workdir || ''} placeholder="可空；例如 D:\\tools\\CosyVoice" onChange={(v) => updateSetting('local_tts_workdir', v)} />
+                  <NumberField label="命令超时" value={settings.local_tts_timeout_seconds || 600} min={10} max={3600} step={10} suffix="秒" onChange={(v) => updateSetting('local_tts_timeout_seconds', Math.max(10, Math.round(v)))} />
+                </div>
+              </div>
+            )}
             {supportsMiniMaxAdvanced && (
               <div className="grid gap-3 sm:grid-cols-2">
                 <SelectField label="情绪" value={settings.emotion} options={EMOTION_OPTIONS} onChange={(v) => updateSetting('emotion', v)} />
@@ -870,8 +915,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                         }}
                       />
                     </div>
-                  ) : activeProvider === 'custom_tts' ? (
-                    <TextField label="voice id" value={speaker.voice} placeholder="例如 alloy、nova 或服务商自定义 voice" onChange={(v) => updateSpeaker(speaker.id, { voice: v })} />
+                  ) : activeProvider === 'custom_tts' || isLocalTts ? (
+                    <TextField label="voice id" value={speaker.voice} placeholder="例如 alloy、nova、本地角色名或参考音频路径" onChange={(v) => updateSpeaker(speaker.id, { voice: v })} />
                   ) : (
                     <SelectField
                       label="voice id"

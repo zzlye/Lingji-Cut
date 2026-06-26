@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.api.profiles import ProfileCreate, ProfileRename, ProfileUpdate, create_text_profile, delete_text_profile, get_text_profile_secret, get_voice_profile_secret, rename_text_profile, update_text_profile  # noqa: E402
+from backend.api.profiles import ProfileCreate, ProfileRename, ProfileUpdate, create_text_profile, create_voice_profile, delete_text_profile, get_text_profile_secret, get_voice_profile_secret, rename_text_profile, update_text_profile, update_voice_profile  # noqa: E402
 from backend.models import TextProviderProfile, VoiceProviderProfile  # noqa: E402
 from backend.utils import encrypt_api_key  # noqa: E402
 
@@ -45,6 +45,8 @@ class FakeDb:
         return FakeQuery([])
 
     def add(self, item):
+        if getattr(item, "id", None) is None:
+            item.id = len(self.text_profiles) + len(self.voice_profiles) + 1
         if isinstance(item, TextProviderProfile):
             self.text_profiles.append(item)
         elif isinstance(item, VoiceProviderProfile):
@@ -93,6 +95,48 @@ class ProfileSecretTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertIn("API Key", context.exception.detail)
+
+    def test_create_local_tts_voice_profile_allows_empty_api_key(self):
+        """本地 TTS 配置不需要 API Key，也允许命令模板放在高级参数里"""
+        db = FakeDb()
+
+        result = asyncio.run(create_voice_profile(ProfileCreate(
+            name="本地配音",
+            provider_type="local_tts",
+            base_url="",
+            api_key="",
+            model="local-command",
+            extra_params='{"local_tts_command":"python infer.py --text-file {text_file} --output {output}"}',
+        ), db))
+
+        self.assertEqual(result.provider_type, "local_tts")
+        self.assertEqual(result.base_url, "")
+        self.assertEqual(len(db.voice_profiles), 1)
+
+    def test_remote_voice_profile_still_rejects_empty_api_key(self):
+        """远程配音配置仍然不允许新建空密钥配置"""
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(create_voice_profile(ProfileCreate(name="远程配音", provider_type="openai_tts", base_url="https://example.com/v1", api_key="", model="tts"), FakeDb()))
+
+        self.assertEqual(context.exception.status_code, 400)
+        self.assertIn("API Key", context.exception.detail)
+
+    def test_update_local_tts_voice_profile_can_clear_api_key(self):
+        """远程配置改成本地 TTS 时可以清空旧密钥，避免多余密钥留在配置里"""
+        profile = VoiceProviderProfile(id=2, name="旧配音", provider_type="openai_tts", base_url="https://example.com", api_key_encrypted=encrypt_api_key("sk-voice"), voice="tts")
+        db = FakeDb(voice_profiles=[profile])
+
+        result = asyncio.run(update_voice_profile(2, ProfileUpdate(
+            name="本地配音",
+            provider_type="local_tts",
+            base_url="",
+            api_key=None,
+            model="local-command",
+            extra_params='{"local_tts_command":"python infer.py --text-file {text_file} --output {output}"}',
+        ), db))
+
+        self.assertEqual(result.provider_type, "local_tts")
+        self.assertEqual(result.base_url, "")
 
     def test_update_text_profile_requires_key_when_old_secret_is_empty(self):
         """旧配置没有密钥时，更新不能继续留空"""

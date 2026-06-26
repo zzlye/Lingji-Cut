@@ -276,6 +276,9 @@ def _default_voice_models(provider_type: str) -> list[TextModelOption]:
             ("mimo-v2.5-tts-voicedesign", "mimo-v2.5-tts-voicedesign"),
             ("mimo-v2-tts", "mimo-v2-tts"),
         ],
+        "local_tts": [
+            ("local-command", "本地命令"),
+        ],
         "custom_tts": [],
     }
     return [TextModelOption(id=model_id, label=label, owned_by=provider_type) for model_id, label in defaults.get(provider_type, [])]
@@ -302,10 +305,13 @@ def _filter_voice_models(provider_type: str, models: list[TextModelOption]) -> l
 
 async def _fetch_voice_models(provider_type: str, base_url: str, api_key: str) -> tuple[list[TextModelOption], str]:
     """获取配音模型列表，优先远程读取，失败时返回内置模型"""
+    defaults = _default_voice_models(provider_type)
+    if provider_type == "local_tts":
+        return defaults, "local"
+
     if not base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
 
-    defaults = _default_voice_models(provider_type)
     if _voice_requires_api_key(provider_type) and not api_key.strip():
         if defaults:
             return defaults, "local"
@@ -335,17 +341,22 @@ async def _fetch_voice_models(provider_type: str, base_url: str, api_key: str) -
 
 async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> None:
     """通过生成极短试听音频真实测试配音配置"""
-    if not profile.base_url.strip():
-        raise HTTPException(status_code=400, detail="请填写 Base URL")
-    if _voice_requires_api_key(profile.provider_type) and not api_key.strip():
-        raise HTTPException(status_code=400, detail="请填写 API Key，或选择已保存配音配置")
-
     settings = {}
     if profile.extra_params:
         try:
             settings = json.loads(profile.extra_params)
         except json.JSONDecodeError:
             settings = {}
+
+    if profile.provider_type == "local_tts":
+        command_template = str(settings.get("local_tts_command") or profile.base_url or "").strip()
+        if not command_template:
+            raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
+    elif not profile.base_url.strip():
+        raise HTTPException(status_code=400, detail="请填写 Base URL")
+    if _voice_requires_api_key(profile.provider_type) and not api_key.strip():
+        raise HTTPException(status_code=400, detail="请填写 API Key，或选择已保存配音配置")
+
     voice = settings.get("voice") or _default_voice_id(profile.provider_type)
     model = profile.voice or _default_voice_model(profile.provider_type)
     audio_format = provider_audio_format(
@@ -596,7 +607,8 @@ async def get_voice_profile_secret(profile_id: int, db: Session = Depends(get_db
 @router.post("/voice", response_model=ProfileResponse)
 async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get_db)):
     """创建配音 API 配置"""
-    _require_api_key_for_create(profile.api_key, "配音 API")
+    if profile.provider_type != "local_tts":
+        _require_api_key_for_create(profile.api_key, "配音 API")
     encrypted_key = encrypt_api_key(profile.api_key)
     db_profile = VoiceProviderProfile(
         name=profile.name,
@@ -622,8 +634,10 @@ async def update_voice_profile(profile_id: int, profile: ProfileUpdate, db: Sess
     db_profile.base_url = profile.base_url
     if profile.api_key is not None and profile.api_key.strip():
         db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
-    else:
+    elif profile.provider_type != "local_tts":
         _require_api_key_for_update(db_profile.api_key_encrypted, "配音 API")
+    else:
+        db_profile.api_key_encrypted = encrypt_api_key("")
     db_profile.voice = profile.model
     db_profile.extra_params = profile.extra_params
     db.commit()

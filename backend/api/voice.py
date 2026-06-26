@@ -131,6 +131,11 @@ VOICE_CATALOGS = {
     "xiaomi_mimo_tts_voiceclone": [
         {"id": "voice_clone", "name": "上传样本克隆", "language": "中文/英文", "style": "使用 mp3/wav 参考音频", "gender": "neutral"},
     ],
+    "local_tts": [
+        {"id": "default", "name": "默认音色", "language": "本地模型", "style": "由本地命令或模型决定", "gender": "neutral"},
+        {"id": "male", "name": "男声参数", "language": "本地模型", "style": "传给本地命令的 voice 值", "gender": "male"},
+        {"id": "female", "name": "女声参数", "language": "本地模型", "style": "传给本地命令的 voice 值", "gender": "female"},
+    ],
     "custom_tts": [
         {"id": "custom", "name": "自定义 voice id", "language": "自定义", "style": "中性、手动填写", "gender": "neutral"},
     ],
@@ -280,15 +285,19 @@ async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_
     profile = _get_voice_profile(request.profile_id, db)
     provider_type = request.provider_type or (profile.provider_type if profile else "openai_tts")
     base_url = request.base_url or (profile.base_url if profile else "")
-    if not base_url.strip():
+    profile_settings = _load_profile_settings(profile) if profile else {}
+    settings = {**profile_settings, **request.settings}
+    if provider_type == "local_tts":
+        command_template = str(settings.get("local_tts_command") or base_url or "").strip()
+        if not command_template:
+            raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
+    elif not base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
 
     api_key = _resolve_preview_api_key(request.api_key, profile)
     if _requires_voice_api_key(provider_type) and not api_key.strip():
         raise HTTPException(status_code=400, detail="请填写 API Key，或选择已保存配音配置")
 
-    profile_settings = _load_profile_settings(profile) if profile else {}
-    settings = {**profile_settings, **request.settings}
     model = request.model or (profile.voice if profile else "")
     output_path = _preview_output_path(provider_type, settings, model)
     engine = VoiceEngine()

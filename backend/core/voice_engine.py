@@ -7,6 +7,7 @@ import json
 import wave
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,9 @@ def provider_audio_format(provider_type: str, settings: dict[str, Any], model: s
     normalized_provider = resolve_voice_provider_type(provider_type, model)
     if normalized_provider == "gemini_tts":
         return "wav"
+    if normalized_provider == "local_tts":
+        value = str((settings or {}).get("format") or "wav").lower()
+        return value if value in {"wav", "mp3", "flac", "pcm", "opus"} else "wav"
     if normalized_provider == "xiaomi_mimo_tts":
         value = str((settings or {}).get("format") or "wav").lower()
         return value if value in {"wav", "mp3", "pcm", "pcm16"} else "wav"
@@ -157,6 +161,8 @@ class VoiceEngine:
             return await self._generate_minimax_tts(text, output_path, voice, api_key, base_url, model, settings)
         if provider_type == "xiaomi_mimo_tts":
             return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, settings)
+        if provider_type == "local_tts":
+            return await self._generate_local_tts_command(text, output_path, voice, base_url, model, settings)
         if provider_type == "custom_tts":
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings, provider_type)
 
@@ -759,6 +765,118 @@ class VoiceEngine:
         logger.info(f"小米 MiMo TTS 生成完成: {output_path}")
         return output_path
 
+    async def _generate_local_tts_command(
+        self,
+        text: str,
+        output_path: str,
+        voice: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """调用用户配置的本地 TTS 命令，适配 F5-TTS、CosyVoice、GPT-SoVITS 等本地脚本"""
+        command_template = str(settings.get("local_tts_command") or base_url or "").strip()
+        if not command_template:
+            raise ValueError("本地 TTS 需要填写命令模板，请使用 {text_file} 和 {output} 指定输入输出")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        text_file = f"{output_path}.text.txt"
+        # 本地脚本一般把 text_file 当作要朗读的正文，风格提示单独通过 {style} 传递，避免被念出来。
+        input_text = text
+        with open(text_file, "w", encoding="utf-8") as file:
+            file.write(input_text)
+
+        command = self._render_local_tts_command(
+            command_template,
+            text=input_text,
+            text_file=text_file,
+            output_path=output_path,
+            voice=voice,
+            model=model,
+            settings=settings,
+        )
+        timeout_seconds = max(10, min(3600, self._int(settings.get("local_tts_timeout_seconds"), 600)))
+        workdir = str(settings.get("local_tts_workdir") or "").strip() or None
+        logger.info(f"执行本地 TTS 命令: output={output_path}")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            shell=True,
+            cwd=workdir,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=self._local_tts_env(),
+        )
+        if result.returncode != 0:
+            stdout = self._decode_process_bytes(result.stdout)
+            stderr = self._decode_process_bytes(result.stderr)
+            raise RuntimeError(f"本地 TTS 命令失败: {stderr or stdout or f'退出码 {result.returncode}'}")
+
+        if not os.path.exists(output_path) and result.stdout:
+            with open(output_path, "wb") as file:
+                file.write(result.stdout)
+        if not os.path.exists(output_path):
+            stdout = self._decode_process_bytes(result.stdout)
+            stderr = self._decode_process_bytes(result.stderr)
+            raise RuntimeError(f"本地 TTS 命令未生成输出文件: {output_path}；{stderr or stdout}".strip())
+
+        logger.info(f"本地 TTS 生成完成: {output_path}")
+        return output_path
+
+    def _render_local_tts_command(
+        self,
+        command_template: str,
+        *,
+        text: str,
+        text_file: str,
+        output_path: str,
+        voice: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """渲染本地命令模板，所有变量都按命令行参数安全加引号"""
+        audio_format = self._provider_audio_format("local_tts", settings, model)
+        replacements = {
+            "text": text,
+            "text_file": text_file,
+            "output": output_path,
+            "voice": voice,
+            "model": model,
+            "format": audio_format,
+            "style": str(settings.get("style_prompt") or ""),
+            "sample_rate": str(self._int(settings.get("sample_rate"), 32000)),
+        }
+        command = command_template
+        for key, value in replacements.items():
+            command = command.replace("{" + key + "}", self._quote_command_value(str(value)))
+        return command
+
+    def _quote_command_value(self, value: str) -> str:
+        """按当前平台给命令模板变量加引号，避免路径空格和中文破坏命令"""
+        if os.name == "nt":
+            return subprocess.list2cmdline([value])
+        return shlex.quote(value)
+
+    def _local_tts_env(self) -> dict[str, str]:
+        """为本地 TTS 子进程补充 UTF-8 环境，减少中文文本乱码"""
+        env = os.environ.copy()
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUTF8", "1")
+        return env
+
+    def _decode_process_bytes(self, value: bytes | str | None) -> str:
+        """解码本地命令输出，失败时保留可读错误片段"""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        for encoding in ("utf-8", "gbk", "cp936"):
+            try:
+                return value.decode(encoding, errors="replace").strip()
+            except Exception:
+                continue
+        return str(value[:500])
+
     def _xiaomi_voice_design_prompt(self, voice: str, settings: dict[str, Any]) -> str:
         """读取小米文字定制音色提示，优先使用专用字段，其次解析音色预设"""
         normalized_voice = str(voice or "").strip()
@@ -1296,7 +1414,7 @@ class VoiceEngine:
         settings: dict[str, Any],
         temp_dir: str,
     ) -> list[dict[str, Any]]:
-        """按连续窗口规划真实音频，轻微超时本地提速，严重超时才顺延"""
+        """按 VideoLingo 式连续块规划真实音频，优先不重叠、不截断句子"""
         items = sorted(
             self._normalize_timed_audio_paths(timed_audio_paths),
             key=lambda value: self._int(value.get("start_ms"), 0),
@@ -1304,6 +1422,105 @@ class VoiceEngine:
         if not items:
             return []
 
+        min_gap_ms = self._voice_min_gap_ms(settings)
+        tolerance_ms = self._voice_timeline_tolerance_ms(settings)
+        accept = self._voice_speed_accept(settings)
+        min_speed = self._voice_speed_min(settings)
+        max_speed = self._voice_auto_speed_max(settings)
+        max_chunk_lines = self._voice_timeline_chunk_lines(settings)
+        prepared = self._prepare_videolingo_items(items, tolerance_ms)
+        chunks = self._build_stable_voice_chunks(prepared, tolerance_ms, max_chunk_lines)
+        planned: list[dict[str, Any]] = []
+        previous_audio_end_ms: Optional[int] = None
+
+        for chunk_index, chunk in enumerate(chunks):
+            speed_factor, keep_gaps = self._videolingo_chunk_speed(chunk, accept, min_speed)
+            speed_factor = min(max_speed, max(min_speed, speed_factor))
+            chunk_cursor_ms: Optional[int] = None
+
+            for item_index, item in enumerate(chunk):
+                planned_item = dict(item)
+                original_start_ms = max(0, self._int(planned_item.get("original_start_ms"), planned_item.get("start_ms", 0)))
+                if chunk_cursor_ms is None:
+                    start_ms = original_start_ms
+                elif keep_gaps:
+                    previous_gap_ms = max(0, self._int(chunk[item_index - 1].get("gap_ms"), 0))
+                    scaled_gap_ms = int(previous_gap_ms / max(speed_factor, 0.1))
+                    start_ms = max(original_start_ms, chunk_cursor_ms + scaled_gap_ms)
+                else:
+                    start_ms = chunk_cursor_ms
+
+                if previous_audio_end_ms is not None:
+                    start_ms = max(start_ms, previous_audio_end_ms + min_gap_ms)
+
+                source_duration_ms = max(1, self._int(planned_item.get("source_duration_ms"), planned_item.get("duration_ms", 0)))
+                applied_speed = 1.0
+                if abs(speed_factor - 1.0) >= 0.01:
+                    speed_path = self._speed_adjust_audio(
+                        str(planned_item["path"]),
+                        temp_dir,
+                        suffix=f"chunk_{chunk_index:04d}_{item_index:04d}",
+                        speed_factor=speed_factor,
+                    )
+                    planned_item["path"] = speed_path
+                    adjusted_duration = self._audio_duration_seconds(speed_path)
+                    source_duration_ms = max(1, int((adjusted_duration or (source_duration_ms / speed_factor / 1000)) * 1000))
+                    applied_speed = speed_factor
+
+                planned_item["original_start_ms"] = original_start_ms
+                planned_item["start_ms"] = start_ms
+                planned_item["source_duration_ms"] = source_duration_ms
+                planned_item["real_duration_ms"] = source_duration_ms
+                planned_item["audio_end_ms"] = start_ms + source_duration_ms
+                planned_item["speed_factor"] = round(applied_speed, 3)
+                planned_item["chunk_index"] = chunk_index
+                planned_item["keep_gaps"] = keep_gaps
+
+                shift_ms = start_ms - original_start_ms
+                if shift_ms > 500:
+                    logger.warning(f"配音片段按真实时长顺延 {shift_ms}ms（原 {original_start_ms}ms → {start_ms}ms）")
+
+                planned.append(planned_item)
+                chunk_cursor_ms = planned_item["audio_end_ms"]
+                previous_audio_end_ms = planned_item["audio_end_ms"]
+
+        return planned
+
+    def _voice_timeline_tolerance_ms(self, settings: dict[str, Any]) -> int:
+        """读取配音时间轴容忍窗口，借用字幕空隙吸收轻微超时"""
+        raw_value = None
+        if isinstance(settings, dict):
+            raw_value = settings.get("voice_timeline_tolerance_ms")
+            if raw_value is None:
+                raw_value = settings.get("voice_tolerance_ms")
+        return max(0, min(2000, self._int(raw_value, 600)))
+
+    def _voice_timeline_chunk_lines(self, settings: dict[str, Any]) -> int:
+        """读取时间轴规划块最大行数，避免整段视频被统一拉伸"""
+        raw_value = settings.get("voice_timeline_chunk_lines") if isinstance(settings, dict) else None
+        if raw_value is None and isinstance(settings, dict):
+            raw_value = settings.get("voice_window_size")
+        return max(1, min(20, self._int(raw_value, 5)))
+
+    def _voice_speed_accept(self, settings: dict[str, Any]) -> float:
+        """读取用户可接受的最大加速倍率，超过后优先顺延而不是硬压缩"""
+        raw_value = settings.get("voice_speed_accept") if isinstance(settings, dict) else None
+        if raw_value is None and isinstance(settings, dict):
+            raw_value = settings.get("voice_auto_speed_max")
+        return max(1.0, min(1.3, self._float(raw_value, 1.12)))
+
+    def _voice_speed_min(self, settings: dict[str, Any]) -> float:
+        """读取自动慢放下限，默认不主动慢放，避免更拖沓"""
+        raw_value = settings.get("voice_speed_min") if isinstance(settings, dict) else None
+        return max(0.8, min(1.0, self._float(raw_value, 1.0)))
+
+    def _plan_legacy_line_timeline(
+        self,
+        items: list[dict[str, Any]],
+        settings: dict[str, Any],
+        temp_dir: str,
+    ) -> list[dict[str, Any]]:
+        """旧逐条规划保留给单测和回退排查使用"""
         min_gap_ms = self._voice_min_gap_ms(settings)
         max_auto_speed = self._voice_auto_speed_max(settings)
         planned: list[dict[str, Any]] = []

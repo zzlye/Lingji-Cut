@@ -43,9 +43,9 @@ class VoiceProviderProfile(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     # 配置名称
     name = Column(String(100), nullable=False)
-    # 渠道类型（openai_tts、gemini_tts、minimax_tts、xiaomi_mimo_tts、custom_tts）
+    # 渠道类型（openai_tts、gemini_tts、minimax_tts、xiaomi_mimo_tts、local_tts、custom_tts）
     provider_type = Column(String(50), nullable=False)
-    # API 基础地址
+    # API 基础地址；local_tts 可为空或填写命令模板
     base_url = Column(String(500), nullable=False)
     # API 密钥（AES 加密存储）
     api_key_encrypted = Column(Text, nullable=False)

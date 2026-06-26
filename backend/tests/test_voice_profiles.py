@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
 
 from backend.api.profiles import _fetch_voice_models, _test_voice_profile, TextModelOption, VoiceProfileTestRequest, _transient_voice_profile  # noqa: E402
 from backend.api.voice import VoiceCatalogRequest, VoicePreviewRequest, _audio_format_for_preview, get_voice_catalog, preview_voice  # noqa: E402
-from backend.core.voice_engine import VoiceEngine  # noqa: E402
+from backend.core.voice_engine import VoiceEngine, provider_audio_format  # noqa: E402
 from backend.models import VoiceProviderProfile  # noqa: E402
 
 
@@ -94,6 +94,47 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(source, "local")
         self.assertTrue(any(model.id == "speech-2.8-hd" for model in models))
 
+    def test_fetch_local_tts_models_does_not_require_url_or_key(self):
+        """本地 TTS 模型列表不需要 Base URL 和 API Key"""
+        models, source = asyncio.run(_fetch_voice_models("local_tts", "", ""))
+
+        self.assertEqual(source, "local")
+        self.assertEqual([model.id for model in models], ["local-command"])
+        self.assertEqual(provider_audio_format("local_tts", {}, ""), "wav")
+
+    def test_local_tts_command_generates_real_audio(self):
+        """本地 TTS 命令模板会收到文本文件和输出路径，并生成可读音频"""
+        with tempfile.TemporaryDirectory(prefix="local_tts_") as temp_dir:
+            script_path = os.path.join(temp_dir, "fake_local_tts.py")
+            output_path = os.path.join(temp_dir, "voice.wav")
+            with open(script_path, "w", encoding="utf-8") as file:
+                file.write(
+                    "import argparse, wave\n"
+                    "parser = argparse.ArgumentParser()\n"
+                    "parser.add_argument('--text-file')\n"
+                    "parser.add_argument('--output')\n"
+                    "parser.add_argument('--voice')\n"
+                    "args = parser.parse_args()\n"
+                    "open(args.text_file, 'r', encoding='utf-8').read()\n"
+                    "with wave.open(args.output, 'wb') as wav:\n"
+                    "    wav.setnchannels(1)\n"
+                    "    wav.setsampwidth(2)\n"
+                    "    wav.setframerate(16000)\n"
+                    "    wav.writeframes((b'\\x01\\x08' * 16000))\n"
+                )
+            command = f'"{sys.executable}" "{script_path}" --text-file {{text_file}} --output {{output}} --voice {{voice}}'
+
+            result = asyncio.run(VoiceEngine().generate_voice(
+                text="本地配音测试",
+                output_path=output_path,
+                provider_type="local_tts",
+                voice="male",
+                model="local-command",
+                settings={"local_tts_command": command, "format": "wav", "retry_count": 0},
+            ))
+
+        self.assertEqual(result, output_path)
+
     def test_test_voice_profile_generates_short_audio(self):
         """测试连接会调用配音引擎生成短试听，而不是空返回成功"""
         profile = VoiceProviderProfile(
@@ -118,6 +159,31 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(kwargs["provider_type"], "openai_tts")
         self.assertEqual(kwargs["voice"], "alloy")
         self.assertEqual(kwargs["model"], "gpt-4o-mini-tts")
+
+    def test_test_local_tts_profile_accepts_command_without_base_url(self):
+        """本地 TTS 测试连接使用命令模板，不要求 Base URL 或 API Key"""
+        profile = VoiceProviderProfile(
+            id=2,
+            name="本地配音",
+            provider_type="local_tts",
+            base_url="",
+            voice="local-command",
+            extra_params='{"voice":"default","format":"wav","local_tts_command":"python infer.py --text-file {text_file} --output {output}"}',
+        )
+
+        async def run():
+            with patch("backend.api.profiles.VoiceEngine") as engine_class:
+                engine = engine_class.return_value
+                engine.generate_voice = AsyncMock(return_value=os.path.join(os.environ.get("TEMP", "."), "missing.wav"))
+                await _test_voice_profile(profile, "")
+                return engine.generate_voice.call_args.kwargs
+
+        kwargs = asyncio.run(run())
+
+        self.assertEqual(kwargs["provider_type"], "local_tts")
+        self.assertEqual(kwargs["api_key"], "")
+        self.assertEqual(kwargs["base_url"], "")
+        self.assertEqual(kwargs["settings"]["local_tts_command"], "python infer.py --text-file {text_file} --output {output}")
 
     def test_transient_voice_profile_uses_unsaved_form_fields(self):
         """未保存表单测试时使用当前填写的渠道、地址和模型"""

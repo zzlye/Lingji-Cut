@@ -413,6 +413,9 @@ export interface VoiceGenerateSettings {
   xiaomi_voice_design_prompt?: string
   xiaomi_voice_clone_audio_path?: string
   xiaomi_voice_clone_audio_name?: string
+  local_tts_command?: string
+  local_tts_workdir?: string
+  local_tts_timeout_seconds?: number
   retry_count: number
   retry_interval_ms: number
 }

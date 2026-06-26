@@ -294,8 +294,8 @@ class LocalMediaPipelineTest(unittest.TestCase):
         self.assertEqual([item["audio_end_ms"] for item in planned], [2200, 3120, 3940])
         self.assertTrue(all(item["path"] in audio_paths for item in planned))
 
-    def test_smart_voice_timeline_speeds_up_small_window_overflow(self):
-        """窗口配音只对轻微超时自动提速，严重超时才顺延后续窗口"""
+    def test_smart_voice_timeline_speeds_up_continuous_chunk_without_overlap(self):
+        """连续块会统一轻微变速，并按真实时长排队避免配音重叠"""
         audio_paths: list[str] = []
         for index in range(3):
             audio_path = os.path.join(self.temp_dir, f"smart_{index}.wav")
@@ -303,19 +303,24 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 file.write(b"voice")
             audio_paths.append(audio_path)
         speed_calls: list[float] = []
+        duration_by_path = {
+            audio_paths[0]: 1.05,
+            audio_paths[1]: 1.4,
+            audio_paths[2]: 0.3,
+        }
 
         def fake_speed_adjust(input_path: str, temp_dir: str, suffix: str, speed_factor: float):
             """记录自动提速倍率，并返回一个新音频路径"""
-            _ = (input_path, suffix)
             speed_calls.append(round(speed_factor, 3))
             output_path = os.path.join(temp_dir, f"{suffix}.wav")
             with open(output_path, "wb") as file:
                 file.write(b"speed")
+            duration_by_path[output_path] = duration_by_path[input_path] / speed_factor
             return output_path
 
         with (
             patch.object(self.voice_engine, "_speed_adjust_audio", side_effect=fake_speed_adjust),
-            patch.object(self.voice_engine, "_audio_duration_seconds", return_value=1.0),
+            patch.object(self.voice_engine, "_audio_duration_seconds", side_effect=lambda path: duration_by_path.get(path, 1.0)),
         ):
             planned = self.voice_engine._plan_smart_dubbing_timeline(
                 [
@@ -327,10 +332,11 @@ class LocalMediaPipelineTest(unittest.TestCase):
                 self.temp_dir,
             )
 
-        self.assertEqual(speed_calls, [1.05])
-        self.assertEqual([item["start_ms"] for item in planned], [0, 1100, 2600])
-        self.assertEqual([item["audio_end_ms"] for item in planned], [1000, 2500, 2900])
-        self.assertEqual([item["speed_factor"] for item in planned], [1.05, 1.0, 1.0])
+        self.assertEqual(speed_calls, [1.12, 1.12, 1.12])
+        self.assertEqual([item["start_ms"] for item in planned], [0, 1100, 2449])
+        self.assertEqual([item["audio_end_ms"] for item in planned], [937, 2349, 2716])
+        self.assertEqual([item["speed_factor"] for item in planned], [1.12, 1.12, 1.12])
+        self.assertTrue(all(planned[index]["start_ms"] >= planned[index - 1]["audio_end_ms"] + 100 for index in range(1, len(planned))))
 
     def test_batched_voice_chunks_segments_without_merging_text(self):
         """批量配音只分批调度，不合并字幕文本，避免批次内部时间轴漂移"""
