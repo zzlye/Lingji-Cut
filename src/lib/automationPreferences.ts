@@ -43,6 +43,8 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
     resolution: 'original',
     width: 1920,
     height: 1080,
+    fps_enabled: false,
+    fps: 30,
     bitrate_enabled: false,
     bitrate_kbps: 2200,
   },
@@ -224,6 +226,8 @@ function normalizeExportSettings(value: unknown): AutomationPreferences['export_
     resolution,
     width: Math.max(320, Number(raw.width ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.width) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.width),
     height: Math.max(180, Number(raw.height ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.height) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.height),
+    fps_enabled: Boolean(raw.fps_enabled),
+    fps: Math.min(240, Math.max(1, Number(raw.fps ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.fps) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.fps)),
     bitrate_enabled: Boolean(raw.bitrate_enabled),
     bitrate_kbps: Math.min(20000, Math.max(200, Number(raw.bitrate_kbps ?? DEFAULT_AUTOMATION_PREFERENCES.export_settings.bitrate_kbps) || DEFAULT_AUTOMATION_PREFERENCES.export_settings.bitrate_kbps)),
   }

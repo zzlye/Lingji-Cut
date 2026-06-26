@@ -20,6 +20,23 @@ MAX_TARGET_CJK_SUBTITLE_CHARS = 22
 SOURCE_SMOOTH_MAX_GAP_MS = 450
 SOURCE_SMOOTH_MAX_DURATION_MS = 6500
 SOURCE_SMOOTH_MAX_WORDS = 30
+AI_REFUSAL_TEXT_MARKERS = (
+    "cannotfulfill",
+    "cannotcomply",
+    "unabletofulfill",
+    "notabletoassist",
+    "sorrybuticant",
+    "safetyguidelines",
+    "strictlyprohibit",
+    "policydoesnotallow",
+    "againstpolicy",
+    "nonconsensualsexualcontent",
+    "consensualsexualcontent",
+    "无法满足请求",
+    "不能满足请求",
+    "无法协助",
+    "安全准则",
+)
 CJK_SUBTITLE_CLAUSE_PREFIXES = (
     "所以", "但是", "然后", "因为", "如果", "不过", "而且", "可是", "并且", "同时", "接着", "最后",
     "我们", "你们", "他们", "她们", "它们", "有人",
@@ -445,8 +462,19 @@ class TextEngine:
             text = " ".join(str(raw_text or "").split())
             if not text:
                 continue
+            if self._is_ai_refusal_text(text):
+                logger.warning("文本 API 返回疑似拒绝或安全政策说明，已回退原字幕槽位")
+                continue
             normalized.extend(self._split_long_cjk_subtitle_text(text))
         return self._merge_tiny_processed_texts(normalized)
+
+    def _is_ai_refusal_text(self, text: str) -> bool:
+        """识别模型拒绝或安全政策说明，避免把这些系统话术烧进字幕"""
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        compact = re.sub(r"[^0-9A-Za-z\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+", "", raw).lower()
+        return any(marker in compact for marker in AI_REFUSAL_TEXT_MARKERS)
 
     def _split_long_cjk_subtitle_text(self, text: str) -> list[str]:
         """把过长中文字幕按语义断点拆成多条，避免单条铺满整屏"""

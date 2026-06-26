@@ -108,6 +108,29 @@ class TextEngineTests(unittest.TestCase):
                 target_language="中文",
             ))
 
+    def test_translate_filters_model_refusal_policy_text(self):
+        """模型拒绝或安全政策说明不能写进字幕，单条失败时回退原文"""
+        engine = FakeTextEngine([
+            '[{"id":1,"text":"I cannotfulfill this request due to safetyguidelines"}, {"id":2,"text":"正常翻译"}]',
+        ])
+        entries = [
+            {"index": 1, "start": "00:00:01,000", "end": "00:00:02,000", "text": "source one"},
+            {"index": 2, "start": "00:00:02,000", "end": "00:00:03,000", "text": "source two"},
+        ]
+
+        result = asyncio.run(engine.process_subtitle_entries(
+            entries=entries,
+            provider_type="openai",
+            api_key="test",
+            base_url="https://example.com/v1",
+            model="model",
+            settings={"subtitle_batch_size": 10, "retry_count": 0},
+            operation="translate",
+            target_language="中文",
+        ))
+
+        self.assertEqual([entry["text"] for entry in result], ["source one", "正常翻译"])
+
     def test_translate_prompt_defaults_to_simplified_chinese(self):
         """翻译未选择输出语言时默认翻译成简体中文"""
         engine = TextEngine()

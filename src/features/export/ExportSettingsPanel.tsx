@@ -1,5 +1,5 @@
 // src/features/export/ExportSettingsPanel.tsx
-// 最终导出设置 - 只控制合成导出阶段的格式、分辨率和码率
+// 最终导出设置 - 只控制合成导出阶段的格式、分辨率、帧率和码率
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { NumberField, SelectField, SwitchField, type FieldOption } from '@/components/fields'
 import { usePrefsStore } from '@/stores/prefsStore'
@@ -89,6 +89,24 @@ export function ExportSettingsPanel() {
                   onChange={(value) => updateExportSettings({ height: value })}
                 />
               </>
+            )}
+            <SwitchField
+              label="启用最终导出帧率"
+              description="关闭时保留原视频帧率；开启后最终成品会统一到指定 FPS。"
+              checked={exportSettings.fps_enabled}
+              onChange={(value) => updateExportSettings({ fps_enabled: value })}
+            />
+            {exportSettings.fps_enabled && (
+              <NumberField
+                label="目标帧率"
+                value={exportSettings.fps}
+                min={1}
+                max={240}
+                step={1}
+                suffix="FPS"
+                description="常用 24、25、30、50、60；数值越高文件通常越大。"
+                onChange={(value) => updateExportSettings({ fps: value })}
+              />
             )}
           </div>
         </CardContent>

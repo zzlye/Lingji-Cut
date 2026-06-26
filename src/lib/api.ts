@@ -529,6 +529,7 @@ export type AutomationRerunOverrides = Partial<Pick<AutomationStartParams,
   | 'multi_speaker_enabled'
   | 'gemini_audio_prompt'
   | 'gemini_audio_retry_count'
+  | 'subtitle_recognition_mode'
   | 'subtitle_recognition_language'
   | 'subtitle_local_model'
   | 'speaker_voice_map'

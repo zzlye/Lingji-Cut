@@ -338,6 +338,8 @@ export interface AutomationExportSettings {
   resolution: 'original' | '720p' | '1080p' | 'custom'
   width: number
   height: number
+  fps_enabled: boolean
+  fps: number
   bitrate_enabled: boolean
   bitrate_kbps: number
 }

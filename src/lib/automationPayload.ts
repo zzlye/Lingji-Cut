@@ -108,6 +108,7 @@ export function buildAutomationRerunOverrides(): AutomationRerunOverrides {
     text_profile_id: preferences.text_profile_id || undefined,
     text_system_prompt: getActiveTextSystemPrompt(),
     gemini_audio_prompt: preferences.gemini_audio_prompt,
+    subtitle_recognition_mode: preferences.subtitle_recognition_mode,
     subtitle_recognition_language: preferences.subtitle_recognition_language,
     subtitle_local_model: preferences.subtitle_local_model,
     voice_profile_id: preferences.voice_profile_id || undefined,

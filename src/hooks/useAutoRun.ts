@@ -40,7 +40,9 @@ export function useAutoRun() {
         }
       }
 
-      const { job_id } = await automationApi.start(buildAutomationPayload(trimmedSource))
+      const payload = buildAutomationPayload(trimmedSource)
+      addLog('info', `提交字幕识别配置: mode=${payload.subtitle_recognition_mode || 'local'}, model=${payload.subtitle_local_model || 'auto'}, language=${payload.subtitle_recognition_language || 'auto'}`)
+      const { job_id } = await automationApi.start(payload)
       addLog('info', `自动处理任务已进入队列: ${job_id}`)
       toast.success('已加入处理队列，进度将实时显示')
       // 立即拉一次写入 store，随后由全局 SSE 流持续更新

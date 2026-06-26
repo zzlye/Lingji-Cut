@@ -2346,6 +2346,9 @@ class AutomationJobTests(unittest.TestCase):
                 "url": "https://youtube.com/watch?v=test",
                 "enable_effects": False,
                 "subtitle_operation": "translate",
+                "subtitle_recognition_mode": "gemini_align",
+                "subtitle_recognition_language": "auto",
+                "subtitle_local_model": "auto",
                 "text_profile_id": 11,
                 "text_system_prompt": "旧提示词",
                 "enable_voice": True,
@@ -2362,6 +2365,9 @@ class AutomationJobTests(unittest.TestCase):
             AutomationRerunOverrideRequest(
                 text_profile_id=31,
                 text_system_prompt="新提示词",
+                subtitle_recognition_mode="local",
+                subtitle_recognition_language="ja",
+                subtitle_local_model="large-v3",
                 voice_profile_id=42,
                 audio_mode="background",
                 original_volume=0.8,
@@ -2379,6 +2385,9 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(params["text_profile_id"], 31)
         self.assertEqual(params["voice_profile_id"], 42)
         self.assertEqual(saved["text_system_prompt"], "新提示词")
+        self.assertEqual(saved["subtitle_recognition_mode"], "local")
+        self.assertEqual(saved["subtitle_recognition_language"], "ja")
+        self.assertEqual(saved["subtitle_local_model"], "large-v3")
         self.assertEqual(saved["audio_mode"], "background")
         self.assertEqual(saved["original_volume"], 0.8)
         self.assertEqual(saved["voice_window_size"], 6)
@@ -2587,11 +2596,13 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(merged["acceleration"]["quality"], "size")
 
     def test_build_final_export_preset_only_keeps_output_related_settings(self):
-        """最终导出预设只保留导出分辨率和码率，不重复套用画面处理效果"""
+        """最终导出预设只保留导出分辨率、帧率和码率，不重复套用画面处理效果"""
         preset = build_final_export_preset({
             "resolution": "1080p",
             "width": 1920,
             "height": 1080,
+            "fps_enabled": True,
+            "fps": 60,
             "bitrate_enabled": True,
             "bitrate_kbps": 2200,
         })
@@ -2600,16 +2611,19 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(preset["canvas"]["resolution"], "1080p")
         self.assertTrue(preset["canvas"]["enabled"])
         self.assertFalse(preset["transform"]["enabled"])
-        self.assertFalse(preset["timing"]["enabled"])
+        self.assertTrue(preset["timing"]["enabled"])
+        self.assertEqual(preset["timing"]["fps"]["value"], 60)
         self.assertEqual(preset["bitrate"]["fixed_kbps"]["value"], 2200)
         self.assertEqual(preset["acceleration"]["mode"], "auto")
 
     def test_should_apply_final_export_settings_only_when_export_settings_are_effective(self):
-        """最终导出设置只在用户开启且设置了分辨率或码率时才额外执行"""
+        """最终导出设置只在用户开启且设置了分辨率、帧率或码率时才额外执行"""
         export_settings = {
             "resolution": "1080p",
             "width": 1920,
             "height": 1080,
+            "fps_enabled": True,
+            "fps": 60,
             "bitrate_enabled": True,
             "bitrate_kbps": 2200,
         }
@@ -2617,6 +2631,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertTrue(should_apply_final_export_settings(True, export_settings))
         self.assertFalse(should_apply_final_export_settings(False, export_settings))
         self.assertFalse(should_apply_final_export_settings(True, {"resolution": "original", "bitrate_enabled": False, "bitrate_kbps": 0}))
+        self.assertTrue(should_apply_final_export_settings(True, {"resolution": "original", "fps_enabled": True, "fps": 60, "bitrate_enabled": False, "bitrate_kbps": 0}))
 
     def test_automation_export_stage_applies_final_export_settings_when_effects_disabled(self):
         """关闭画面处理但开启最终导出设置时，字幕或配音完成后仍按导出设置统一输出"""
@@ -2664,6 +2679,8 @@ class AutomationJobTests(unittest.TestCase):
                             "resolution": "1080p",
                             "width": 1920,
                             "height": 1080,
+                            "fps_enabled": True,
+                            "fps": 60,
                             "bitrate_enabled": True,
                             "bitrate_kbps": 2200,
                         },
@@ -2680,6 +2697,7 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual(fake_processor.effects_calls[0]["video_path"], os.path.join(temp_dir, "subtitled.mp4"))
         self.assertFalse(fake_processor.effects_calls[0]["preset"]["transform"]["enabled"])
         self.assertEqual(fake_processor.effects_calls[0]["preset"]["canvas"]["resolution"], "1080p")
+        self.assertEqual(fake_processor.effects_calls[0]["preset"]["timing"]["fps"]["value"], 60)
 
     def test_original_subtitle_without_burn_skips_subtitle_stage_when_voice_disabled(self):
         """使用原字幕且不烧录、不配音时，一键流程应直接跳过字幕加工"""

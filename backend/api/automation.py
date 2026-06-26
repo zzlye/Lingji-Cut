@@ -151,6 +151,12 @@ def _normalize_asr_model_for_mode(value: Any, mode: str) -> Optional[str]:
     return _normalize_asr_model_name(value, allow_auto=True)
 
 
+def _normalize_subtitle_recognition_mode(value: Any) -> str:
+    """规范字幕识别方式，避免旧任务或异常前端值让本地模型配置失效"""
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"local", "gemini_full", "gemini_align"} else "local"
+
+
 def _asr_model_log_label(model_name: Optional[str], mode: str) -> str:
     """日志里区分自动选择和纯本地识别的明确兜底模型"""
     if model_name:
@@ -247,6 +253,7 @@ class AutomationRerunOverrideRequest(BaseModel):
     text_profile_id: Optional[int] = None
     text_system_prompt: Optional[str] = None
     gemini_audio_prompt: Optional[str] = None
+    subtitle_recognition_mode: Optional[str] = None
     subtitle_recognition_language: Optional[str] = None
     subtitle_local_model: Optional[str] = None
     voice_profile_id: Optional[int] = None
@@ -1765,7 +1772,7 @@ def _recognize_subtitle_entries(
     progress_callback: Callable[[float], None],
 ) -> tuple[list[dict], str]:
     """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
-    mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    mode = _normalize_subtitle_recognition_mode(request.subtitle_recognition_mode)
     recognition_language = _normalize_asr_language(request.subtitle_recognition_language)
     local_model_name = _normalize_asr_model_for_mode(request.subtitle_local_model, mode)
     # 记录识别模式，便于排查前端配置是否传到后端。
@@ -1839,7 +1846,7 @@ def _validate_saved_api_profile(profile: VoiceProviderProfile | TextProviderProf
 def validate_automation_request_profiles(db: Session, request: AutomationRunRequest) -> None:
     """一键流程启动前校验 API 配置，缺配置时直接拦截而不是生成卡住任务"""
     # Gemini 识别方式依赖文本 API 渠道，缺配置时提前拦截
-    recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
+    recognition_mode = _normalize_subtitle_recognition_mode(request.subtitle_recognition_mode)
     if (
         recognition_mode in {"gemini_full", "gemini_align"}
         and not _skips_subtitle_stage(request)
@@ -2507,8 +2514,17 @@ def _subtitle_preset_dict_for_export(db: Session, job_params: dict[str, Any]) ->
     return _preset_to_dict(preset)
 
 
+def _final_export_fps(export_settings: dict[str, Any]) -> float:
+    """规范最终导出帧率，避免异常配置传给 ffmpeg"""
+    try:
+        fps = float(export_settings.get("fps") or 30)
+    except (TypeError, ValueError):
+        fps = 30.0
+    return min(240.0, max(1.0, fps))
+
+
 def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]:
-    """生成最终导出专用预设，只保留导出阶段需要的分辨率和码率参数"""
+    """生成最终导出专用预设，只保留导出阶段需要的分辨率、帧率和码率参数"""
     resolution = str(export_settings.get("resolution") or "original")
     canvas_enabled = resolution != "original"
     canvas = {
@@ -2525,6 +2541,8 @@ def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]
         "mode": "fixed",
         "fixed_kbps": {"enabled": bitrate_enabled, "random": False, "value": bitrate_kbps, "min": bitrate_kbps, "max": bitrate_kbps},
     }
+    fps_enabled = bool(export_settings.get("fps_enabled"))
+    fps = _final_export_fps(export_settings)
     acceleration = {"enabled": True, "mode": "auto", "quality": "size"}
     return {
         "adjustments": {"enabled": False},
@@ -2539,8 +2557,8 @@ def build_final_export_preset(export_settings: dict[str, Any]) -> dict[str, Any]
             "show_full_frame": True,
         },
         "timing": {
-            "enabled": False,
-            "fps": {"enabled": False, "random": False, "value": 30, "min": 30, "max": 30},
+            "enabled": fps_enabled,
+            "fps": {"enabled": fps_enabled, "random": False, "value": fps, "min": fps, "max": fps},
             "drop_frame": {"enabled": False, "interval": {"enabled": False, "random": False, "value": 25, "min": 25, "max": 25}},
             "dynamic_zoom": {"enabled": False, "random": False, "value": 0, "min": 0, "max": 0},
         },
@@ -2584,6 +2602,9 @@ def should_apply_final_export_settings(export_with_settings: bool, export_settin
         return False
 
     if bool(export_settings.get("bitrate_enabled")) and int(export_settings.get("bitrate_kbps") or 0) > 0:
+        return True
+
+    if bool(export_settings.get("fps_enabled")):
         return True
 
     resolution = str(export_settings.get("resolution") or "original")
@@ -2872,7 +2893,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
             preset_dict = _preset_to_dict(preset)
             engine = SubtitleEngine()
             asr_owner_thread = threading.current_thread()
-            recognition_mode = (request.subtitle_recognition_mode or "local").strip().lower()
+            recognition_mode = _normalize_subtitle_recognition_mode(request.subtitle_recognition_mode)
             effects_path = _ensure_video_input_path(effects_path, "字幕识别")
             logger.info(
                 f"字幕识别输入: job_id={getattr(job, 'id', None)}, mode={recognition_mode}, "
@@ -3041,7 +3062,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 "rendered_video_path": video_for_export if should_burn_subtitles_now else None,
                 "burn_deferred_for_voice": defer_subtitle_burn_for_voice,
                 "subtitle_language": language,
-                "recognition_mode": (request.subtitle_recognition_mode or "local").strip().lower(),
+                "recognition_mode": _normalize_subtitle_recognition_mode(request.subtitle_recognition_mode),
             }, ensure_ascii=False)
             db.commit()
             stages.append(AutomationStageResult(key="subtitle", status="completed", task_id=subtitle_task.id, output_path=subtitle_task.output_path))
@@ -3630,7 +3651,7 @@ def _auto_resume_delay_seconds(attempt: int) -> int:
 
 def _is_transient_gemini_audio_failure(params: dict[str, Any], error: Exception) -> bool:
     """判断是否属于 Gemini 字幕识别的临时失败，可自动从断点续跑"""
-    mode = str(params.get("subtitle_recognition_mode") or "").strip().lower()
+    mode = _normalize_subtitle_recognition_mode(params.get("subtitle_recognition_mode"))
     if mode not in {"gemini_full", "gemini_align"}:
         return False
     detail = str(error or "").lower()
@@ -3716,6 +3737,14 @@ def _merge_rerun_overrides(job: AutomationJobRecord, overrides: Optional[Automat
         if value is None:
             continue
         params[key] = value
+    if "subtitle_recognition_mode" in params:
+        params["subtitle_recognition_mode"] = _normalize_subtitle_recognition_mode(params.get("subtitle_recognition_mode"))
+    if "subtitle_local_model" in params or params.get("subtitle_recognition_mode") == "local":
+        mode = _normalize_subtitle_recognition_mode(params.get("subtitle_recognition_mode"))
+        params["subtitle_local_model"] = _asr_model_log_label(
+            _normalize_asr_model_for_mode(params.get("subtitle_local_model"), mode),
+            mode,
+        )
     if "audio_mode" in params:
         params["audio_mode"] = _normalize_audio_mode(params.get("audio_mode"))
     if "original_volume" in params:
