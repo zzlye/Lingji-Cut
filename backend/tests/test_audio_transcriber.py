@@ -627,6 +627,44 @@ class LocalAsrWorkerLaunchTest(unittest.TestCase):
         self.assertEqual(entries[0]["text"], "测试")
         self.assertEqual(language, "zh")
 
+    def test_cuda_worker_registers_control_keys(self):
+        """自动化字幕识别的 CUDA worker 要登记到进程表，暂停或取消时才能被终止"""
+        captured: dict[str, object] = {}
+
+        class FakeStdout:
+            """模拟子进程 stdout，返回一次成功事件"""
+
+            def __iter__(self):
+                payload = '{"type":"result","language":"zh","entries":[{"text":"测试","start":"00:00:00,000","end":"00:00:01,000"}]}'
+                return iter([f"__YTV_ASR_WORKER__{payload}\n"])
+
+        class FakeProcess:
+            """模拟成功退出且带 pid 的 CUDA worker 子进程"""
+
+            pid = 12345
+            stdout = FakeStdout()
+
+            def wait(self):
+                return 0
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = command
+            return FakeProcess()
+
+        recognizer = LocalSpeechRecognizer(model_name="base", device="cuda", compute_type="float16", control_keys=["job:auto-1", "task:9"])
+        with (
+            patch("backend.core.local_asr.subprocess.Popen", side_effect=fake_popen),
+            patch("backend.core.local_asr.register_process") as register_process,
+            patch("backend.core.local_asr.unregister_process") as unregister_process,
+        ):
+            entries, language = recognizer._transcribe_video_in_worker("D:\\tmp\\sample.mp4", None, None)
+
+        self.assertEqual(entries[0]["text"], "测试")
+        self.assertEqual(language, "zh")
+        register_process.assert_called_once()
+        self.assertEqual(register_process.call_args.args[0], ["job:auto-1", "task:9"])
+        unregister_process.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

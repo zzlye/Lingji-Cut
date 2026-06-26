@@ -20,6 +20,7 @@ const VOICE_PROVIDERS = [
   { id: 'gemini_tts', name: 'Gemini TTS', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.5-flash-preview-tts' },
   { id: 'minimax_tts', name: 'MiniMax T2A', baseUrl: 'https://api.minimax.io/v1', model: 'speech-2.8-hd' },
   { id: 'xiaomi_mimo_tts', name: '小米 MiMo TTS', baseUrl: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2.5-tts' },
+  { id: 'gpt_sovits', name: 'GPT-SoVITS 本地服务', baseUrl: 'http://127.0.0.1:9880', model: 'gpt-sovits-v2' },
   { id: 'local_tts', name: '本地 TTS 命令', baseUrl: '', model: 'local-command' },
   { id: 'custom_tts', name: '自定义 OpenAI 兼容', baseUrl: '', model: '' },
 ]
@@ -36,6 +37,13 @@ function createDefaultSettings(): VoiceGenerateSettings {
     emotion: '', style_prompt: '', language_boost: 'auto', intensity: 0, timbre: 0, voice_pitch: 0, sound_effects: '',
     xiaomi_voice_design_prompt: '', xiaomi_voice_clone_audio_path: '', xiaomi_voice_clone_audio_name: '',
     local_tts_command: '', local_tts_workdir: '', local_tts_timeout_seconds: 600,
+    gpt_sovits_ref_audio_path: '', gpt_sovits_ref_audio_name: '', gpt_sovits_prompt_text: '',
+    gpt_sovits_text_lang: 'zh', gpt_sovits_prompt_lang: 'zh', gpt_sovits_text_split_method: 'cut5',
+    gpt_sovits_top_k: 15, gpt_sovits_top_p: 1, gpt_sovits_temperature: 1,
+    gpt_sovits_batch_size: 1, gpt_sovits_batch_threshold: 0.75, gpt_sovits_split_bucket: true,
+    gpt_sovits_parallel_infer: true, gpt_sovits_speed_factor: 1, gpt_sovits_fragment_interval: 0.3,
+    gpt_sovits_repetition_penalty: 1.35, gpt_sovits_sample_steps: 32, gpt_sovits_super_sampling: false,
+    gpt_sovits_streaming_mode: 0, gpt_sovits_seed: -1,
     retry_count: 2, retry_interval_ms: 1200,
   }
 }
@@ -50,11 +58,14 @@ function createProfileForm() {
 type PanelNotice = { type: 'info' | 'success' | 'warning' | 'error'; message: string } | null
 
 const FORMAT_OPTIONS: FieldOption[] = [['mp3', 'MP3'], ['wav', 'WAV'], ['flac', 'FLAC'], ['pcm', 'PCM'], ['opus', 'OPUS']]
+const GPT_SOVITS_FORMAT_OPTIONS: FieldOption[] = [['wav', 'WAV'], ['ogg', 'OGG'], ['aac', 'AAC']]
 const SAMPLE_RATE_OPTIONS: FieldOption[] = ['16000', '22050', '24000', '32000', '44100'].map((v) => [v, `${v} Hz`])
 const BITRATE_OPTIONS: FieldOption[] = ['32000', '64000', '128000', '256000'].map((v) => [v, `${Number(v) / 1000} kbps`])
 const CHANNEL_OPTIONS: FieldOption[] = [['1', '单声道'], ['2', '立体声']]
 const EMOTION_OPTIONS: FieldOption[] = [['', '自动'], ['happy', '开心'], ['sad', '悲伤'], ['angry', '愤怒'], ['calm', '平静'], ['surprised', '惊讶'], ['whisper', '耳语']]
 const LANG_BOOST_OPTIONS: FieldOption[] = [['auto', '自动'], ['Chinese', '中文'], ['English', '英文'], ['Japanese', '日文'], ['Korean', '韩文']]
+const GPT_SOVITS_LANG_OPTIONS: FieldOption[] = [['zh', '中文'], ['en', '英文'], ['ja', '日文'], ['yue', '粤语'], ['ko', '韩文'], ['all_zh', '整段中文'], ['all_ja', '整段日文'], ['all_yue', '整段粤语']]
+const GPT_SOVITS_SPLIT_OPTIONS: FieldOption[] = [['cut0', '不切分'], ['cut1', '按标点切分'], ['cut2', '按中英文句号切分'], ['cut3', '按中文句号切分'], ['cut4', '按英文句号切分'], ['cut5', '按短句智能切分']]
 /** 音色听感倾向展示文案 */
 function voiceGenderLabel(gender?: VoiceOption['gender']): string {
   if (gender === 'male') return '偏男声'
@@ -105,6 +116,26 @@ function editableXiaomiVoiceClonePath(value: string): string {
   return decodeXiaomiVoiceClonePath(normalized) || (/\.(mp3|wav)$/i.test(normalized) ? normalized : '')
 }
 
+/** GPT-SoVITS 参考音频 voice 值编码 */
+function encodeGptSovitsRefPath(path: string): string {
+  const normalized = path.trim()
+  return normalized ? `gpt_sovits_ref:${normalized}` : 'gpt_sovits_ref'
+}
+
+/** GPT-SoVITS 参考音频 voice 值解码 */
+function decodeGptSovitsRefPath(value: string): string {
+  const normalized = String(value || '').trim()
+  if (normalized.startsWith('gpt_sovits_ref:')) return normalized.slice('gpt_sovits_ref:'.length).trim()
+  if (normalized.startsWith('ref_audio_path:')) return normalized.slice('ref_audio_path:'.length).trim()
+  return ''
+}
+
+/** 从旧版本地路径或新版编码里读取 GPT-SoVITS 参考音频路径 */
+function editableGptSovitsRefPath(value: string): string {
+  const normalized = String(value || '').trim()
+  return decodeGptSovitsRefPath(normalized) || (/\.(mp3|wav|flac|ogg|m4a)$/i.test(normalized) ? normalized : '')
+}
+
 /** 从本地路径里取文件名，Windows 和 POSIX 路径都兼容 */
 function basenameFromPath(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() || path
@@ -118,6 +149,8 @@ function voiceValueLabel(value: string, voices: VoiceOption[] = []): string {
   if (designPrompt) return `文字定制 · ${designPrompt}`
   const clonePath = decodeXiaomiVoiceClonePath(value)
   if (clonePath) return `克隆样本 · ${basenameFromPath(clonePath)}`
+  const gptSovitsRefPath = decodeGptSovitsRefPath(value)
+  if (gptSovitsRefPath) return `参考音频 · ${basenameFromPath(gptSovitsRefPath)}`
   return value || '未选择'
 }
 
@@ -189,6 +222,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const activeModel = profileForm.custom_model.trim() || profileForm.model
   const isXiaomiMiMo = activeProvider === 'xiaomi_mimo_tts'
   const isLocalTts = activeProvider === 'local_tts'
+  const isGptSovits = activeProvider === 'gpt_sovits'
   const isXiaomiVoiceDesign = isXiaomiMiMo && activeModel.toLowerCase().includes('voicedesign')
   const isXiaomiVoiceClone = isXiaomiMiMo && activeModel.toLowerCase().includes('voiceclone')
   const supportsMiniMaxAdvanced = activeProvider === 'minimax_tts'
@@ -196,10 +230,17 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   const baseUrlLabel = isLocalTts ? '命令模板' : 'Base URL'
   const baseUrlPlaceholder = isLocalTts
     ? '例如 python D:\\tools\\f5tts\\infer.py --text-file {text_file} --output {output} --voice {voice}'
+    : isGptSovits
+      ? 'http://127.0.0.1:9880'
     : undefined
-  const requiresApiKey = !isLocalTts
+  const requiresApiKey = !(isLocalTts || isGptSovits)
   const localCommandTemplate = (settings.local_tts_command || profileForm.base_url).trim()
+  const gptSovitsRefAudioPath = (settings.gpt_sovits_ref_audio_path || decodeGptSovitsRefPath(selectedVoice)).trim()
+  const gptSovitsPromptText = (settings.gpt_sovits_prompt_text || '').trim()
   const activeVoiceValue = (() => {
+    if (isGptSovits) {
+      return encodeGptSovitsRefPath(gptSovitsRefAudioPath)
+    }
     if (isXiaomiVoiceDesign) {
       const prompt = settings.xiaomi_voice_design_prompt?.trim() || decodeXiaomiVoiceDesign(selectedVoice)
       return encodeXiaomiVoiceDesign(prompt)
@@ -218,6 +259,19 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     // 手动语速已下线：智能时间轴配音保持自然语速，由模型根据字幕时长自行贴近。
     speed: 1,
   })
+
+  const validateGptSovitsSettings = (): boolean => {
+    if (!isGptSovits) return true
+    if (!gptSovitsRefAudioPath) {
+      setNotice({ type: 'warning', message: '请填写或上传 GPT-SoVITS 参考音频' })
+      return false
+    }
+    if (!gptSovitsPromptText) {
+      setNotice({ type: 'warning', message: '请填写参考音频文本，也就是参考音频里实际说的内容' })
+      return false
+    }
+    return true
+  }
 
   const loadSavedApiKey = async (profileId: number) => {
     const result = await profileApi.getVoiceSecret(profileId)
@@ -348,12 +402,24 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         name: current.name || provider.name,
       }
     })
+    if (provider.id === 'gpt_sovits') {
+      setSettings((current) => ({ ...current, format: 'wav' }))
+      setVoice((current) => current.startsWith('gpt_sovits_ref') ? current : 'gpt_sovits_ref')
+      setCustomVoice('')
+    }
     setModelOptions(provider.model ? [{ id: provider.model, label: provider.model, owned_by: provider.id }] : [])
-    setNotice({ type: 'info', message: provider.id === 'local_tts' ? '已切换到本地 TTS，请填写命令模板并确认输出文件参数。' : `已切换到 ${provider.name}，请确认模型、音色和密钥。` })
+    setNotice({
+      type: 'info',
+      message: provider.id === 'local_tts'
+        ? '已切换到本地 TTS，请填写命令模板并确认输出文件参数。'
+        : provider.id === 'gpt_sovits'
+          ? '已切换到 GPT-SoVITS 本地服务，请填写参考音频、参考文本和本地服务地址。'
+          : `已切换到 ${provider.name}，请确认模型、音色和密钥。`,
+    })
   }
 
   const handleLoadModels = async () => {
-    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!(isLocalTts || isGptSovits) && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
     setIsLoadingModels(true)
     setNotice({ type: 'info', message: '正在获取配音模型列表...' })
     try {
@@ -372,8 +438,8 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     try {
       const result = await voiceApi.voices(providerType, model)
       setVoices(result.voices)
-      if (providerType === 'custom_tts' || providerType === 'local_tts') {
-        // 自定义和本地命令渠道要保留用户填写的 voice id，不能用占位音色覆盖。
+      if (providerType === 'custom_tts' || providerType === 'local_tts' || providerType === 'gpt_sovits') {
+        // 自定义、本地命令和 GPT-SoVITS 要保留用户填写的 voice id 或参考音频路径，不能用占位音色覆盖。
         setVoice((current) => current || result.voices[0]?.id || 'custom')
       } else if (result.voices.length > 0) {
         const normalizedModel = String(model || '').toLowerCase()
@@ -391,8 +457,9 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleSaveProfile = async () => {
-    if (!profileForm.name.trim() || (!isLocalTts && !profileForm.base_url.trim())) { setNotice({ type: 'warning', message: `请填写配音配置名称和 ${baseUrlLabel}` }); return }
+    if (!profileForm.name.trim() || (!(isLocalTts || isGptSovits) && !profileForm.base_url.trim())) { setNotice({ type: 'warning', message: `请填写配音配置名称和 ${baseUrlLabel}` }); return }
     if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请填写本地 TTS 命令模板' }); return }
+    if (!validateGptSovitsSettings()) return
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
     if (requiresApiKey && !selectedProfileId && !profileForm.api_key.trim()) { setNotice({ type: 'warning', message: '新建配音配置需要填写 API Key' }); return }
     setIsSaving(true)
@@ -411,8 +478,9 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleTestProfile = async () => {
-    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!(isLocalTts || isGptSovits) && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
     if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
+    if (!validateGptSovitsSettings()) return
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
     setIsTesting(true)
     setNotice({ type: 'info', message: '正在生成短试听并测试连接...' })
@@ -426,8 +494,9 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handlePreview = async () => {
-    if (!isLocalTts && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
+    if (!(isLocalTts || isGptSovits) && !profileForm.base_url.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL' }); return }
     if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
+    if (!validateGptSovitsSettings()) return
     if (!activeModel.trim()) { setNotice({ type: 'warning', message: '请选择或填写配音模型' }); return }
     if (!previewText.trim()) { setNotice({ type: 'warning', message: '请输入试听文本' }); return }
     setIsGenerating(true)
@@ -480,6 +549,43 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
     }
   }
 
+  const handleGptSovitsReferenceSampleChange = async (file: File | null, onSaved?: (path: string, filename: string) => void) => {
+    if (!file) return
+    const extension = file.name.toLowerCase().split('.').pop() || ''
+    if (!['mp3', 'wav', 'flac', 'ogg', 'm4a'].includes(extension)) {
+      setNotice({ type: 'warning', message: 'GPT-SoVITS 参考音频支持 mp3、wav、flac、ogg、m4a' })
+      return
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setNotice({ type: 'warning', message: 'GPT-SoVITS 参考音频不能超过 50MB' })
+      return
+    }
+    setIsGenerating(true)
+    setNotice({ type: 'info', message: '正在保存 GPT-SoVITS 参考音频...' })
+    try {
+      const dataUri = await readFileAsDataUri(file)
+      const result = await voiceApi.saveReferenceAudioSample({ filename: file.name, data_uri: dataUri })
+      if (onSaved) {
+        onSaved(result.path, file.name)
+      } else {
+        setSettings((current) => ({
+          ...current,
+          gpt_sovits_ref_audio_path: result.path,
+          gpt_sovits_ref_audio_name: file.name,
+        }))
+        setVoice(encodeGptSovitsRefPath(result.path))
+        setCustomVoice('')
+      }
+      setNotice({ type: 'success', message: `已保存 GPT-SoVITS 参考音频：${file.name}` })
+    } catch (error) {
+      const message = `保存 GPT-SoVITS 参考音频失败: ${error instanceof Error ? error.message : '未知错误'}`
+      setNotice({ type: 'error', message })
+      addLog('error', message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
   const selectCatalogVoice = (item: VoiceOption) => {
     setVoice(item.id)
     setCustomVoice('')
@@ -523,8 +629,10 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
   }
 
   const handleSpeakerPreview = async (speaker: VoiceSpeakerProfile) => {
-    if ((!isLocalTts && !profileForm.base_url.trim()) || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
+    if ((!(isLocalTts || isGptSovits) && !profileForm.base_url.trim()) || !activeModel.trim()) { setNotice({ type: 'warning', message: '请先填写 Base URL 和模型' }); return }
     if (isLocalTts && !localCommandTemplate) { setNotice({ type: 'warning', message: '请先填写本地 TTS 命令模板' }); return }
+    if (isGptSovits && !gptSovitsPromptText) { setNotice({ type: 'warning', message: '请先填写 GPT-SoVITS 参考音频文本' }); return }
+    if (isGptSovits && !editableGptSovitsRefPath(speaker.voice) && !gptSovitsRefAudioPath) { setNotice({ type: 'warning', message: '请先给该说话人填写 GPT-SoVITS 参考音频路径' }); return }
     setIsGenerating(true)
     setAudioUrl('')
     setNotice({ type: 'info', message: `正在生成 ${speaker.label} 的试听...` })
@@ -535,7 +643,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
         provider_type: profileForm.provider_type,
         base_url: profileForm.base_url,
         api_key: profileForm.api_key || undefined,
-        voice: speaker.voice,
+        voice: isGptSovits && !editableGptSovitsRefPath(speaker.voice) ? activeVoiceValue : speaker.voice,
         model: activeModel,
         settings: voiceSettingsForRequest({ style_prompt: speaker.style_prompt || settings.style_prompt }),
       })
@@ -675,7 +783,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               label={baseUrlLabel}
               value={profileForm.base_url}
               placeholder={baseUrlPlaceholder}
-              description={isLocalTts ? '可直接把命令写在这里；也可以在高级参数里填写命令模板。本地命令必须生成 {output} 指定的音频文件。' : undefined}
+              description={isLocalTts ? '可直接把命令写在这里；也可以在高级参数里填写命令模板。本地命令必须生成 {output} 指定的音频文件。' : isGptSovits ? '默认使用本机 GPT-SoVITS api_v2 服务；如果你填到 /tts 也可以直接调用。' : undefined}
               onChange={(v) => setProfileForm({ ...profileForm, base_url: v })}
             />
             {requiresApiKey ? (
@@ -691,7 +799,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               />
             ) : (
               <div className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
-                本地 TTS 不需要 API Key，软件会调用你填写的本地命令生成音频。
+                {isGptSovits ? 'GPT-SoVITS 本地服务不需要 API Key，软件会调用本机 /tts 接口生成音频。' : '本地 TTS 不需要 API Key，软件会调用你填写的本地命令生成音频。'}
               </div>
             )}
             <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
@@ -726,7 +834,48 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
               </button>
             ))}
           </div>
-          {isXiaomiVoiceDesign ? (
+          {isGptSovits ? (
+            <div className="space-y-3 rounded-lg border p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <TextField
+                  label="参考音频路径"
+                  value={settings.gpt_sovits_ref_audio_path || ''}
+                  placeholder="选择音频后自动填入，也可以手动填写本地路径"
+                  description="建议用 3 到 10 秒干净人声；路径会传给本机 GPT-SoVITS 服务。"
+                  onChange={(v) => {
+                    updateSetting('gpt_sovits_ref_audio_path', v)
+                    setVoice(encodeGptSovitsRefPath(v))
+                    setCustomVoice('')
+                  }}
+                />
+                <div className="space-y-1.5">
+                  <label className="text-sm font-normal">上传参考音频</label>
+                  <input
+                    type="file"
+                    accept=".mp3,.wav,.flac,.ogg,.m4a,audio/*"
+                    className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null
+                      void handleGptSovitsReferenceSampleChange(file)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">{settings.gpt_sovits_ref_audio_name || '支持 mp3/wav/flac/ogg/m4a，最大 50MB'}</p>
+                </div>
+              </div>
+              <TextareaField
+                label="参考音频文本"
+                value={settings.gpt_sovits_prompt_text || ''}
+                rows={2}
+                placeholder="这里填写参考音频里实际说的话，必须和参考音频内容一致。"
+                onChange={(v) => updateSetting('gpt_sovits_prompt_text', v)}
+              />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <SelectField label="朗读文本语言" value={settings.gpt_sovits_text_lang || 'zh'} options={GPT_SOVITS_LANG_OPTIONS} onChange={(v) => updateSetting('gpt_sovits_text_lang', v)} />
+                <SelectField label="参考音频语言" value={settings.gpt_sovits_prompt_lang || 'zh'} options={GPT_SOVITS_LANG_OPTIONS} onChange={(v) => updateSetting('gpt_sovits_prompt_lang', v)} />
+              </div>
+            </div>
+          ) : isXiaomiVoiceDesign ? (
             <TextareaField
               label="文字定制音色描述"
               value={settings.xiaomi_voice_design_prompt || ''}
@@ -794,7 +943,7 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
             <SliderField label="音量" value={settings.volume} min={0.1} max={10} step={0.1} format={(v) => v.toFixed(1)} onChange={(v) => updateSetting('volume', v)} />
             <SliderField label="音调" value={settings.pitch} min={-12} max={12} step={1} onChange={(v) => updateSetting('pitch', v)} />
             <div className="grid gap-3 sm:grid-cols-2">
-              <SelectField label="格式" value={settings.format} options={FORMAT_OPTIONS} onChange={(v) => updateSetting('format', v as VoiceGenerateSettings['format'])} />
+              <SelectField label="格式" value={settings.format} options={isGptSovits ? GPT_SOVITS_FORMAT_OPTIONS : FORMAT_OPTIONS} onChange={(v) => updateSetting('format', v as VoiceGenerateSettings['format'])} />
               <SelectField label="采样率" value={String(settings.sample_rate)} options={SAMPLE_RATE_OPTIONS} onChange={(v) => updateSetting('sample_rate', Number(v))} />
               <SelectField label="码率" value={String(settings.bitrate)} options={BITRATE_OPTIONS} onChange={(v) => updateSetting('bitrate', Number(v))} />
               <SelectField label="声道" value={String(settings.channel)} options={CHANNEL_OPTIONS} onChange={(v) => updateSetting('channel', Number(v))} />
@@ -814,6 +963,31 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <TextField label="工作目录" value={settings.local_tts_workdir || ''} placeholder="可空；例如 D:\\tools\\CosyVoice" onChange={(v) => updateSetting('local_tts_workdir', v)} />
                   <NumberField label="命令超时" value={settings.local_tts_timeout_seconds || 600} min={10} max={3600} step={10} suffix="秒" onChange={(v) => updateSetting('local_tts_timeout_seconds', Math.max(10, Math.round(v)))} />
+                </div>
+              </div>
+            )}
+            {isGptSovits && (
+              <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <SelectField label="文本切分" value={settings.gpt_sovits_text_split_method || 'cut5'} options={GPT_SOVITS_SPLIT_OPTIONS} onChange={(v) => updateSetting('gpt_sovits_text_split_method', v)} />
+                  <NumberField label="批量大小" value={settings.gpt_sovits_batch_size || 1} min={1} max={32} step={1} onChange={(v) => updateSetting('gpt_sovits_batch_size', Math.max(1, Math.round(v)))} />
+                  <NumberField label="Top K" value={settings.gpt_sovits_top_k || 15} min={1} max={100} step={1} onChange={(v) => updateSetting('gpt_sovits_top_k', Math.max(1, Math.round(v)))} />
+                  <NumberField label="随机种子" value={settings.gpt_sovits_seed ?? -1} min={-1} max={2147483647} step={1} description="-1 表示不固定随机种子" onChange={(v) => updateSetting('gpt_sovits_seed', Math.round(v))} />
+                </div>
+                <SliderField label="Top P" value={settings.gpt_sovits_top_p ?? 1} min={0.1} max={1} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => updateSetting('gpt_sovits_top_p', v)} />
+                <SliderField label="Temperature" value={settings.gpt_sovits_temperature ?? 1} min={0.1} max={2} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => updateSetting('gpt_sovits_temperature', v)} />
+                <SliderField label="语速系数" value={settings.gpt_sovits_speed_factor ?? 1} min={0.5} max={2} step={0.05} description="这是 GPT-SoVITS 官方参数；一键时间轴仍会按真实音频时长排队，避免重叠。" format={(v) => v.toFixed(2)} onChange={(v) => updateSetting('gpt_sovits_speed_factor', v)} />
+                <SliderField label="重复惩罚" value={settings.gpt_sovits_repetition_penalty ?? 1.35} min={1} max={2} step={0.05} format={(v) => v.toFixed(2)} onChange={(v) => updateSetting('gpt_sovits_repetition_penalty', v)} />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <NumberField label="批量阈值" value={settings.gpt_sovits_batch_threshold ?? 0.75} min={0.1} max={1} step={0.05} onChange={(v) => updateSetting('gpt_sovits_batch_threshold', v)} />
+                  <NumberField label="片段间隔" value={settings.gpt_sovits_fragment_interval ?? 0.3} min={0} max={2} step={0.05} suffix="秒" onChange={(v) => updateSetting('gpt_sovits_fragment_interval', v)} />
+                  <NumberField label="采样步数" value={settings.gpt_sovits_sample_steps || 32} min={4} max={128} step={1} onChange={(v) => updateSetting('gpt_sovits_sample_steps', Math.max(4, Math.round(v)))} />
+                  <NumberField label="流式模式" value={settings.gpt_sovits_streaming_mode ?? 0} min={0} max={3} step={1} description="0 为关闭；1/2/3 为不同流式档位。" onChange={(v) => updateSetting('gpt_sovits_streaming_mode', Math.max(0, Math.round(v)))} />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <SwitchField label="按长度分桶" checked={settings.gpt_sovits_split_bucket ?? true} onChange={(v) => updateSetting('gpt_sovits_split_bucket', v)} />
+                  <SwitchField label="并行推理" checked={settings.gpt_sovits_parallel_infer ?? true} onChange={(v) => updateSetting('gpt_sovits_parallel_infer', v)} />
+                  <SwitchField label="超采样" checked={settings.gpt_sovits_super_sampling ?? false} onChange={(v) => updateSetting('gpt_sovits_super_sampling', v)} />
                 </div>
               </div>
             )}
@@ -911,6 +1085,25 @@ export function VoiceConfigPanel({ compact = false }: { compact?: boolean }) {
                         onChange={(event) => {
                           const file = event.target.files?.[0] || null
                           void handleXiaomiCloneSampleChange(file, (path) => updateSpeaker(speaker.id, { voice: encodeXiaomiVoiceClonePath(path) }))
+                          event.currentTarget.value = ''
+                        }}
+                      />
+                    </div>
+                  ) : isGptSovits ? (
+                    <div className="space-y-2">
+                      <TextField
+                        label="参考音频路径"
+                        value={editableGptSovitsRefPath(speaker.voice)}
+                        placeholder="可空；空值会使用上方全局参考音频"
+                        onChange={(v) => updateSpeaker(speaker.id, { voice: encodeGptSovitsRefPath(v) })}
+                      />
+                      <input
+                        type="file"
+                        accept=".mp3,.wav,.flac,.ogg,.m4a,audio/*"
+                        className="block w-full rounded-md border border-input bg-background px-3 py-2 text-sm file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-sm"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0] || null
+                          void handleGptSovitsReferenceSampleChange(file, (path) => updateSpeaker(speaker.id, { voice: encodeGptSovitsRefPath(path) }))
                           event.currentTarget.value = ''
                         }}
                       />

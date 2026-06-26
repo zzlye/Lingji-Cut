@@ -399,7 +399,7 @@ export interface VoiceGenerateSettings {
   speed: number
   volume: number
   pitch: number
-  format: 'mp3' | 'wav' | 'flac' | 'pcm' | 'opus'
+  format: 'mp3' | 'wav' | 'flac' | 'pcm' | 'opus' | 'ogg' | 'aac'
   sample_rate: number
   bitrate: number
   channel: number
@@ -416,6 +416,26 @@ export interface VoiceGenerateSettings {
   local_tts_command?: string
   local_tts_workdir?: string
   local_tts_timeout_seconds?: number
+  gpt_sovits_ref_audio_path?: string
+  gpt_sovits_ref_audio_name?: string
+  gpt_sovits_prompt_text?: string
+  gpt_sovits_text_lang?: string
+  gpt_sovits_prompt_lang?: string
+  gpt_sovits_text_split_method?: string
+  gpt_sovits_top_k?: number
+  gpt_sovits_top_p?: number
+  gpt_sovits_temperature?: number
+  gpt_sovits_batch_size?: number
+  gpt_sovits_batch_threshold?: number
+  gpt_sovits_split_bucket?: boolean
+  gpt_sovits_parallel_infer?: boolean
+  gpt_sovits_speed_factor?: number
+  gpt_sovits_fragment_interval?: number
+  gpt_sovits_repetition_penalty?: number
+  gpt_sovits_sample_steps?: number
+  gpt_sovits_super_sampling?: boolean
+  gpt_sovits_streaming_mode?: number
+  gpt_sovits_seed?: number
   retry_count: number
   retry_interval_ms: number
 }

@@ -419,6 +419,13 @@ export const voiceApi = {
       body: JSON.stringify(params),
     }),
 
+  /** 保存本地 TTS 参考音频 */
+  saveReferenceAudioSample: (params: { filename: string; data_uri: string }) =>
+    request<{ message: string; path: string; size: number }>('/voice/reference-audio-sample', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    }),
+
   /** 生成配音 */
   generate: (params: {
     text: string

@@ -35,6 +35,9 @@ def provider_audio_format(provider_type: str, settings: dict[str, Any], model: s
     if normalized_provider == "local_tts":
         value = str((settings or {}).get("format") or "wav").lower()
         return value if value in {"wav", "mp3", "flac", "pcm", "opus"} else "wav"
+    if normalized_provider == "gpt_sovits":
+        value = str((settings or {}).get("format") or (settings or {}).get("gpt_sovits_media_type") or "wav").lower()
+        return value if value in {"wav", "ogg", "aac"} else "wav"
     if normalized_provider == "xiaomi_mimo_tts":
         value = str((settings or {}).get("format") or "wav").lower()
         return value if value in {"wav", "mp3", "pcm", "pcm16"} else "wav"
@@ -163,6 +166,8 @@ class VoiceEngine:
             return await self._generate_xiaomi_mimo_tts(text, output_path, voice, api_key, base_url, model, settings)
         if provider_type == "local_tts":
             return await self._generate_local_tts_command(text, output_path, voice, base_url, model, settings)
+        if provider_type == "gpt_sovits":
+            return await self._generate_gpt_sovits_tts(text, output_path, voice, base_url, settings)
         if provider_type == "custom_tts":
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings, provider_type)
 
@@ -823,6 +828,92 @@ class VoiceEngine:
         logger.info(f"本地 TTS 生成完成: {output_path}")
         return output_path
 
+    async def _generate_gpt_sovits_tts(
+        self,
+        text: str,
+        output_path: str,
+        voice: str,
+        base_url: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """调用 GPT-SoVITS 本地 api_v2 服务生成配音"""
+        import httpx
+
+        ref_audio_path = self._gpt_sovits_ref_audio_path(voice, settings)
+        prompt_text = str(settings.get("gpt_sovits_prompt_text") or "").strip()
+        if not prompt_text:
+            raise ValueError("GPT-SoVITS 需要填写参考音频文本，也就是参考音频里实际说的内容")
+
+        media_type = self._provider_audio_format("gpt_sovits", settings)
+        payload: dict[str, Any] = {
+            "text": text,
+            "text_lang": str(settings.get("gpt_sovits_text_lang") or "zh").strip() or "zh",
+            "ref_audio_path": ref_audio_path,
+            "prompt_text": prompt_text,
+            "prompt_lang": str(settings.get("gpt_sovits_prompt_lang") or "zh").strip() or "zh",
+            "media_type": media_type,
+        }
+
+        self._set_payload_int(payload, settings, "top_k", "gpt_sovits_top_k", 15)
+        self._set_payload_float(payload, settings, "top_p", "gpt_sovits_top_p", 1.0)
+        self._set_payload_float(payload, settings, "temperature", "gpt_sovits_temperature", 1.0)
+        self._set_payload_string(payload, settings, "text_split_method", "gpt_sovits_text_split_method", "cut5")
+        self._set_payload_int(payload, settings, "batch_size", "gpt_sovits_batch_size", 1)
+        self._set_payload_float(payload, settings, "batch_threshold", "gpt_sovits_batch_threshold", 0.75)
+        self._set_payload_bool(payload, settings, "split_bucket", "gpt_sovits_split_bucket", True)
+        self._set_payload_float(payload, settings, "speed_factor", "gpt_sovits_speed_factor", 1.0)
+        self._set_payload_float(payload, settings, "fragment_interval", "gpt_sovits_fragment_interval", 0.3)
+        self._set_payload_int(payload, settings, "streaming_mode", "gpt_sovits_streaming_mode", 0)
+        self._set_payload_bool(payload, settings, "parallel_infer", "gpt_sovits_parallel_infer", True)
+        self._set_payload_float(payload, settings, "repetition_penalty", "gpt_sovits_repetition_penalty", 1.35)
+        self._set_payload_int(payload, settings, "sample_steps", "gpt_sovits_sample_steps", 32)
+        self._set_payload_bool(payload, settings, "super_sampling", "gpt_sovits_super_sampling", False)
+        if settings.get("gpt_sovits_seed") not in (None, ""):
+            payload["seed"] = self._int(settings.get("gpt_sovits_seed"), -1)
+
+        endpoint = self._gpt_sovits_tts_endpoint(base_url)
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(endpoint, headers={"Content-Type": "application/json"}, json=payload)
+
+            if response.status_code != 200:
+                raise RuntimeError(f"GPT-SoVITS 调用失败: {self._response_error_message(response)}")
+            content_type = response.headers.get("content-type", "")
+            if "json" in content_type.lower() or "text/" in content_type.lower():
+                raise RuntimeError(f"GPT-SoVITS 未返回音频数据: {self._response_error_message(response)}")
+
+            with open(output_path, "wb") as file:
+                file.write(response.content)
+
+        logger.info(f"GPT-SoVITS 生成完成: {output_path}")
+        return output_path
+
+    def _gpt_sovits_tts_endpoint(self, base_url: str) -> str:
+        """拼接 GPT-SoVITS api_v2 的 /tts 地址，允许用户直接填完整 /tts"""
+        normalized = str(base_url or "").strip() or "http://127.0.0.1:9880"
+        normalized = normalized.rstrip("/")
+        return normalized if normalized.endswith("/tts") else f"{normalized}/tts"
+
+    def _gpt_sovits_ref_audio_path(self, voice: str, settings: dict[str, Any]) -> str:
+        """读取 GPT-SoVITS 参考音频路径，支持全局配置或说话人 voice 覆盖"""
+        candidates: list[str] = []
+        voice_value = str(voice or "").strip()
+        if voice_value.startswith("gpt_sovits_ref:"):
+            candidates.append(voice_value.split(":", 1)[1].strip())
+        elif voice_value.startswith("ref_audio_path:"):
+            candidates.append(voice_value.split(":", 1)[1].strip())
+        elif voice_value and os.path.exists(os.path.expanduser(voice_value)):
+            candidates.append(voice_value)
+        candidates.append(str(settings.get("gpt_sovits_ref_audio_path") or "").strip())
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            resolved = os.path.abspath(os.path.expanduser(candidate))
+            if not os.path.exists(resolved):
+                raise FileNotFoundError(f"GPT-SoVITS 参考音频不存在: {resolved}")
+            return resolved
+        raise ValueError("GPT-SoVITS 需要填写参考音频路径，或在说话人 voice 中填写本地音频路径")
+
     def _render_local_tts_command(
         self,
         command_template: str,
@@ -863,6 +954,22 @@ class VoiceEngine:
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
         return env
+
+    def _set_payload_string(self, payload: dict[str, Any], settings: dict[str, Any], target_key: str, source_key: str, default: str) -> None:
+        """向第三方请求体写入字符串参数，空值回退默认"""
+        payload[target_key] = str(settings.get(source_key) or default).strip() or default
+
+    def _set_payload_int(self, payload: dict[str, Any], settings: dict[str, Any], target_key: str, source_key: str, default: int) -> None:
+        """向第三方请求体写入整数参数"""
+        payload[target_key] = self._int(settings.get(source_key), default)
+
+    def _set_payload_float(self, payload: dict[str, Any], settings: dict[str, Any], target_key: str, source_key: str, default: float) -> None:
+        """向第三方请求体写入浮点参数"""
+        payload[target_key] = self._float(settings.get(source_key), default)
+
+    def _set_payload_bool(self, payload: dict[str, Any], settings: dict[str, Any], target_key: str, source_key: str, default: bool) -> None:
+        """向第三方请求体写入布尔参数，兼容前端字符串和真实布尔值"""
+        payload[target_key] = self._bool_value(settings.get(source_key), default)
 
     def _decode_process_bytes(self, value: bytes | str | None) -> str:
         """解码本地命令输出，失败时保留可读错误片段"""
@@ -2301,6 +2408,14 @@ class VoiceEngine:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _bool_value(self, value: Any, default: bool) -> bool:
+        """安全读取布尔值"""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def _bool_env(self, name: str, default: bool) -> bool:
         """读取布尔环境变量，用于保留少数兼容开关"""

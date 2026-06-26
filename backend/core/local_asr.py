@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from .tooling import get_ffmpeg_command
+from .process_control import normalize_control_keys, raise_if_control_requested, register_process, unregister_process
 from ..utils import get_logger
 
 
@@ -429,10 +430,12 @@ class LocalSpeechRecognizer:
         beam_size: Optional[int] = None,
         allow_cpu_fallback: Optional[bool] = None,
         gap_rescue: Optional[bool] = None,
+        control_keys: Optional[list[str]] = None,
     ):
         """初始化本地识别参数，不在构造阶段加载模型"""
         # 补漏识别开关覆盖：模式3 时间轴识别不需要 CPU 逐个漏区重跑（内容由 Gemini 补），传 False 关闭可大幅提速
         self._gap_rescue_override = gap_rescue
+        self.control_keys = normalize_control_keys(control_keys)
         self.model_dir = model_dir or default_asr_model_dir()
         requested_device = device or os.environ.get("YTV_ASR_DEVICE") or "auto"
         normalized_device = str(requested_device).strip().lower()
@@ -767,12 +770,16 @@ class LocalSpeechRecognizer:
             errors="replace",
             creationflags=creationflags,
         )
+        if self.control_keys:
+            register_process(self.control_keys, process, command)
 
         result_payload: Optional[dict[str, Any]] = None
         error_message = ""
         assert process.stdout is not None
         line_queue: queue.Queue[Optional[str]] = queue.Queue()
         silence_timeout = self._worker_silence_timeout_seconds()
+        runtime_timeout = self._worker_runtime_timeout_seconds()
+        worker_started_at = time.monotonic()
         last_output_at = time.monotonic()
 
         def read_stdout() -> None:
@@ -786,37 +793,45 @@ class LocalSpeechRecognizer:
         reader = threading.Thread(target=read_stdout, name="ytv-asr-worker-stdout", daemon=True)
         reader.start()
 
-        while True:
-            try:
-                raw_line = line_queue.get(timeout=1.0)
-            except queue.Empty:
-                if time.monotonic() - last_output_at > silence_timeout:
+        try:
+            while True:
+                raise_if_control_requested(self.control_keys)
+                if time.monotonic() - worker_started_at > runtime_timeout:
                     self._terminate_worker_process(process)
-                    raise RuntimeError(f"本地识别 CUDA 子进程超过 {silence_timeout:.0f} 秒没有输出，已终止避免任务卡死")
-                continue
-            if raw_line is None:
-                break
-            last_output_at = time.monotonic()
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            if line.startswith(ASR_WORKER_EVENT_PREFIX):
+                    raise RuntimeError(f"本地识别 CUDA 子进程运行超过 {runtime_timeout:.0f} 秒，已终止并切换其它档位")
                 try:
-                    event = json.loads(line[len(ASR_WORKER_EVENT_PREFIX):])
-                except json.JSONDecodeError:
-                    logger.warning(f"本地识别子进程事件解析失败: {line[:200]}")
+                    raw_line = line_queue.get(timeout=1.0)
+                except queue.Empty:
+                    if time.monotonic() - last_output_at > silence_timeout:
+                        self._terminate_worker_process(process)
+                        raise RuntimeError(f"本地识别 CUDA 子进程超过 {silence_timeout:.0f} 秒没有输出，已终止避免任务卡死")
                     continue
-                event_type = str(event.get("type") or "")
-                if event_type == "progress" and progress_callback:
-                    progress_callback(float(event.get("value") or 0))
-                elif event_type == "result":
-                    result_payload = event
-                elif event_type == "error":
-                    error_message = str(event.get("message") or event.get("error_type") or "")
-                elif event_type == "diagnostic":
-                    logger.info(f"本地识别子进程诊断: {event}")
-                continue
-            logger.info(f"本地识别子进程: {line}")
+                if raw_line is None:
+                    break
+                last_output_at = time.monotonic()
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                if line.startswith(ASR_WORKER_EVENT_PREFIX):
+                    try:
+                        event = json.loads(line[len(ASR_WORKER_EVENT_PREFIX):])
+                    except json.JSONDecodeError:
+                        logger.warning(f"本地识别子进程事件解析失败: {line[:200]}")
+                        continue
+                    event_type = str(event.get("type") or "")
+                    if event_type == "progress" and progress_callback:
+                        progress_callback(float(event.get("value") or 0))
+                    elif event_type == "result":
+                        result_payload = event
+                    elif event_type == "error":
+                        error_message = str(event.get("message") or event.get("error_type") or "")
+                    elif event_type == "diagnostic":
+                        logger.info(f"本地识别子进程诊断: {event}")
+                    continue
+                logger.info(f"本地识别子进程: {line}")
+        finally:
+            if self.control_keys:
+                unregister_process(process)
 
         return_code = process.wait()
         if return_code != 0:
@@ -835,6 +850,10 @@ class LocalSpeechRecognizer:
     def _worker_silence_timeout_seconds(self) -> float:
         """读取 CUDA worker 无输出超时，避免 native 推理卡死后任务永久停在字幕准备"""
         return self._env_float("YTV_ASR_WORKER_SILENCE_TIMEOUT_S", 300.0, 30.0, 3600.0)
+
+    def _worker_runtime_timeout_seconds(self) -> float:
+        """读取 CUDA worker 总运行超时，避免持续心跳但推理不结束"""
+        return self._env_float("YTV_ASR_WORKER_MAX_RUNTIME_S", 1800.0, 120.0, 7200.0)
 
     def _terminate_worker_process(self, process: Any) -> None:
         """终止卡死的本地识别 worker，失败只记录日志，后续由父流程回退处理"""

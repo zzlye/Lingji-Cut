@@ -1539,7 +1539,7 @@ def _build_gemini_transcriber(db: Session, request: "AutomationRunRequest") -> G
     )
 
 
-def _gemini_align_timeline_recognizer(request: Optional["AutomationRunRequest"] = None) -> LocalSpeechRecognizer:
+def _gemini_align_timeline_recognizer(request: Optional["AutomationRunRequest"] = None, control_keys: Optional[list[str]] = None) -> LocalSpeechRecognizer:
     """构造 Gemini 对齐模式的本地时间轴识别器，按显存安全选择 GPU 或 CPU"""
     profile = _gemini_align_timeline_profile(request)
     return LocalSpeechRecognizer(
@@ -1548,6 +1548,7 @@ def _gemini_align_timeline_recognizer(request: Optional["AutomationRunRequest"] 
         beam_size=int(profile["beam_size"]),
         # 模式3 时间轴识别关闭补漏：内容由 Gemini 出，Whisper 漏的词在对齐时会补上，无需 CPU 逐个漏区重跑
         gap_rescue=False,
+        control_keys=control_keys,
     )
 
 
@@ -1770,6 +1771,7 @@ def _recognize_subtitle_entries(
     request: "AutomationRunRequest",
     video_path: str,
     progress_callback: Callable[[float], None],
+    control_keys: Optional[list[str]] = None,
 ) -> tuple[list[dict], str]:
     """按用户选择的识别方式产出原文字幕条目，三种方式输出结构一致"""
     mode = _normalize_subtitle_recognition_mode(request.subtitle_recognition_mode)
@@ -1796,7 +1798,7 @@ def _recognize_subtitle_entries(
             if progress_callback:
                 progress_callback(50)
         else:
-            whisper_entries, language = _gemini_align_timeline_recognizer(request).transcribe_video(
+            whisper_entries, language = _gemini_align_timeline_recognizer(request, control_keys).transcribe_video(
                 video_path=video_path,
                 language=recognition_language,
                 progress_callback=lambda value: progress_callback(value * 0.5),
@@ -1817,7 +1819,7 @@ def _recognize_subtitle_entries(
         )
         return aligned, recognition_language or language
     # 默认本地 Whisper 识别
-    return LocalSpeechRecognizer(model_name=local_model_name).transcribe_video(
+    return LocalSpeechRecognizer(model_name=local_model_name, control_keys=control_keys).transcribe_video(
         video_path=video_path,
         language=recognition_language,
         progress_callback=progress_callback,
@@ -2916,6 +2918,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                 request,
                 effects_path,
                 on_asr_progress,
+                control_keys=_control_keys(job, subtitle_task),
             )
             entries = engine.dedupe_entries_by_text(entries)
             subtitle_path = os.path.join(paths["output_dir"], f"{video.video_id}_{language}_local.srt")

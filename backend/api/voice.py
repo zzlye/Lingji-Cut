@@ -56,6 +56,12 @@ class XiaomiVoiceCloneSampleRequest(BaseModel):
     data_uri: str
 
 
+class ReferenceAudioSampleRequest(BaseModel):
+    """本地参考音频保存请求"""
+    filename: str
+    data_uri: str
+
+
 VOICE_CATALOGS = {
     "openai_tts": [
         {"id": "alloy", "name": "Alloy", "language": "多语言", "style": "中性、均衡、通用", "gender": "neutral"},
@@ -136,6 +142,9 @@ VOICE_CATALOGS = {
         {"id": "male", "name": "男声参数", "language": "本地模型", "style": "传给本地命令的 voice 值", "gender": "male"},
         {"id": "female", "name": "女声参数", "language": "本地模型", "style": "传给本地命令的 voice 值", "gender": "female"},
     ],
+    "gpt_sovits": [
+        {"id": "gpt_sovits_ref", "name": "参考音频", "language": "中文/多语言", "style": "使用本地参考音频克隆音色", "gender": "neutral"},
+    ],
     "custom_tts": [
         {"id": "custom", "name": "自定义 voice id", "language": "自定义", "style": "中性、手动填写", "gender": "neutral"},
     ],
@@ -213,13 +222,44 @@ async def get_voice_catalog(request: VoiceCatalogRequest):
 @router.post("/xiaomi/voice-clone-sample")
 async def save_xiaomi_voice_clone_sample(request: XiaomiVoiceCloneSampleRequest):
     """保存小米 VoiceClone 参考音频，保存路径供后续 TTS 请求读取"""
+    return _save_reference_audio_sample(
+        filename=request.filename,
+        data_uri=request.data_uri,
+        allowed_extensions={".mp3", ".wav"},
+        max_size_bytes=10 * 1024 * 1024,
+        prefix="xiaomi_clone",
+    )
+
+
+@router.post("/reference-audio-sample")
+async def save_reference_audio_sample(request: ReferenceAudioSampleRequest):
+    """保存本地 TTS 参考音频，保存路径供 GPT-SoVITS 等本地服务读取"""
+    return _save_reference_audio_sample(
+        filename=request.filename,
+        data_uri=request.data_uri,
+        allowed_extensions={".mp3", ".wav", ".flac", ".ogg", ".m4a"},
+        max_size_bytes=50 * 1024 * 1024,
+        prefix="tts_reference",
+    )
+
+
+def _save_reference_audio_sample(
+    *,
+    filename: str,
+    data_uri: str,
+    allowed_extensions: set[str],
+    max_size_bytes: int,
+    prefix: str,
+) -> dict[str, Any]:
+    """把前端上传的参考音频落盘，并返回可传给本地模型的绝对路径"""
     import base64
 
-    filename = request.filename or "sample.wav"
+    filename = filename or "sample.wav"
     extension = os.path.splitext(filename)[1].lower()
-    if extension not in {".mp3", ".wav"}:
-        raise HTTPException(status_code=400, detail="参考音频只支持 mp3 或 wav")
-    data_uri = str(request.data_uri or "").strip()
+    if extension not in allowed_extensions:
+        supported = "、".join(sorted(item.lstrip(".") for item in allowed_extensions))
+        raise HTTPException(status_code=400, detail=f"参考音频只支持 {supported}")
+    data_uri = str(data_uri or "").strip()
     marker = ";base64,"
     if not data_uri.startswith("data:audio/") or marker not in data_uri:
         raise HTTPException(status_code=400, detail="参考音频数据格式不正确")
@@ -227,12 +267,12 @@ async def save_xiaomi_voice_clone_sample(request: XiaomiVoiceCloneSampleRequest)
         audio_bytes = base64.b64decode(data_uri.split(marker, 1)[1], validate=True)
     except Exception as exc:
         raise HTTPException(status_code=400, detail="参考音频 base64 解码失败") from exc
-    if len(audio_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="参考音频不能超过 10MB")
+    if len(audio_bytes) > max_size_bytes:
+        raise HTTPException(status_code=400, detail=f"参考音频不能超过 {max_size_bytes // 1024 // 1024}MB")
 
     upload_dir = os.path.join(ensure_project_dirs()["data_dir"], "voice_clone_samples")
     os.makedirs(upload_dir, exist_ok=True)
-    output_path = os.path.join(upload_dir, f"xiaomi_clone_{uuid.uuid4().hex}{extension}")
+    output_path = os.path.join(upload_dir, f"{prefix}_{uuid.uuid4().hex}{extension}")
     with open(output_path, "wb") as output:
         output.write(audio_bytes)
 
@@ -291,6 +331,8 @@ async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_
         command_template = str(settings.get("local_tts_command") or base_url or "").strip()
         if not command_template:
             raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
+    elif provider_type == "gpt_sovits":
+        base_url = base_url.strip() or "http://127.0.0.1:9880"
     elif not base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
 

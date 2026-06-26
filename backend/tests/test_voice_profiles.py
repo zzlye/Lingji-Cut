@@ -67,6 +67,56 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(len(captured_payloads), 1)
         return captured_payloads[0]
 
+    def _capture_gpt_sovits_payload(self, voice: str, settings: dict) -> dict:
+        """捕获 GPT-SoVITS 本地服务请求体，避免单测真实启动本地服务"""
+        captured_payloads: list[dict] = []
+
+        class FakeResponse:
+            """模拟 GPT-SoVITS 返回二进制音频"""
+
+            status_code = 200
+            content = b"RIFF" + (b"\0" * 4096)
+            headers = {"content-type": "audio/wav"}
+            text = ""
+
+            def json(self):
+                """正常音频响应不会走 JSON，这里只兜底"""
+                return {}
+
+        class FakeClient:
+            """模拟 httpx 异步客户端"""
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *_args, **kwargs):
+                captured_payloads.append(kwargs["json"])
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory(prefix="gpt_sovits_payload_") as temp_dir:
+            ref_path = os.path.join(temp_dir, "ref.wav")
+            output_path = os.path.join(temp_dir, "voice.wav")
+            with open(ref_path, "wb") as file:
+                file.write(b"ref-audio")
+            options = {"gpt_sovits_ref_audio_path": ref_path, "gpt_sovits_prompt_text": "参考文本", "format": "wav", **settings}
+            with patch("httpx.AsyncClient", FakeClient):
+                asyncio.run(VoiceEngine()._generate_gpt_sovits_tts(
+                    text="生成文本",
+                    output_path=output_path,
+                    voice=voice,
+                    base_url="",
+                    settings=options,
+                ))
+
+        self.assertEqual(len(captured_payloads), 1)
+        return captured_payloads[0]
+
     def test_fetch_voice_models_filters_remote_tts_models(self):
         """配音模型获取会优先使用远程模型并过滤 TTS 相关项"""
         async def run():
@@ -101,6 +151,15 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(source, "local")
         self.assertEqual([model.id for model in models], ["local-command"])
         self.assertEqual(provider_audio_format("local_tts", {}, ""), "wav")
+
+    def test_fetch_gpt_sovits_models_does_not_require_url_or_key(self):
+        """GPT-SoVITS 本地服务模型列表不需要 Base URL 和 API Key"""
+        models, source = asyncio.run(_fetch_voice_models("gpt_sovits", "", ""))
+
+        self.assertEqual(source, "local")
+        self.assertIn("gpt-sovits-v2", [model.id for model in models])
+        self.assertEqual(provider_audio_format("gpt_sovits", {"format": "mp3"}, ""), "wav")
+        self.assertEqual(provider_audio_format("gpt_sovits", {"format": "ogg"}, ""), "ogg")
 
     def test_local_tts_command_generates_real_audio(self):
         """本地 TTS 命令模板会收到文本文件和输出路径，并生成可读音频"""
@@ -184,6 +243,30 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(kwargs["api_key"], "")
         self.assertEqual(kwargs["base_url"], "")
         self.assertEqual(kwargs["settings"]["local_tts_command"], "python infer.py --text-file {text_file} --output {output}")
+
+    def test_test_gpt_sovits_profile_uses_default_local_base_url(self):
+        """GPT-SoVITS 测试连接不要求 API Key，Base URL 为空时回退本机服务"""
+        profile = VoiceProviderProfile(
+            id=3,
+            name="GPT-SoVITS",
+            provider_type="gpt_sovits",
+            base_url="",
+            voice="gpt-sovits-v2",
+            extra_params='{"voice":"gpt_sovits_ref:D:/tmp/ref.wav","format":"wav","gpt_sovits_prompt_text":"参考文本","gpt_sovits_ref_audio_path":"D:/tmp/ref.wav"}',
+        )
+
+        async def run():
+            with patch("backend.api.profiles.VoiceEngine") as engine_class:
+                engine = engine_class.return_value
+                engine.generate_voice = AsyncMock(return_value=os.path.join(os.environ.get("TEMP", "."), "missing.wav"))
+                await _test_voice_profile(profile, "")
+                return engine.generate_voice.call_args.kwargs
+
+        kwargs = asyncio.run(run())
+
+        self.assertEqual(kwargs["provider_type"], "gpt_sovits")
+        self.assertEqual(kwargs["api_key"], "")
+        self.assertEqual(kwargs["base_url"], "http://127.0.0.1:9880")
 
     def test_transient_voice_profile_uses_unsaved_form_fields(self):
         """未保存表单测试时使用当前填写的渠道、地址和模型"""
@@ -325,6 +408,43 @@ class VoiceProfileTests(unittest.TestCase):
 
         self.assertTrue(payload["audio"]["voice"].startswith("data:audio/mpeg;base64,"))
         self.assertEqual(base64.b64decode(payload["audio"]["voice"].split(",", 1)[1]), b"role-audio")
+
+    def test_gpt_sovits_uses_api_v2_tts_payload(self):
+        """GPT-SoVITS 本地服务按 api_v2 的 /tts 参数生成请求体"""
+        payload = self._capture_gpt_sovits_payload(
+            voice="",
+            settings={
+                "gpt_sovits_text_lang": "zh",
+                "gpt_sovits_prompt_lang": "zh",
+                "gpt_sovits_text_split_method": "cut5",
+                "gpt_sovits_top_k": 20,
+                "gpt_sovits_parallel_infer": True,
+            },
+        )
+
+        self.assertEqual(payload["text"], "生成文本")
+        self.assertEqual(payload["prompt_text"], "参考文本")
+        self.assertEqual(payload["text_lang"], "zh")
+        self.assertEqual(payload["prompt_lang"], "zh")
+        self.assertEqual(payload["media_type"], "wav")
+        self.assertEqual(payload["top_k"], 20)
+        self.assertTrue(payload["parallel_infer"])
+
+    def test_gpt_sovits_voice_path_overrides_global_reference(self):
+        """多人配音时 GPT-SoVITS 说话人参考音频应覆盖全局参考音频"""
+        with tempfile.TemporaryDirectory(prefix="gpt_sovits_override_") as temp_dir:
+            global_ref = os.path.join(temp_dir, "global.wav")
+            role_ref = os.path.join(temp_dir, "role.wav")
+            with open(global_ref, "wb") as file:
+                file.write(b"global")
+            with open(role_ref, "wb") as file:
+                file.write(b"role")
+            payload = self._capture_gpt_sovits_payload(
+                voice=f"gpt_sovits_ref:{role_ref}",
+                settings={"gpt_sovits_ref_audio_path": global_ref},
+            )
+
+        self.assertTrue(payload["ref_audio_path"].endswith("role.wav"))
 
     def test_openai_compatible_gemini_model_keeps_requested_format(self):
         """OpenAI 兼容渠道由渠道决定协议，不能因为模型名包含 Gemini 就强行改格式"""

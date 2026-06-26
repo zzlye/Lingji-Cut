@@ -146,6 +146,11 @@ def _voice_requires_api_key(provider_type: str) -> bool:
     return provider_type in {"openai_tts", "gemini_tts", "minimax_tts", "xiaomi_mimo_tts"}
 
 
+def _voice_is_local_provider(provider_type: str) -> bool:
+    """判断配音渠道是否完全在本地运行，不需要远程密钥"""
+    return provider_type in {"local_tts", "gpt_sovits"}
+
+
 def _has_saved_api_key(encrypted_key: str) -> bool:
     """判断数据库里是否真的保存了可用 API Key"""
     try:
@@ -279,6 +284,10 @@ def _default_voice_models(provider_type: str) -> list[TextModelOption]:
         "local_tts": [
             ("local-command", "本地命令"),
         ],
+        "gpt_sovits": [
+            ("gpt-sovits-v2", "GPT-SoVITS 本地服务"),
+            ("gpt-sovits-v3", "GPT-SoVITS V3/V4 本地服务"),
+        ],
         "custom_tts": [],
     }
     return [TextModelOption(id=model_id, label=label, owned_by=provider_type) for model_id, label in defaults.get(provider_type, [])]
@@ -306,7 +315,7 @@ def _filter_voice_models(provider_type: str, models: list[TextModelOption]) -> l
 async def _fetch_voice_models(provider_type: str, base_url: str, api_key: str) -> tuple[list[TextModelOption], str]:
     """获取配音模型列表，优先远程读取，失败时返回内置模型"""
     defaults = _default_voice_models(provider_type)
-    if provider_type == "local_tts":
+    if _voice_is_local_provider(provider_type):
         return defaults, "local"
 
     if not base_url.strip():
@@ -348,10 +357,13 @@ async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> No
         except json.JSONDecodeError:
             settings = {}
 
+    base_url = profile.base_url
     if profile.provider_type == "local_tts":
         command_template = str(settings.get("local_tts_command") or profile.base_url or "").strip()
         if not command_template:
             raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
+    elif profile.provider_type == "gpt_sovits":
+        base_url = profile.base_url.strip() or "http://127.0.0.1:9880"
     elif not profile.base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
     if _voice_requires_api_key(profile.provider_type) and not api_key.strip():
@@ -372,7 +384,7 @@ async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> No
         provider_type=profile.provider_type,
         voice=voice,
         api_key=api_key,
-        base_url=profile.base_url,
+        base_url=base_url,
         model=model,
         settings=settings,
     )
@@ -607,7 +619,7 @@ async def get_voice_profile_secret(profile_id: int, db: Session = Depends(get_db
 @router.post("/voice", response_model=ProfileResponse)
 async def create_voice_profile(profile: ProfileCreate, db: Session = Depends(get_db)):
     """创建配音 API 配置"""
-    if profile.provider_type != "local_tts":
+    if not _voice_is_local_provider(profile.provider_type):
         _require_api_key_for_create(profile.api_key, "配音 API")
     encrypted_key = encrypt_api_key(profile.api_key)
     db_profile = VoiceProviderProfile(
@@ -634,7 +646,7 @@ async def update_voice_profile(profile_id: int, profile: ProfileUpdate, db: Sess
     db_profile.base_url = profile.base_url
     if profile.api_key is not None and profile.api_key.strip():
         db_profile.api_key_encrypted = encrypt_api_key(profile.api_key)
-    elif profile.provider_type != "local_tts":
+    elif not _voice_is_local_provider(profile.provider_type):
         _require_api_key_for_update(db_profile.api_key_encrypted, "配音 API")
     else:
         db_profile.api_key_encrypted = encrypt_api_key("")
