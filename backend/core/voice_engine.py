@@ -38,6 +38,8 @@ def provider_audio_format(provider_type: str, settings: dict[str, Any], model: s
     if normalized_provider == "gpt_sovits":
         value = str((settings or {}).get("format") or (settings or {}).get("gpt_sovits_media_type") or "wav").lower()
         return value if value in {"wav", "ogg", "aac"} else "wav"
+    if normalized_provider == "index_tts2":
+        return "wav"
     if normalized_provider == "xiaomi_mimo_tts":
         value = str((settings or {}).get("format") or "wav").lower()
         return value if value in {"wav", "mp3", "pcm", "pcm16"} else "wav"
@@ -168,6 +170,8 @@ class VoiceEngine:
             return await self._generate_local_tts_command(text, output_path, voice, base_url, model, settings)
         if provider_type == "gpt_sovits":
             return await self._generate_gpt_sovits_tts(text, output_path, voice, base_url, settings)
+        if provider_type == "index_tts2":
+            return await self._generate_index_tts2_tts(text, output_path, voice, base_url, settings)
         if provider_type == "custom_tts":
             return await self._generate_openai_tts(text, output_path, voice, api_key, base_url, model, settings, provider_type)
 
@@ -913,6 +917,160 @@ class VoiceEngine:
                 raise FileNotFoundError(f"GPT-SoVITS 参考音频不存在: {resolved}")
             return resolved
         raise ValueError("GPT-SoVITS 需要填写参考音频路径，或在说话人 voice 中填写本地音频路径")
+
+    async def _generate_index_tts2_tts(
+        self,
+        text: str,
+        output_path: str,
+        voice: str,
+        base_url: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """调用 IndexTTS2 本地 Python 项目生成配音"""
+        repo_dir = self._index_tts2_repo_dir(base_url, settings)
+        speaker_audio_path = self._index_tts2_speaker_audio_path(voice, settings)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        text_file = f"{output_path}.text.txt"
+        with open(text_file, "w", encoding="utf-8") as file:
+            file.write(text)
+
+        command = self._build_index_tts2_command(
+            text_file=text_file,
+            output_path=output_path,
+            repo_dir=repo_dir,
+            speaker_audio_path=speaker_audio_path,
+            settings=settings,
+        )
+        timeout_seconds = max(60, min(7200, self._int(settings.get("index_tts2_timeout_seconds"), 1800)))
+        logger.info(f"执行 IndexTTS2 本地生成: output={output_path}")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            command,
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env=self._index_tts2_env(repo_dir),
+        )
+        if result.returncode != 0:
+            stdout = self._decode_process_bytes(result.stdout)
+            stderr = self._decode_process_bytes(result.stderr)
+            raise RuntimeError(f"IndexTTS2 生成失败: {stderr or stdout or f'退出码 {result.returncode}'}")
+        if not os.path.exists(output_path):
+            stdout = self._decode_process_bytes(result.stdout)
+            stderr = self._decode_process_bytes(result.stderr)
+            raise RuntimeError(f"IndexTTS2 未生成输出文件: {output_path}；{stderr or stdout}".strip())
+        logger.info(f"IndexTTS2 生成完成: {output_path}")
+        return output_path
+
+    def _build_index_tts2_command(
+        self,
+        *,
+        text_file: str,
+        output_path: str,
+        repo_dir: str,
+        speaker_audio_path: str,
+        settings: dict[str, Any],
+    ) -> list[str]:
+        """构造 IndexTTS2 桥接脚本命令，使用列表参数避免中文路径和空格转义问题"""
+        bridge_path = str(settings.get("index_tts2_bridge_path") or "").strip()
+        if not bridge_path:
+            bridge_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index_tts2_bridge.py")
+        command = [
+            *self._index_tts2_python_command_prefix(settings),
+            bridge_path,
+            "--repo-dir", repo_dir,
+            "--text-file", text_file,
+            "--output", output_path,
+            "--speaker-audio", speaker_audio_path,
+            "--model-dir", str(settings.get("index_tts2_model_dir") or "checkpoints").strip() or "checkpoints",
+            "--max-text-tokens-per-segment", str(self._int(settings.get("index_tts2_max_text_tokens_per_segment"), 120)),
+            "--max-mel-tokens", str(self._int(settings.get("index_tts2_max_mel_tokens"), 1500)),
+            "--top-p", str(self._float(settings.get("index_tts2_top_p"), 0.8)),
+            "--top-k", str(self._int(settings.get("index_tts2_top_k"), 30)),
+            "--temperature", str(self._float(settings.get("index_tts2_temperature"), 0.8)),
+            "--length-penalty", str(self._float(settings.get("index_tts2_length_penalty"), 0.0)),
+            "--num-beams", str(self._int(settings.get("index_tts2_num_beams"), 3)),
+            "--repetition-penalty", str(self._float(settings.get("index_tts2_repetition_penalty"), 10.0)),
+            "--emo-alpha", str(self._float(settings.get("index_tts2_emo_alpha"), 1.0)),
+            "--emo-method", str(settings.get("index_tts2_emo_method") or "speaker"),
+        ]
+        cfg_path = str(settings.get("index_tts2_cfg_path") or "").strip()
+        if cfg_path:
+            command.extend(["--cfg-path", cfg_path])
+        emo_audio_path = str(settings.get("index_tts2_emo_audio_path") or "").strip()
+        if emo_audio_path:
+            command.extend(["--emo-audio", emo_audio_path])
+        emo_text = str(settings.get("index_tts2_emo_text") or settings.get("style_prompt") or "").strip()
+        if emo_text:
+            command.extend(["--emo-text", emo_text])
+        emo_vector = str(settings.get("index_tts2_emo_vector") or "").strip()
+        if emo_vector:
+            command.extend(["--emo-vector", emo_vector])
+        if self._bool_value(settings.get("index_tts2_do_sample"), True):
+            command.append("--do-sample")
+        if self._bool_value(settings.get("index_tts2_use_fp16"), False):
+            command.append("--use-fp16")
+        if self._bool_value(settings.get("index_tts2_use_cuda_kernel"), False):
+            command.append("--use-cuda-kernel")
+        if self._bool_value(settings.get("index_tts2_use_deepspeed"), False):
+            command.append("--use-deepspeed")
+        if self._bool_value(settings.get("index_tts2_use_random"), False):
+            command.append("--use-random")
+        return command
+
+    def _index_tts2_python_command_prefix(self, settings: dict[str, Any]) -> list[str]:
+        """解析 IndexTTS2 Python 启动命令，兼容 python.exe、uv 和带参数命令"""
+        raw_value = str(settings.get("index_tts2_python_path") or "python").strip() or "python"
+        direct_path = raw_value.strip('"')
+        executable_name = os.path.basename(direct_path).lower()
+        if executable_name in {"uv", "uv.exe"}:
+            return [direct_path, "run", "python"]
+        if os.path.exists(os.path.expanduser(direct_path)):
+            return [os.path.abspath(os.path.expanduser(direct_path))]
+        try:
+            parts = shlex.split(raw_value, posix=os.name != "nt")
+        except ValueError:
+            parts = [raw_value]
+        if len(parts) == 1 and os.path.basename(parts[0]).lower() in {"uv", "uv.exe"}:
+            return [parts[0], "run", "python"]
+        return parts or ["python"]
+
+    def _index_tts2_repo_dir(self, base_url: str, settings: dict[str, Any]) -> str:
+        """读取 IndexTTS2 项目目录；本地渠道把 Base URL 字段复用为项目目录"""
+        repo_dir = str(settings.get("index_tts2_repo_dir") or base_url or "").strip()
+        if not repo_dir:
+            raise ValueError("IndexTTS2 需要填写项目目录，例如 D:\\tools\\index-tts")
+        resolved = os.path.abspath(os.path.expanduser(repo_dir))
+        if not os.path.isdir(resolved):
+            raise FileNotFoundError(f"IndexTTS2 项目目录不存在: {resolved}")
+        return resolved
+
+    def _index_tts2_speaker_audio_path(self, voice: str, settings: dict[str, Any]) -> str:
+        """读取 IndexTTS2 发音参考音频路径，支持全局配置或说话人 voice 覆盖"""
+        candidates: list[str] = []
+        voice_value = str(voice or "").strip()
+        if voice_value.startswith("index_tts2_ref:"):
+            candidates.append(voice_value.split(":", 1)[1].strip())
+        elif voice_value.startswith("spk_audio_prompt:"):
+            candidates.append(voice_value.split(":", 1)[1].strip())
+        elif voice_value and os.path.exists(os.path.expanduser(voice_value)):
+            candidates.append(voice_value)
+        candidates.append(str(settings.get("index_tts2_speaker_audio_path") or "").strip())
+        for candidate in candidates:
+            if not candidate:
+                continue
+            resolved = os.path.abspath(os.path.expanduser(candidate))
+            if not os.path.exists(resolved):
+                raise FileNotFoundError(f"IndexTTS2 发音参考音频不存在: {resolved}")
+            return resolved
+        raise ValueError("IndexTTS2 需要填写发音参考音频路径，或在说话人 voice 中填写本地音频路径")
+
+    def _index_tts2_env(self, repo_dir: str) -> dict[str, str]:
+        """为 IndexTTS2 子进程补充项目路径和 UTF-8 环境"""
+        env = self._local_tts_env()
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = repo_dir if not existing_pythonpath else f"{repo_dir}{os.pathsep}{existing_pythonpath}"
+        return env
 
     def _render_local_tts_command(
         self,

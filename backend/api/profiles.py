@@ -148,7 +148,7 @@ def _voice_requires_api_key(provider_type: str) -> bool:
 
 def _voice_is_local_provider(provider_type: str) -> bool:
     """判断配音渠道是否完全在本地运行，不需要远程密钥"""
-    return provider_type in {"local_tts", "gpt_sovits"}
+    return provider_type in {"local_tts", "gpt_sovits", "index_tts2"}
 
 
 def _has_saved_api_key(encrypted_key: str) -> bool:
@@ -288,6 +288,9 @@ def _default_voice_models(provider_type: str) -> list[TextModelOption]:
             ("gpt-sovits-v2", "GPT-SoVITS 本地服务"),
             ("gpt-sovits-v3", "GPT-SoVITS V3/V4 本地服务"),
         ],
+        "index_tts2": [
+            ("index-tts2", "IndexTTS2 本地模型"),
+        ],
         "custom_tts": [],
     }
     return [TextModelOption(id=model_id, label=label, owned_by=provider_type) for model_id, label in defaults.get(provider_type, [])]
@@ -364,6 +367,16 @@ async def _test_voice_profile(profile: VoiceProviderProfile, api_key: str) -> No
             raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
     elif profile.provider_type == "gpt_sovits":
         base_url = profile.base_url.strip() or "http://127.0.0.1:9880"
+    elif profile.provider_type == "index_tts2":
+        base_url = str(settings.get("index_tts2_repo_dir") or profile.base_url or "").strip()
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请填写 IndexTTS2 项目目录")
+        voice_value = str(settings.get("voice") or "").strip()
+        speaker_audio = str(settings.get("index_tts2_speaker_audio_path") or "").strip()
+        if voice_value.startswith("index_tts2_ref:"):
+            speaker_audio = voice_value.split(":", 1)[1].strip() or speaker_audio
+        if not speaker_audio:
+            raise HTTPException(status_code=400, detail="请填写 IndexTTS2 发音参考音频")
     elif not profile.base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
     if _voice_requires_api_key(profile.provider_type) and not api_key.strip():

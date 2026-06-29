@@ -161,6 +161,14 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(provider_audio_format("gpt_sovits", {"format": "mp3"}, ""), "wav")
         self.assertEqual(provider_audio_format("gpt_sovits", {"format": "ogg"}, ""), "ogg")
 
+    def test_fetch_index_tts2_models_does_not_require_url_or_key(self):
+        """IndexTTS2 本地模型列表不需要 Base URL 和 API Key"""
+        models, source = asyncio.run(_fetch_voice_models("index_tts2", "", ""))
+
+        self.assertEqual(source, "local")
+        self.assertEqual([model.id for model in models], ["index-tts2"])
+        self.assertEqual(provider_audio_format("index_tts2", {"format": "mp3"}, ""), "wav")
+
     def test_local_tts_command_generates_real_audio(self):
         """本地 TTS 命令模板会收到文本文件和输出路径，并生成可读音频"""
         with tempfile.TemporaryDirectory(prefix="local_tts_") as temp_dir:
@@ -267,6 +275,62 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertEqual(kwargs["provider_type"], "gpt_sovits")
         self.assertEqual(kwargs["api_key"], "")
         self.assertEqual(kwargs["base_url"], "http://127.0.0.1:9880")
+
+    def test_test_index_tts2_profile_accepts_local_project_without_api_key(self):
+        """IndexTTS2 测试连接使用本地项目目录和参考音频，不要求 API Key"""
+        profile = VoiceProviderProfile(
+            id=4,
+            name="IndexTTS2",
+            provider_type="index_tts2",
+            base_url="D:/tools/index-tts",
+            voice="index-tts2",
+            extra_params='{"voice":"index_tts2_ref:D:/tmp/ref.wav","format":"wav","index_tts2_speaker_audio_path":"D:/tmp/ref.wav"}',
+        )
+
+        async def run():
+            with patch("backend.api.profiles.VoiceEngine") as engine_class:
+                engine = engine_class.return_value
+                engine.generate_voice = AsyncMock(return_value=os.path.join(os.environ.get("TEMP", "."), "missing.wav"))
+                await _test_voice_profile(profile, "")
+                return engine.generate_voice.call_args.kwargs
+
+        kwargs = asyncio.run(run())
+
+        self.assertEqual(kwargs["provider_type"], "index_tts2")
+        self.assertEqual(kwargs["api_key"], "")
+        self.assertEqual(kwargs["base_url"], "D:/tools/index-tts")
+        self.assertEqual(kwargs["voice"], "index_tts2_ref:D:/tmp/ref.wav")
+
+    def test_build_index_tts2_command_uses_bridge_and_generation_options(self):
+        """IndexTTS2 命令使用桥接脚本、项目目录、参考音频和官方采样参数"""
+        engine = VoiceEngine()
+        command = engine._build_index_tts2_command(
+            text_file="D:/tmp/text.txt",
+            output_path="D:/tmp/out.wav",
+            repo_dir="D:/tools/index-tts",
+            speaker_audio_path="D:/tmp/ref.wav",
+            settings={
+                "index_tts2_python_path": "uv",
+                "index_tts2_model_dir": "checkpoints",
+                "index_tts2_emo_method": "text",
+                "index_tts2_emo_text": "兴奋一点",
+                "index_tts2_top_p": 0.7,
+                "index_tts2_top_k": 20,
+                "index_tts2_temperature": 0.9,
+                "index_tts2_do_sample": True,
+                "index_tts2_use_fp16": True,
+            },
+        )
+
+        self.assertEqual(command[:3], ["uv", "run", "python"])
+        self.assertIn("index_tts2_bridge.py", command[3])
+        self.assertEqual(command[command.index("--repo-dir") + 1], "D:/tools/index-tts")
+        self.assertEqual(command[command.index("--speaker-audio") + 1], "D:/tmp/ref.wav")
+        self.assertEqual(command[command.index("--emo-method") + 1], "text")
+        self.assertEqual(command[command.index("--emo-text") + 1], "兴奋一点")
+        self.assertEqual(command[command.index("--top-p") + 1], "0.7")
+        self.assertIn("--do-sample", command)
+        self.assertIn("--use-fp16", command)
 
     def test_transient_voice_profile_uses_unsaved_form_fields(self):
         """未保存表单测试时使用当前填写的渠道、地址和模型"""

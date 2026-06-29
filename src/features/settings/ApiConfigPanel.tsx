@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
-import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, type FieldOption } from '@/components/fields'
+import { TextField, SecretField, SelectField, NumberField, SliderField, SegmentedField, SwitchField, ModelPickerField, type FieldOption } from '@/components/fields'
 
 /** 文本 API 渠道配置 */
 const TEXT_PROVIDERS = [
@@ -344,7 +344,7 @@ export function ApiConfigPanel({ compact = false }: { compact?: boolean }) {
               onToggleVisible={() => setShowApiKey((current) => !current)}
               onChange={(v) => setProfileForm({ ...profileForm, api_key: v })}
             />
-            <SelectField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或填写自定义模型" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
+            <ModelPickerField label="模型" value={profileForm.model} options={modelOpts} placeholder="先获取模型或直接填写模型名" onChange={(v) => setProfileForm({ ...profileForm, model: v, custom_model: '' })} />
             <TextField label="自定义模型" value={profileForm.custom_model} placeholder={profileForm.model || provider.model || '例如 gpt-4.1-mini'} onChange={(v) => setProfileForm({ ...profileForm, custom_model: v })} />
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-3">

@@ -1,6 +1,6 @@
 // src/components/fields.tsx
 // 统一设置字段组件 - 基于 shadcn 封装，替换各设置面板各自实现的原生 input/select/checkbox 伪组件
-import type { ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -113,6 +113,39 @@ export function SelectField({ label, value, options, onChange, description, plac
           {normalizedOptions.map(([optionValue, optionLabel]) => <SelectItem key={optionValue} value={optionValue}>{optionLabel}</SelectItem>)}
         </SelectContent>
       </Select>
+    </Field>
+  )
+}
+
+/** 模型输入框：保留原生候选列表，避免大量模型在弹层里渲染导致下拉闪退 */
+export function ModelPickerField({ label, value, options, onChange, description, placeholder, maxOptions = 300 }: {
+  label: string
+  value: string
+  options: FieldOption[]
+  onChange: (v: string) => void
+  description?: string
+  placeholder?: string
+  maxOptions?: number
+}) {
+  const listId = useId()
+  const dedupedOptions = options.filter((item, index, list) => list.findIndex((candidate) => candidate[0] === item[0]) === index)
+  const visibleOptions = dedupedOptions.slice(0, maxOptions)
+  const helper = description || (dedupedOptions.length > maxOptions ? `模型较多，仅展示前 ${maxOptions} 个候选；仍可直接输入任意模型名。` : undefined)
+
+  return (
+    <Field label={label} description={helper}>
+      <Input
+        value={value}
+        list={listId}
+        placeholder={placeholder}
+        autoComplete="off"
+        onChange={(event) => onChange(event.target.value)}
+      />
+      <datalist id={listId}>
+        {visibleOptions.map(([optionValue, optionLabel]) => (
+          <option key={optionValue} value={optionValue} label={optionLabel} />
+        ))}
+      </datalist>
     </Field>
   )
 }

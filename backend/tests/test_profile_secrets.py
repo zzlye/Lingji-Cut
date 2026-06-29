@@ -113,6 +113,23 @@ class ProfileSecretTests(unittest.TestCase):
         self.assertEqual(result.base_url, "")
         self.assertEqual(len(db.voice_profiles), 1)
 
+    def test_create_index_tts2_voice_profile_allows_empty_api_key(self):
+        """IndexTTS2 本地配音配置不需要 API Key"""
+        db = FakeDb()
+
+        result = asyncio.run(create_voice_profile(ProfileCreate(
+            name="IndexTTS2",
+            provider_type="index_tts2",
+            base_url="D:/tools/index-tts",
+            api_key="",
+            model="index-tts2",
+            extra_params='{"index_tts2_speaker_audio_path":"D:/tmp/ref.wav"}',
+        ), db))
+
+        self.assertEqual(result.provider_type, "index_tts2")
+        self.assertEqual(result.base_url, "D:/tools/index-tts")
+        self.assertEqual(len(db.voice_profiles), 1)
+
     def test_remote_voice_profile_still_rejects_empty_api_key(self):
         """远程配音配置仍然不允许新建空密钥配置"""
         with self.assertRaises(HTTPException) as context:
@@ -137,6 +154,23 @@ class ProfileSecretTests(unittest.TestCase):
 
         self.assertEqual(result.provider_type, "local_tts")
         self.assertEqual(result.base_url, "")
+
+    def test_update_index_tts2_voice_profile_can_clear_api_key(self):
+        """远程配置改成 IndexTTS2 时可以清空旧密钥"""
+        profile = VoiceProviderProfile(id=3, name="旧配音", provider_type="openai_tts", base_url="https://example.com", api_key_encrypted=encrypt_api_key("sk-voice"), voice="tts")
+        db = FakeDb(voice_profiles=[profile])
+
+        result = asyncio.run(update_voice_profile(3, ProfileUpdate(
+            name="IndexTTS2",
+            provider_type="index_tts2",
+            base_url="D:/tools/index-tts",
+            api_key=None,
+            model="index-tts2",
+            extra_params='{"index_tts2_speaker_audio_path":"D:/tmp/ref.wav"}',
+        ), db))
+
+        self.assertEqual(result.provider_type, "index_tts2")
+        self.assertEqual(result.base_url, "D:/tools/index-tts")
 
     def test_update_text_profile_requires_key_when_old_secret_is_empty(self):
         """旧配置没有密钥时，更新不能继续留空"""

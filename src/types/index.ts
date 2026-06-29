@@ -436,6 +436,33 @@ export interface VoiceGenerateSettings {
   gpt_sovits_super_sampling?: boolean
   gpt_sovits_streaming_mode?: number
   gpt_sovits_seed?: number
+  index_tts2_repo_dir?: string
+  index_tts2_python_path?: string
+  index_tts2_model_dir?: string
+  index_tts2_cfg_path?: string
+  index_tts2_bridge_path?: string
+  index_tts2_speaker_audio_path?: string
+  index_tts2_speaker_audio_name?: string
+  index_tts2_emo_method?: 'speaker' | 'audio' | 'vector' | 'text' | string
+  index_tts2_emo_audio_path?: string
+  index_tts2_emo_audio_name?: string
+  index_tts2_emo_text?: string
+  index_tts2_emo_vector?: string
+  index_tts2_emo_alpha?: number
+  index_tts2_max_text_tokens_per_segment?: number
+  index_tts2_max_mel_tokens?: number
+  index_tts2_top_p?: number
+  index_tts2_top_k?: number
+  index_tts2_temperature?: number
+  index_tts2_length_penalty?: number
+  index_tts2_num_beams?: number
+  index_tts2_repetition_penalty?: number
+  index_tts2_do_sample?: boolean
+  index_tts2_use_random?: boolean
+  index_tts2_use_fp16?: boolean
+  index_tts2_use_cuda_kernel?: boolean
+  index_tts2_use_deepspeed?: boolean
+  index_tts2_timeout_seconds?: number
   retry_count: number
   retry_interval_ms: number
 }

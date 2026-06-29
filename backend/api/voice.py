@@ -145,6 +145,9 @@ VOICE_CATALOGS = {
     "gpt_sovits": [
         {"id": "gpt_sovits_ref", "name": "参考音频", "language": "中文/多语言", "style": "使用本地参考音频克隆音色", "gender": "neutral"},
     ],
+    "index_tts2": [
+        {"id": "index_tts2_ref", "name": "参考音频", "language": "中文/多语言", "style": "使用本地参考音频克隆音色，可单独控制情绪", "gender": "neutral"},
+    ],
     "custom_tts": [
         {"id": "custom", "name": "自定义 voice id", "language": "自定义", "style": "中性、手动填写", "gender": "neutral"},
     ],
@@ -333,6 +336,10 @@ async def preview_voice(request: VoicePreviewRequest, db: Session = Depends(get_
             raise HTTPException(status_code=400, detail="请填写本地 TTS 命令模板")
     elif provider_type == "gpt_sovits":
         base_url = base_url.strip() or "http://127.0.0.1:9880"
+    elif provider_type == "index_tts2":
+        base_url = str(settings.get("index_tts2_repo_dir") or base_url or "").strip()
+        if not base_url:
+            raise HTTPException(status_code=400, detail="请填写 IndexTTS2 项目目录")
     elif not base_url.strip():
         raise HTTPException(status_code=400, detail="请填写 Base URL")
 
