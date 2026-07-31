@@ -22,8 +22,8 @@ const VOICE_NATURAL_MODE_MIGRATED_KEY = 'voice_natural_mode_migrated'
 /** 严格时间轴模式迁移标记，避免旧版自然分组继续造成逐行字幕错位 */
 const VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY = 'voice_strict_timeline_mode_migrated'
 
-/** 尾音避让默认值迁移标记，避免旧缓存继续把 160ms 发给后端 */
-const VOICE_GAP_300_MIGRATED_KEY = 'voice_gap_300_migrated'
+/** 逐条配音句间留白迁移标记，避免旧缓存继续使用过长的默认停顿 */
+const VOICE_GAP_80_MIGRATED_KEY = 'voice_gap_80_migrated'
 
 /** 旧版默认风格偏平淡，升级时只替换这些精确默认值 */
 const LEGACY_DEFAULT_VOICE_STYLE_PROMPTS: Record<string, string> = {
@@ -76,7 +76,7 @@ export const DEFAULT_AUTOMATION_PREFERENCES: AutomationPreferences = {
   voice_window_max_ms: 12000,
   voice_window_gap_ms: 800,
   voice_concurrency: 2,
-  voice_min_gap_ms: 300,
+  voice_min_gap_ms: 80,
   multi_speaker_enabled: false,
   voice_speakers: [
     { id: 'narrator', label: '旁白', voice: 'alloy', style_prompt: '用有画面感的游戏解说口吻，语气有起伏；遇到转折、危险、惊讶时加强重音，句尾自然收住，不要像朗读新闻。', sample_text: '旁白负责带出紧张感、解释画面，并自然推进节奏。' },
@@ -206,11 +206,11 @@ function normalizeGeminiNumber(value: unknown, defaultValue: number, min: number
   return Math.min(max, Math.max(min, Math.round(safeValue * factor) / factor))
 }
 
-/** 规范尾音避让；旧版默认 160ms 会自动迁移到 300ms，用户设置的其它数值保留 */
+/** 规范句间留白；旧版 160ms/300ms 默认值自动迁移到更自然的 80ms */
 function normalizeVoiceMinGapMs(value: unknown, migrated: boolean): number {
   const hasValue = value !== undefined && value !== null && String(value).trim() !== ''
   const numberValue = Math.round(Number(value))
-  if (!migrated && (!hasValue || numberValue === 160)) {
+  if (!migrated && (!hasValue || numberValue === 160 || numberValue === 300)) {
     return DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms
   }
   return normalizeVoiceNumber(value, DEFAULT_AUTOMATION_PREFERENCES.voice_min_gap_ms, 0, 2000)
@@ -278,7 +278,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
     const audioReplaceWasExplicitlyChosen = parsed[AUDIO_REPLACE_CONFIRMED_KEY] === true
     const voiceModeWasMigrated = parsed[VOICE_NATURAL_MODE_MIGRATED_KEY] === true
     const strictTimelineModeWasMigrated = parsed[VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY] === true
-    const voiceGapWasMigrated = parsed[VOICE_GAP_300_MIGRATED_KEY] === true
+    const voiceGapWasMigrated = parsed[VOICE_GAP_80_MIGRATED_KEY] === true
     const voiceMode = normalizeVoiceMode(parsed.voice_mode)
     const voiceSpeakers = normalizeVoiceSpeakers(parsed.voice_speakers, parsed.voice_presets)
     const shouldPersistVoiceMigration = hasLegacyDefaultVoiceStylePrompts(parsed.voice_presets) || hasLegacyDefaultVoiceStylePrompts(parsed.voice_speakers)
@@ -329,7 +329,7 @@ export function loadAutomationPreferences(): AutomationPreferences {
         ...preferences,
         [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
         [VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY]: true,
-        [VOICE_GAP_300_MIGRATED_KEY]: true,
+        [VOICE_GAP_80_MIGRATED_KEY]: true,
       }))
     }
     return preferences
@@ -350,7 +350,7 @@ export function saveAutomationPreferences(updates: Partial<AutomationPreferences
       ...next,
       [VOICE_NATURAL_MODE_MIGRATED_KEY]: true,
       [VOICE_STRICT_TIMELINE_MODE_MIGRATED_KEY]: true,
-      [VOICE_GAP_300_MIGRATED_KEY]: true,
+      [VOICE_GAP_80_MIGRATED_KEY]: true,
       ...(Object.prototype.hasOwnProperty.call(updates, 'enable_voice') ? { [VOICE_OPTIONAL_CONFIRMED_KEY]: true } : {}),
       ...(Object.prototype.hasOwnProperty.call(updates, 'audio_mode') ? { [AUDIO_REPLACE_CONFIRMED_KEY]: updates.audio_mode === 'replace' } : {}),
     }

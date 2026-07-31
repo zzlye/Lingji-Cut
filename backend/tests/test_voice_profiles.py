@@ -414,6 +414,25 @@ class VoiceProfileTests(unittest.TestCase):
         self.assertNotIn("modalities", payload)
         self.assertEqual(payload["messages"][1]["content"], "小米配音测试")
 
+    def test_xiaomi_mimo_context_stays_out_of_spoken_text(self):
+        """前后文只进入小米的风格消息，assistant 正文必须保持当前字幕不变"""
+        settings = VoiceEngine()._settings_with_timing_prompt(
+            {"format": "wav"},
+            "自然对话",
+            1800,
+            previous_text="上一句内容",
+            next_text="下一句内容",
+        )
+        payload = self._capture_xiaomi_payload(
+            model="mimo-v2.5-tts",
+            voice="白桦",
+            settings=settings,
+        )
+
+        self.assertIn("上一句仅作语气参考：上一句内容", payload["messages"][0]["content"])
+        self.assertIn("下一句仅作语气参考：下一句内容", payload["messages"][0]["content"])
+        self.assertEqual(payload["messages"][1]["content"], "小米配音测试")
+
     def test_xiaomi_mimo_voice_design_uses_prompt_without_audio_voice(self):
         """VoiceDesign 使用文字音色描述，不再把描述塞进 audio.voice"""
         payload = self._capture_xiaomi_payload(
@@ -553,6 +572,15 @@ class VoiceProfileTests(unittest.TestCase):
                 ))
 
         self.assertEqual(captured_payloads[0]["response_format"], "mp3")
+
+    def test_openai_legacy_tts_models_skip_unsupported_instructions(self):
+        """tts-1 系列不支持风格指令，不能因上下文提示导致兼容接口拒绝请求"""
+        engine = VoiceEngine()
+
+        self.assertFalse(engine._openai_tts_supports_instructions("tts-1"))
+        self.assertFalse(engine._openai_tts_supports_instructions("tts-1-hd"))
+        self.assertTrue(engine._openai_tts_supports_instructions("gpt-4o-mini-tts"))
+        self.assertTrue(engine._openai_tts_supports_instructions("mimo-v2.5-tts"))
 
     def test_custom_openai_compatible_gemini_model_uses_openai_route(self):
         """自定义 OpenAI 兼容渠道必须走 audio/speech，模型名不能改成 Gemini 协议"""

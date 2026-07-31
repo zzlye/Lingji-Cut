@@ -231,8 +231,8 @@ class AutomationRunRequest(BaseModel):
     voice_window_max_ms: int = 12000
     voice_window_gap_ms: int = 800
     voice_concurrency: int = 2
-    voice_min_gap_ms: int = 300
-    # 兼容旧前端或旧任务缓存，进入一键流程后会统一迁移到连续语义窗口参数。
+    voice_min_gap_ms: int = 80
+    # 兼容旧前端或旧任务缓存；逐条配音只读取并发和句间留白，不再用这些参数合并正文。
     voice_batch_size: int = 16
     voice_batch_chars: int = 1800
     voice_group_size: int = 6
@@ -3104,15 +3104,13 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
         try:
             _check_control(db, job, voice_task)
             settings = _load_profile_settings(voice_profile)
-            # 手动语速已从界面移除；一键流程统一使用自然语速，由模型根据字幕时长自行贴近。
+            # 手动语速已从界面移除；一键流程只给模型参考时长，不再对成品音频做强制变速。
             settings["speed"] = 1.0
-            # 一键流程只保留连续语义窗口配音：同音色短停顿合并生成，窗口之间再按真实音频时长顺延。
-            settings["voice_window_size"] = max(1, min(20, int(request.voice_window_size or 8)))
-            settings["voice_window_chars"] = max(40, min(1200, int(request.voice_window_chars or 320)))
-            settings["voice_window_max_ms"] = max(1500, min(30000, int(request.voice_window_max_ms or 12000)))
-            settings["voice_window_gap_ms"] = max(0, min(3000, int(request.voice_window_gap_ms if request.voice_window_gap_ms is not None else 800)))
+            settings["voice_speed_accept"] = 1.0
+            settings["voice_auto_speed_max"] = 1.0
+            # 每条字幕独立生成，API 并发只用于加快调度，不能合并正文或改变句子边界。
             settings["voice_concurrency"] = max(1, min(8, int(request.voice_concurrency or settings.get("voice_concurrency") or 2)))
-            settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 300)))
+            settings["voice_min_gap_ms"] = max(0, min(2000, int(request.voice_min_gap_ms if request.voice_min_gap_ms is not None else settings.get("voice_min_gap_ms") or 80)))
             voice = settings.get("voice") or voice_profile.voice or "alloy"
             # 配音文案仍来自最终中文字幕，避免配音内容和字幕内容分家。
             voice_text_source = subtitle_text
@@ -3139,7 +3137,7 @@ def _run_automation_sync(request: AutomationRunRequest, db: Session, job: Option
                     audio_path = os.path.join(paths["output_dir"], f"{video.video_id}_voice_smart.{output_ext}")
 
                     def on_voice_progress(progress: float) -> None:
-                        """同步连续窗口配音进度到后台任务"""
+                        """同步逐条 API 配音进度到后台任务"""
                         _check_control(db, job, voice_task)
                         voice_task.progress = progress
                         db.commit()

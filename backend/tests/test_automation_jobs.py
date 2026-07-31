@@ -3028,10 +3028,10 @@ class AutomationJobTests(unittest.TestCase):
             self.assertEqual(fake_processor.burn_calls[0]["video_path"], downloaded_path)
             self.assertEqual(fake_processor.burn_calls[1]["video_path"], os.path.join(temp_dir, "merged.mp4"))
 
-    def test_automation_voice_uses_continuous_window_timeline_by_default(self):
-        """一键配音默认使用连续语义窗口，避免逐句生成造成断裂和重叠"""
+    def test_automation_voice_uses_line_stable_timeline_by_default(self):
+        """一键配音默认使用逐条稳定边界，并发调度不能合并字幕正文"""
         class CapturingVoiceEngine:
-            """记录默认连续窗口配音输入，避免真实调用配音接口"""
+            """记录默认逐条时间轴配音输入，避免真实调用配音接口"""
 
             def __init__(self):
                 self.segments: list[dict] = []
@@ -3044,7 +3044,7 @@ class AutomationJobTests(unittest.TestCase):
                 raise AssertionError("一键流程不应调用旧分组入口")
 
             async def generate_batched_timed_voice_track(self, segments, output_path, voice_selector=None, style_selector=None, settings=None, progress_callback=None, **_kwargs):
-                """模拟默认连续窗口时间轴配音"""
+                """模拟默认逐条时间轴配音"""
                 self.segments = segments
                 self.settings = settings or {}
                 if voice_selector:
@@ -3147,17 +3147,18 @@ class AutomationJobTests(unittest.TestCase):
         self.assertEqual([segment["text"] for segment in voice_engine.segments], ["第一句", "第二句"])
         self.assertEqual(voice_engine.voices, ["alloy", "nova"])
         self.assertEqual(voice_engine.styles, ["解说风格", "对话风格"])
-        self.assertEqual(voice_engine.settings["voice_window_size"], 5)
-        self.assertEqual(voice_engine.settings["voice_window_chars"], 900)
-        self.assertEqual(voice_engine.settings["voice_window_max_ms"], 9000)
-        self.assertEqual(voice_engine.settings["voice_window_gap_ms"], 600)
+        self.assertNotIn("voice_window_size", voice_engine.settings)
+        self.assertNotIn("voice_window_chars", voice_engine.settings)
+        self.assertNotIn("voice_window_max_ms", voice_engine.settings)
+        self.assertNotIn("voice_window_gap_ms", voice_engine.settings)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
         self.assertEqual(voice_engine.settings["speed"], 1.0)
+        self.assertEqual(voice_engine.settings["voice_auto_speed_max"], 1.0)
         self.assertEqual(fake_processor.merge_calls[0]["mode"], "background")
         self.assertEqual(fake_processor.merge_calls[0]["volume_ratio"], 1.0)
 
     def test_automation_voice_legacy_grouped_mode_uses_smart_timeline(self):
-        """旧分组参数会被兼容接收，但一键配音统一走连续语义窗口"""
+        """旧分组参数会被兼容接收，但一键配音统一走逐条稳定时间轴"""
         class CapturingGroupedVoiceEngine:
             """记录分组配音输入，避免真实调用配音接口"""
 
@@ -3167,10 +3168,10 @@ class AutomationJobTests(unittest.TestCase):
 
             async def generate_grouped_timed_voice_track(self, segments, output_path, settings=None, progress_callback=None, **_kwargs):
                 """旧分组模式不应再被一键流程调用"""
-                raise AssertionError("旧分组模式应迁移到连续语义窗口")
+                raise AssertionError("旧分组模式应迁移到逐条稳定时间轴")
 
             async def generate_batched_timed_voice_track(self, *_args, **_kwargs):
-                """模拟连续语义窗口配音"""
+                """模拟逐条稳定时间轴配音"""
                 segments = _kwargs.get("segments") if "segments" in _kwargs else _args[0]
                 output_path = _kwargs.get("output_path") if "output_path" in _kwargs else _args[1]
                 self.segments = segments
@@ -3259,10 +3260,10 @@ class AutomationJobTests(unittest.TestCase):
         self.assertNotIn("voice_group_chars", voice_engine.settings)
         self.assertNotIn("voice_group_max_seconds", voice_engine.settings)
         self.assertNotIn("voice_group_gap_ms", voice_engine.settings)
-        self.assertEqual(voice_engine.settings["voice_window_size"], 8)
-        self.assertEqual(voice_engine.settings["voice_window_chars"], 320)
-        self.assertEqual(voice_engine.settings["voice_window_max_ms"], 12000)
-        self.assertEqual(voice_engine.settings["voice_window_gap_ms"], 800)
+        self.assertNotIn("voice_window_size", voice_engine.settings)
+        self.assertNotIn("voice_window_chars", voice_engine.settings)
+        self.assertNotIn("voice_window_max_ms", voice_engine.settings)
+        self.assertNotIn("voice_window_gap_ms", voice_engine.settings)
         self.assertEqual(voice_engine.settings["voice_concurrency"], 3)
 
     def test_automation_voice_invalid_audio_mode_falls_back_to_background(self):

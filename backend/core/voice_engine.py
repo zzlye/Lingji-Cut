@@ -188,7 +188,7 @@ class VoiceEngine:
         output_path: str,
         provider_type: str = "openai_tts",
         voice: str = "alloy",
-        # 多人对话配音时按批次首段的说话人挑选音色；批次会避免跨音色合并。
+        # 多人对话配音时按每条字幕的说话人挑选音色。
         voice_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         style_selector: Optional[Callable[[dict[str, Any]], str]] = None,
         api_key: str = "",
@@ -197,7 +197,7 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """兼容旧参数名；真实流程统一走 VideoLingo 式任务表时间轴"""
+        """兼容旧参数名；真实流程统一走逐条音频边界和任务表时间轴"""
         return await self.generate_videolingo_timed_voice_track(
             segments=segments,
             output_path=output_path,
@@ -226,7 +226,7 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """兼容旧分组入口；一键配音不再使用分组混音逻辑"""
+        """兼容旧分组入口；一键配音会逐条生成，不再合并字幕正文"""
         return await self.generate_videolingo_timed_voice_track(
             segments=segments,
             output_path=output_path,
@@ -256,7 +256,7 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """兼容旧串行入口；真实流程统一走 VideoLingo 式任务表时间轴"""
+        """兼容旧串行入口；真实流程统一走逐条音频边界和任务表时间轴"""
         return await self.generate_videolingo_timed_voice_track(
             segments=segments,
             output_path=output_path,
@@ -285,52 +285,39 @@ class VoiceEngine:
         settings: Optional[dict[str, Any]] = None,
         progress_callback: Optional[Callable[[float], None]] = None,
     ) -> str:
-        """智能配音：按连续语义窗口生成音频，再按窗口时间轴拼接整轨"""
-        normalized_segments = self._normalize_timed_segments(segments)
+        """智能配音：逐条生成确定边界的音频，再按真实时长规划整轨"""
+        normalized_segments = sorted(
+            self._normalize_timed_segments(segments),
+            key=lambda item: self._int(item.get("start_ms"), 0),
+        )
         if not normalized_segments:
             raise ValueError("没有可生成配音的字幕分段")
 
         options = dict(settings or {})
         audio_format = self._provider_audio_format(self.resolve_provider_type(provider_type, model), options, model)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        fallback_group_size = min(max(1, self._int(options.get("voice_batch_size"), 8)), 8)
-        group_size = max(1, min(20, self._int(options.get("voice_window_size"), self._int(options.get("voice_group_size"), fallback_group_size))))
-        group_chars = max(40, min(1200, self._int(options.get("voice_window_chars"), self._int(options.get("voice_group_chars"), 320))))
-        raw_window_ms = options.get("voice_window_max_ms")
-        if raw_window_ms is None:
-            raw_window_seconds = options.get("voice_group_max_seconds")
-            raw_window_ms = int(self._float(raw_window_seconds, 12.0) * 1000) if raw_window_seconds is not None else 12000
-        group_window_ms = max(1500, min(30000, self._int(raw_window_ms, 12000)))
-        raw_gap_ms = options.get("voice_window_gap_ms")
-        if raw_gap_ms is None:
-            raw_gap_ms = options.get("voice_group_gap_ms")
-        group_gap_ms = max(0, min(3000, self._int(raw_gap_ms, 800)))
         concurrency = max(1, min(8, self._int(options.get("voice_concurrency"), 2)))
         semaphore = asyncio.Semaphore(concurrency)
-        voice_groups = self._group_timed_segments(
+        voice_jobs = self._build_timed_voice_jobs(
             normalized_segments,
-            group_size=group_size,
-            max_chars=group_chars,
-            max_window_ms=group_window_ms,
-            max_gap_ms=group_gap_ms,
             voice_selector=voice_selector,
             style_selector=style_selector,
             default_voice=voice,
         )
-        if not voice_groups:
-            raise ValueError("没有可生成配音的字幕分组")
+        if not voice_jobs:
+            raise ValueError("没有可生成配音的字幕任务")
 
         # 临时目录跟最终输出放在同一工作区，便于用户排查并避免跨盘移动。
         temp_dir = tempfile.mkdtemp(prefix="voice_videolingo_", dir=os.path.dirname(output_path) or ensure_project_dirs()["output_dir"])
         timed_audio_paths: list[dict[str, Any]] = []
 
-        async def generate_group(index: int, group: dict[str, Any]) -> list[dict[str, Any]]:
-            """按连续字幕窗口生成音频，减少逐句 TTS 的重新开口和机械换气"""
+        async def generate_line(index: int, job: dict[str, Any]) -> dict[str, Any]:
+            """逐条请求 TTS；并发只负责调度，不能合并或改变字幕正文"""
             async with semaphore:
-                generated_items = await self._generate_grouped_voice_items(
-                    group=group,
+                generated_item = await self._generate_timed_voice_item(
+                    job=job,
                     temp_dir=temp_dir,
-                    file_stem=f"window_{index:04d}",
+                    file_stem=f"line_{index:04d}",
                     audio_format=audio_format,
                     provider_type=provider_type,
                     api_key=api_key,
@@ -338,24 +325,31 @@ class VoiceEngine:
                     model=model,
                     settings=options,
                 )
-                for item in generated_items:
-                    item.setdefault("index", index)
-                    item.setdefault("voice", str(group.get("voice") or voice))
-                    item.setdefault("style_prompt", str(group.get("style_prompt") or ""))
-                return generated_items
+                generated_item.setdefault("index", index)
+                generated_item.setdefault("voice", str(job.get("voice") or voice))
+                generated_item.setdefault("style_prompt", str(job.get("style_prompt") or ""))
+                return generated_item
 
         try:
-            total = len(voice_groups)
+            total = len(voice_jobs)
             completed = 0
             tasks = [
-                asyncio.create_task(generate_group(index, group))
-                for index, group in enumerate(voice_groups, 1)
+                asyncio.create_task(generate_line(index, job))
+                for index, job in enumerate(voice_jobs, 1)
             ]
-            for task in asyncio.as_completed(tasks):
-                timed_audio_paths.extend(await task)
-                completed += 1
-                if progress_callback:
-                    progress_callback(10 + completed / max(total, 1) * 70)
+            try:
+                for task in asyncio.as_completed(tasks):
+                    timed_audio_paths.append(await task)
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(10 + completed / max(total, 1) * 70)
+            except BaseException:
+                # 单条请求失败或任务被暂停时，先结束其余并发请求，再清理临时目录。
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
             timed_audio_paths = self._plan_smart_dubbing_timeline(timed_audio_paths, options, temp_dir)
             if progress_callback:
@@ -563,7 +557,7 @@ class VoiceEngine:
             "speed": self._float(settings.get("speed"), 1.0),
         }
         instructions = settings.get("style_prompt")
-        if instructions:
+        if instructions and self._openai_tts_supports_instructions(resolved_model):
             payload["instructions"] = instructions
 
         async with httpx.AsyncClient(timeout=120) as client:
@@ -1333,6 +1327,91 @@ class VoiceEngine:
             chunks.append(current)
         return chunks
 
+    def _build_timed_voice_jobs(
+        self,
+        segments: list[dict[str, Any]],
+        voice_selector: Optional[Callable[[dict[str, Any]], str]],
+        style_selector: Optional[Callable[[dict[str, Any]], str]],
+        default_voice: str,
+    ) -> list[dict[str, Any]]:
+        """为每条字幕建立独立任务，前后文只用于语气衔接，绝不合并朗读正文"""
+        jobs: list[dict[str, Any]] = []
+        for index, segment in enumerate(segments):
+            selected_voice = voice_selector(segment) if voice_selector else default_voice
+            selected_style = style_selector(segment) if style_selector else ""
+            previous_segment = segments[index - 1] if index > 0 else None
+            next_segment = segments[index + 1] if index + 1 < len(segments) else None
+            jobs.append({
+                "segment": dict(segment),
+                "text": str(segment.get("text") or "").strip(),
+                "voice": str(selected_voice or default_voice).strip() or default_voice,
+                "style_prompt": str(selected_style or "").strip(),
+                "previous_text": str((previous_segment or {}).get("text") or "").strip(),
+                "previous_speaker": str((previous_segment or {}).get("speaker") or "").strip(),
+                "next_text": str((next_segment or {}).get("text") or "").strip(),
+                "next_speaker": str((next_segment or {}).get("speaker") or "").strip(),
+            })
+        return [job for job in jobs if job["text"]]
+
+    async def _generate_timed_voice_item(
+        self,
+        job: dict[str, Any],
+        temp_dir: str,
+        file_stem: str,
+        audio_format: str,
+        provider_type: str,
+        api_key: str,
+        base_url: str,
+        model: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """生成一条边界明确的配音，并清理接口常见的首尾空白"""
+        segment = dict(job.get("segment") or {})
+        start_ms = max(0, self._int(segment.get("start_ms"), 0))
+        end_ms = max(start_ms + 1, self._int(segment.get("end_ms"), start_ms + 1))
+        window_ms = end_ms - start_ms
+        raw_path = os.path.join(temp_dir, f"{file_stem}.{audio_format}")
+        line_settings = self._settings_with_timing_prompt(
+            settings,
+            str(job.get("style_prompt") or ""),
+            window_ms,
+            previous_text=str(job.get("previous_text") or ""),
+            previous_speaker=str(job.get("previous_speaker") or ""),
+            next_text=str(job.get("next_text") or ""),
+            next_speaker=str(job.get("next_speaker") or ""),
+        )
+        generated_path = await self.generate_voice(
+            text=str(job.get("text") or ""),
+            output_path=raw_path,
+            provider_type=provider_type,
+            voice=str(job.get("voice") or ""),
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            settings=line_settings,
+        )
+        prepared_path = self._trim_voice_edge_silence(
+            generated_path,
+            temp_dir=temp_dir,
+            suffix=file_stem,
+            settings=settings,
+        )
+        duration_seconds = self._audio_duration_seconds(prepared_path)
+        duration_ms = max(1, int(round((duration_seconds or 0) * 1000)))
+        return {
+            "path": prepared_path,
+            "start_ms": start_ms,
+            "original_start_ms": start_ms,
+            "end_ms": end_ms,
+            "duration_ms": window_ms,
+            "source_duration_ms": duration_ms,
+            "text": str(job.get("text") or ""),
+            "speaker": str(segment.get("speaker") or ""),
+            "voice": str(job.get("voice") or ""),
+            "style_prompt": str(job.get("style_prompt") or ""),
+            "segments": [segment],
+        }
+
     def _batch_timed_segments(
         self,
         segments: list[dict[str, Any]],
@@ -1521,6 +1600,11 @@ class VoiceEngine:
         normalized = self.resolve_provider_type(provider_type)
         return normalized in {"openai_tts", "custom_tts", "minimax_tts"}
 
+    def _openai_tts_supports_instructions(self, model: str) -> bool:
+        """旧版 tts-1 系列不接受 instructions，其余兼容模型保留风格提示"""
+        normalized = str(model or "gpt-4o-mini-tts").strip().lower()
+        return not normalized.startswith("tts-1")
+
     def _settings_with_style_prompt(self, settings: dict[str, Any], style_prompt: str) -> dict[str, Any]:
         """按分段覆盖风格提示；没有角色风格时复用全局设置"""
         normalized_style = str(style_prompt or "").strip()
@@ -1542,18 +1626,46 @@ class VoiceEngine:
         merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
         return merged
 
-    def _settings_with_timing_prompt(self, settings: dict[str, Any], style_prompt: str, window_ms: int) -> dict[str, Any]:
-        """给单条配音追加参考时长提示，优先保证自然完整，不强迫模型硬卡点"""
+    def _settings_with_timing_prompt(
+        self,
+        settings: dict[str, Any],
+        style_prompt: str,
+        window_ms: int,
+        previous_text: str = "",
+        previous_speaker: str = "",
+        next_text: str = "",
+        next_speaker: str = "",
+    ) -> dict[str, Any]:
+        """给单条配音追加上下文和参考时长，正文仍只发送当前字幕"""
         target_seconds = max(0.3, window_ms / 1000.0)
-        # 这里只做轻提示，后续时间轴会兜底顺延；不要逼模型把一句话压到不自然。
+        context_parts = [
+            "这是连续配音中的一条字幕。只朗读本次传入的当前字幕，不要朗读或复述上下文，不要补充、重复或改写内容。请承接上下文的情绪和节奏，开头与结尾自然衔接，不要每句都像重新开场。",
+        ]
+        normalized_previous = self._voice_context_text(previous_text)
+        normalized_next = self._voice_context_text(next_text)
+        if normalized_previous:
+            speaker_suffix = f"（说话人：{previous_speaker}）" if previous_speaker else ""
+            context_parts.append(f"上一句仅作语气参考：{normalized_previous}{speaker_suffix}")
+        if normalized_next:
+            speaker_suffix = f"（说话人：{next_speaker}）" if next_speaker else ""
+            context_parts.append(f"下一句仅作语气参考：{normalized_next}{speaker_suffix}")
+
+        # 这里只做轻提示，后续时间轴会兜底顺延，不强迫模型把一句话硬压进窗口。
         timing_prompt = (
             f"参考字幕显示时长约 {target_seconds:.1f} 秒。"
             "请自然、完整、有情绪地说完，不要拖长停顿，也不要为了卡时长硬读快。"
         )
         base_style = str(style_prompt or settings.get("style_prompt") or "").strip()
         merged = dict(settings)
-        merged["style_prompt"] = self._join_prompt_parts([base_style, timing_prompt])
+        merged["style_prompt"] = self._join_prompt_parts([base_style, *context_parts, timing_prompt])
         return merged
+
+    def _voice_context_text(self, text: str, max_chars: int = 100) -> str:
+        """压缩上下文提示，避免长字幕把配音指令挤出模型注意范围"""
+        normalized = " ".join(str(text or "").replace("\\N", " ").split())
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[:max_chars].rstrip() + "…"
 
     def _join_prompt_parts(self, parts: list[str]) -> str:
         """合并多段提示词，过滤空值"""
@@ -1620,7 +1732,7 @@ class VoiceEngine:
         raw_value = settings.get("voice_min_gap_ms") if isinstance(settings, dict) else None
         if raw_value is None:
             raw_value = os.environ.get("YTV_VOICE_MIN_GAP_MS")
-        return max(0, min(2000, self._int(raw_value, 300)))
+        return max(0, min(2000, self._int(raw_value, 80)))
 
     def _apply_timed_audio_spacing(self, timed_audio_paths: list[dict[str, Any]], min_gap_ms: int) -> list[dict[str, Any]]:
         """按真实音频尾音顺延后续片段，避免逐条配音互相抢话"""
@@ -1772,7 +1884,7 @@ class VoiceEngine:
         raw_value = settings.get("voice_speed_accept") if isinstance(settings, dict) else None
         if raw_value is None and isinstance(settings, dict):
             raw_value = settings.get("voice_auto_speed_max")
-        return max(1.0, min(1.3, self._float(raw_value, 1.12)))
+        return max(1.0, min(1.3, self._float(raw_value, 1.0)))
 
     def _voice_speed_min(self, settings: dict[str, Any]) -> float:
         """读取自动慢放下限，默认不主动慢放，避免更拖沓"""
@@ -1834,13 +1946,13 @@ class VoiceEngine:
         return planned
 
     def _voice_auto_speed_max(self, settings: dict[str, Any]) -> float:
-        """读取智能配音的自动轻微提速上限，默认最多 1.12 倍"""
+        """读取智能配音的自动轻微提速上限，默认不做后期变速"""
         raw_value = settings.get("voice_auto_speed_max") if isinstance(settings, dict) else None
         if raw_value is None:
             raw_value = settings.get("voice_speed_max") if isinstance(settings, dict) else None
         if raw_value is None:
             raw_value = settings.get("voice_max_speed") if isinstance(settings, dict) else None
-        return max(1.0, min(1.2, self._float(raw_value, 1.12)))
+        return max(1.0, min(1.2, self._float(raw_value, 1.0)))
 
     def _next_original_start_ms(self, items: list[dict[str, Any]], index: int) -> Optional[int]:
         """读取下一条字幕原始开始时间，用于判断是否需要轻微提速避让"""
@@ -2003,6 +2115,62 @@ class VoiceEngine:
         )
         if result.returncode != 0:
             raise RuntimeError(f"标准化配音片段失败: {result.stderr or result.stdout}")
+
+    def _trim_voice_edge_silence(
+        self,
+        input_path: str,
+        temp_dir: str,
+        suffix: str,
+        settings: dict[str, Any],
+    ) -> str:
+        """保守清理接口音频首尾空白，失败时保留原音频，绝不裁掉正文"""
+        if not self._bool_value(settings.get("voice_trim_edge_silence"), True):
+            return input_path
+        if not input_path or not os.path.isfile(input_path):
+            return input_path
+
+        source_duration = self._audio_duration_seconds(input_path)
+        if source_duration is None or source_duration < 0.12:
+            return input_path
+
+        output_path = os.path.join(temp_dir, f"{suffix}_trimmed.wav")
+        # 两次正向检测配合反转，只处理音频边缘；保留少量静音以保护轻声起音和句尾气声。
+        silence_filter = (
+            "silenceremove=start_periods=1:start_duration=0.04:start_threshold=-52dB:"
+            "start_silence=0.04:detection=rms:window=0.02,"
+            "areverse,"
+            "silenceremove=start_periods=1:start_duration=0.08:start_threshold=-52dB:"
+            "start_silence=0.08:detection=rms:window=0.02,"
+            "areverse"
+        )
+        result = subprocess.run(
+            [
+                self._ffmpeg_cmd(),
+                "-y",
+                "-i", input_path,
+                "-filter:a", silence_filter,
+                "-c:a", "pcm_s16le",
+                output_path,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if result.returncode != 0:
+            self._remove_partial_output(output_path)
+            logger.warning("配音首尾空白清理失败，继续使用原音频")
+            return input_path
+
+        trimmed_duration = self._audio_duration_seconds(output_path)
+        if trimmed_duration is None or trimmed_duration < 0.12 or trimmed_duration > source_duration + 0.05:
+            self._remove_partial_output(output_path)
+            logger.warning("配音首尾空白清理结果异常，继续使用原音频")
+            return input_path
+        if source_duration - trimmed_duration >= 0.08:
+            logger.info(f"配音首尾空白已清理: {source_duration:.2f}s -> {trimmed_duration:.2f}s")
+        return output_path
 
     def _concat_file_path(self, path: str) -> str:
         """转义 ffmpeg concat 文件列表里的 Windows 路径"""
